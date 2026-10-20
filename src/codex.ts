@@ -8,7 +8,8 @@ import type { OpenAIAuth } from "./types"
 const CODEX_IMAGES_GENERATIONS_ENDPOINT = "https://chatgpt.com/backend-api/codex/images/generations"
 const CODEX_IMAGES_EDITS_ENDPOINT = "https://chatgpt.com/backend-api/codex/images/edits"
 
-// Same body as Codex. The backend appears to ignore model, quality, and size, and honors only background.
+// Same fixed fields as Codex. They describe the request; the plugin does not verify the model or quality tier
+// that produced the image. The size is requested through the prompt (see appendSizeToPrompt).
 // https://github.com/openai/codex/blob/a4ebc509f4cdff88a8e58e175541970a30a2d385/codex-rs/ext/image-generation/src/tool.rs#L414-L440
 const CODEX_REQUEST_DEFAULTS = { model: "gpt-image-2", quality: "auto", size: "auto" }
 

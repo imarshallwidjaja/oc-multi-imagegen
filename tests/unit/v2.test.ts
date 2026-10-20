@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { z } from "zod"
+import { IMAGEGEN_DESCRIPTION } from "../../src/imagegen"
 import { PNG_BASE64, PNG_BUFFER } from "./fixtures"
 import { CHATGPT_BROWSER_CREDENTIAL, loadV2Tool } from "./hosts"
 
@@ -52,10 +53,14 @@ describe("OpenCode 2 tool registration", () => {
 
     const schema = z.toJSONSchema(tool.input, { target: "draft-2020-12", io: "input" }) as {
       required: string[]
-      properties: Record<string, { enum?: string[] }>
+      properties: Record<string, { enum?: string[]; description?: string }>
     }
 
+    expect(tool.description).toBe(IMAGEGEN_DESCRIPTION)
     expect(Object.keys(schema.properties)).toEqual(["prompt", "out", "size", "images", "background"])
+    for (const property of Object.values(schema.properties)) {
+      expect(property.description).toEqual(expect.stringMatching(/\S/))
+    }
     expect(schema.required).toEqual(["prompt", "out", "size"])
     expect(schema.properties.size.enum).toEqual([
       "1254x1254",

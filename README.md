@@ -76,27 +76,59 @@ Ask your agent, for example:
 
 > Use imagegen to create a mountain lake illustration at images/lake.png, size 1672x941.
 
+To edit or combine existing images, pass them as references:
+
+> Use imagegen with images/lake.png as a reference to add a wooden pier on the left, saved to images/lake-pier.png, size 1672x941.
+
 The tool accepts:
 
-- `prompt`: description of the image to generate or the edit to make.
-- `out`: destination path. Relative paths resolve against the OpenCode project directory; absolute paths are accepted. The content written is PNG.
+- `prompt`: description of the image to generate, or of the edit to make when `images` is set.
+- `out`: destination path. Relative paths resolve against the OpenCode project directory; absolute paths are accepted.
 - `size`: one of the supported sizes below.
-- `images`: optional list of up to five local reference-image paths, resolved like `out`. Their contents are sent to the provider.
+- `images`: optional list of up to five local reference-image paths, resolved like `out`. Each file must be an image.
 - `background`: optional `opaque` or `transparent`; defaults to `opaque`.
 
 Supported sizes are `1254x1254` (1:1), `1536x1024` (3:2), `1024x1536` (2:3), `1448x1086` (4:3), `1086x1448` (3:4), `1672x941` (16:9), and `941x1672` (9:16).
 
-Each call returns one saved image. Requests with references use the backend's image-editing endpoint. The tool reports the saved path and actual PNG dimensions; dimensions can differ from the requested size by a pixel. Resize or crop afterwards when exact dimensions are required.
+Each call sends one request and saves one image. The sections below describe what the plugin does with each argument. Statements marked as recorded come from runs against the backend (recorded OpenCode container runs with real agents, and a direct-request study on one ChatGPT Pro account on 2026-10-20); the backend can change without notice.
 
-The result carries the saved path and whether it was versioned as `out` and `versioned` metadata on both hosts. OpenCode 2 also returns them as structured output (`{ out, versioned }`) next to the text message.
+### Size
 
-Arguments are validated before any permission request or provider call, and unknown arguments such as `quality` are ignored. Stopping the call forwards the cancellation to the provider request, and an image that arrives after cancellation is not saved. A cancelled or failed call is not retried.
+The plugin requests the size only in the prompt: it appends a sentence such as "Generate the image with a width of 1672 pixels and a height of 941 pixels (16:9 aspect ratio)." The request's own `size` field is always `auto`. The returned image is saved without resizing, cropping or padding, and the tool message reports its actual pixel dimensions.
+
+Recorded: the presets have come back at the requested dimensions, except that some runs returned an edge 1px off (for example 1672x940 for 1672x941). In the direct-request study, a sentence asking for 2048x2048 returned 1254x1254, so naming a larger size in the prompt did not produce a larger image. Resize or crop afterwards when exact dimensions are required.
+
+### Reference images
+
+The contents of each reference image are uploaded to the provider. A nonempty `images` list sends the request to the backend's image-editing endpoint, and the backend generates a new image guided by the references and the prompt. The plugin makes no pixel-preservation guarantee: recorded edits changed areas outside the region the prompt asked to change. Use a local image editor when untouched areas must stay identical.
+
+### Background
+
+`background` is passed to the backend as requested, with `opaque` as the default. The plugin does not check or modify the alpha channel of the result.
+
+Recorded: opaque requests returned RGB PNGs and transparent requests returned RGBA PNGs with real transparency. The alpha was soft rather than a hard mask, and in the direct-request study most subject pixels sat at alpha 252 to 253 instead of fully opaque. Post-process the alpha channel when a hard cut-out or a fully opaque subject is needed.
+
+### Output file
+
+The file always contains the PNG bytes the backend returned. The extension in `out` does not select or convert the format: saving to `photo.jpg` writes PNG data under that name.
 
 If the destination exists, the plugin chooses a `-v2`, `-v3`, or later suffix, up to `-v999`. This is best-effort collision avoidance, not an atomic guarantee: concurrent calls targeting the same path can overwrite each other. Use distinct output paths for parallel calls.
 
+The result carries the saved path and whether it was versioned as `out` and `versioned` metadata on both hosts. OpenCode 2 also returns them as structured output (`{ out, versioned }`) next to the text message.
+
+### Controls the tool does not expose
+
+There are no model, quality, image-count or output-format arguments. Every request names `gpt-image-2` as the model, with `quality: auto` and `size: auto`. These are the fields the plugin sends, not settings the backend is known to apply. Recorded in the direct-request study: model names that do not exist were accepted, no observed response metadata identified the model that ran, and requests for `high` or `max` quality returned low or medium quality.
+
+The plugin's validation removes unknown arguments such as `quality`, so they never reach the provider. A host can also drop or reject them before the call.
+
+### Validation, cancellation and failures
+
+Arguments are validated before any permission request or provider call. Stopping the call forwards the cancellation to the provider request, and an image that arrives after cancellation is not saved. A cancelled or failed call is not retried.
+
 ## Current limits
 
-The plugin relies on the ChatGPT Codex backend and its availability, account permissions, and usage limits. It sends `gpt-image-2` as the model identifier, with automatic quality and backend size settings; the requested dimensions are added to the prompt. Provider identifiers in the implementation describe the current integration, not a multi-provider interface.
+The plugin relies on the ChatGPT Codex backend and its availability, account permissions, and usage limits. The fixed request fields and recorded backend behavior are described under "Use". Provider identifiers in the implementation describe the current integration, not a multi-provider interface.
 
 In OpenCode 2, relative `out` and `images` paths resolve against the directory of the session that made the call, which can differ from the directory the plugin loaded in.
 

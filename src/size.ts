@@ -1,4 +1,5 @@
-// Supported aspect ratios expressed as pixel sizes; the backend may return dimensions within 1px.
+// Accepted size presets and their aspect ratios. The size is requested only through the prompt sentence below,
+// so returned dimensions are not enforced; recorded runs have returned an edge 1px off.
 export const IMAGE_SIZES = {
   "1254x1254": "1:1",
   "1536x1024": "3:2",

@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import type { ToolContext } from "@opencode-ai/plugin"
+import { IMAGEGEN_DESCRIPTION } from "../../src/imagegen"
 import plugin from "../../src/index"
 import { PNG_BASE64, PNG_BUFFER } from "./fixtures"
 import { v1ToolContext } from "./hosts"
@@ -56,6 +57,16 @@ describe("OpenCode 1 adapter", () => {
 
     expect(Object.keys(hooks.tool ?? {})).toEqual(["imagegen"])
     expect(Object.keys((await loadTool()).args)).toEqual(["prompt", "out", "size", "images", "background"])
+  })
+
+  test("exposes the shared tool description and a description for every argument", async () => {
+    const tool = await loadTool()
+
+    expect(tool.description).toBe(IMAGEGEN_DESCRIPTION)
+    for (const arg of Object.values(tool.args)) {
+      // The SDK types args with its own Zod core type, which does not declare the description getter.
+      expect((arg as { description?: string }).description).toEqual(expect.stringMatching(/\S/))
+    }
   })
 
   test("returns the saved path as output text and { out, versioned } metadata", async () => {

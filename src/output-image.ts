@@ -34,7 +34,7 @@ function readPngSize(png: Buffer): PixelSize {
   return { width: png.readUInt32BE(16), height: png.readUInt32BE(20) }
 }
 
-// The pixel size is reported because the backend can return an edge 1px off from the requested size.
+// The pixel size is reported because nothing enforces the requested size; the bytes are saved without resizing.
 export function buildSavedMessage(savedPath: string, requestedPath: string, size: PixelSize): string {
   const versionNote =
     savedPath !== requestedPath

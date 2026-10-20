@@ -8,8 +8,9 @@ export const IMAGEGEN_TOOL = "imagegen"
 
 export const IMAGEGEN_DESCRIPTION = [
   "Generate or edit one raster image through the ChatGPT Codex image backend.",
-  "Requires OpenCode ChatGPT OAuth authentication. Optional reference images are sent to the provider.",
-  "Returns the saved PNG's absolute path and actual pixel dimensions.",
+  "Requires OpenCode ChatGPT OAuth authentication. The prompt and any reference images are sent to the provider.",
+  "Returns the saved PNG's absolute path and actual pixel dimensions; size is a request, so check the dimensions when they matter.",
+  "The tool has no model, quality, image-count or output-format controls, and other arguments are not sent to the provider.",
   "Existing output paths are versioned on a best-effort basis; concurrent writes are not protected.",
 ].join(" ")
 
