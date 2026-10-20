@@ -1,6 +1,7 @@
 import type { Plugin } from "@opencode/plugin"
 import { generateImage, IMAGEGEN_DESCRIPTION, IMAGEGEN_TOOL } from "./imagegen"
 import { argsSchema, resultSchema } from "./schema"
+import { loadPackagedSkill } from "./skill"
 import type { OpenAIAuth } from "./types"
 
 // The OpenAI integration methods whose OAuth credential the Codex images endpoint accepts.
@@ -38,9 +39,26 @@ async function resolveChatGptAuth(integration: Plugin.Context["integration"]): P
   }
 }
 
+type SkillEditor = Parameters<Parameters<Plugin.Context["skill"]["transform"]>[0]>[0]
+
 // OpenCode 2 entry point. The tool is called directly (not through Code Mode, no namespace), so it is
 // available to agents that allow imagegen without also allowing the execute tool.
 export const setup: Plugin.Plugin["setup"] = async (ctx) => {
+  const skill = await loadPackagedSkill()
+  // The host replays this callback on every skill reload, so it must not add a second copy, and an existing
+  // skill with the same id is left alone.
+  await ctx.skill.transform((editor: SkillEditor) => {
+    if (editor.get(skill.name)) return
+    // The host brands ids and absolute paths; the loader returns plain strings.
+    editor.add({
+      id: skill.name,
+      name: skill.name,
+      description: skill.description,
+      autoinvoke: true,
+      path: skill.path,
+      content: skill.content,
+    } as Parameters<SkillEditor["add"]>[0])
+  })
   await ctx.tool.transform((editor) => {
     editor.add({
       name: IMAGEGEN_TOOL,

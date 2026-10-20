@@ -15,6 +15,7 @@
   "files": [
     "dist",
     "server.js",
+    "skills",
     "README.md",
     "LICENSE"
   ],

@@ -4,6 +4,7 @@ import os from "node:os"
 import path from "node:path"
 import { z } from "zod"
 import { IMAGEGEN_DESCRIPTION } from "../../src/imagegen"
+import { loadPackagedSkill, SKILL_FILE } from "../../src/skill"
 import { PNG_BASE64, PNG_BUFFER } from "./fixtures"
 import { CHATGPT_BROWSER_CREDENTIAL, loadV2Tool } from "./hosts"
 
@@ -102,6 +103,51 @@ describe("OpenCode 2 tool registration", () => {
   })
 })
 
+describe("OpenCode 2 skill registration", () => {
+  test("registers the packaged skill as an auto-invoked skill with its file path and body", async () => {
+    const { skills } = await loadV2Tool({ directory: dir })
+    const packaged = await loadPackagedSkill()
+
+    expect([...skills.keys()]).toEqual(["oc-multi-imagegen"])
+    expect(skills.get("oc-multi-imagegen")).toEqual({
+      id: "oc-multi-imagegen",
+      name: "oc-multi-imagegen",
+      description: packaged.description,
+      autoinvoke: true,
+      path: SKILL_FILE,
+      content: packaged.content,
+    })
+  })
+
+  test("replaying the host's skill reload keeps one copy", async () => {
+    const { replaySkills, skills } = await loadV2Tool({ directory: dir })
+    const first = skills.get("oc-multi-imagegen")
+
+    replaySkills()
+    replaySkills()
+
+    expect(skills.size).toBe(1)
+    expect(skills.get("oc-multi-imagegen")).toBe(first)
+  })
+
+  test("leaves a skill with the same id that the host already holds", async () => {
+    const existing = { id: "oc-multi-imagegen", name: "oc-multi-imagegen", content: "the user's own copy" }
+    const { skills } = await loadV2Tool({ directory: dir, existingSkills: { "oc-multi-imagegen": existing } })
+
+    expect(skills.get("oc-multi-imagegen")).toBe(existing)
+  })
+
+  test("registers the tool whether or not the host delivers skills", async () => {
+    stubFetch()
+    const { run, skills, tool } = await loadV2Tool({ directory: dir, skills: false })
+
+    await run(args)
+
+    expect(skills.size).toBe(0)
+    expect(tool.name).toBe("imagegen")
+  })
+})
+
 describe("OpenCode 2 execution", () => {
   test("returns structured output, the human message as content, and { out, versioned } metadata", async () => {
     stubFetch()
@@ -138,14 +184,16 @@ describe("OpenCode 2 execution", () => {
     ])
   })
 
-  test("rethrows the host's denial before resolving credentials or reading the session", async () => {
+  test("rethrows the host's denial before resolving credentials or reading the session, and the skill stays registered", async () => {
     const fetchMock = stubFetch()
-    const { calls, denyPermission, run } = await loadV2Tool({ directory: dir })
+    const { calls, denyPermission, run, skills } = await loadV2Tool({ directory: dir })
     const denial = new Error("denied by the host")
     denyPermission(denial)
 
     await expect(run(args)).rejects.toBe(denial)
 
+    expect(calls.assert.map((request) => request.action)).toEqual(["imagegen"])
+    expect(skills.has("oc-multi-imagegen")).toBe(true)
     expect(calls.active).toEqual([])
     expect(calls.resolve).toEqual([])
     expect(calls.sessionGet).toEqual([])

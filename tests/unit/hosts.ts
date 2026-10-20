@@ -35,6 +35,11 @@ export type RegisteredTool = {
   }>
 }
 
+type SkillEditor = {
+  get: (id: string) => Record<string, unknown> | undefined
+  add: (skill: Record<string, unknown>) => void
+}
+
 export type V2Options = {
   // Directory returned for any session; override per call with sessionDirectories.
   directory?: string
@@ -43,6 +48,10 @@ export type V2Options = {
   credential?: unknown
   activeError?: Error
   resolveError?: Error
+  // Skills the host already holds, keyed by id, such as one the user installed.
+  existingSkills?: Record<string, unknown>
+  // False models a host that never delivers the skill transform, for example because skills are unavailable.
+  skills?: boolean
 }
 
 export const CHATGPT_BROWSER_CREDENTIAL = {
@@ -61,6 +70,16 @@ export function createV2Context(options: V2Options = {}) {
     resolve: [] as unknown[],
   }
   const registered: RegisteredTool[] = []
+  const skills = new Map<string, Record<string, unknown>>(Object.entries(options.existingSkills ?? {}) as never)
+  const skillCallbacks: Array<(editor: SkillEditor) => void> = []
+  // Like the host, adding an id that is already held is an error.
+  const skillEditor: SkillEditor = {
+    get: (id) => skills.get(id),
+    add: (skill) => {
+      if (skills.has(skill.id as string)) throw new Error(`Skill ${skill.id} already exists`)
+      skills.set(skill.id as string, skill)
+    },
+  }
   let denial: Error | undefined
   const context = {
     // A directory the adapter must not use: sessions carry their own location.
@@ -68,6 +87,13 @@ export function createV2Context(options: V2Options = {}) {
     tool: {
       transform: async (callback: (editor: { add: (tool: RegisteredTool) => void }) => void) => {
         callback({ add: (tool) => registered.push(tool) })
+        return { dispose: async () => {} }
+      },
+    },
+    skill: {
+      transform: async (callback: (editor: SkillEditor) => void) => {
+        skillCallbacks.push(callback)
+        if (options.skills !== false) callback(skillEditor)
         return { dispose: async () => {} }
       },
     },
@@ -102,6 +128,11 @@ export function createV2Context(options: V2Options = {}) {
     context: context as unknown as Plugin.Context,
     calls,
     registered,
+    skills,
+    // Runs every skill callback again against the skills the host already holds.
+    replaySkills: () => {
+      for (const callback of skillCallbacks) callback(skillEditor)
+    },
     denyPermission: (error: Error) => {
       denial = error
     },

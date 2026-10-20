@@ -4,7 +4,11 @@ import { IMAGE_SIZES, type ImageSize, SIZE_CHOICES } from "./size"
 // The single definition of the imagegen arguments. OpenCode 1 takes the raw shape, OpenCode 2 takes the
 // object schema, and execution parses raw input with the same schema.
 export const argsShape = {
-  prompt: z.string().describe("Description of the image to generate, or of the edit to make when images are given."),
+  prompt: z
+    .string()
+    .describe(
+      "Description of the image to generate, or of the edit to make when images are given. Put every visible string in quotes, and name each reference image's role when images are given.",
+    ),
   out: z
     .string()
     .describe(
@@ -18,7 +22,7 @@ export const argsShape = {
           : `Unsupported size "${issue.input}". Use one of: ${SIZE_CHOICES}.`,
     })
     .describe(
-      "Requested width x height preset. The tool asks for it in the prompt and does not resize the result; the result reports the actual pixel dimensions.",
+      "Requested width x height preset; choose it by aspect ratio. The tool asks for it in the prompt and does not resize the result; the result reports the actual pixel dimensions.",
     ),
   // Same limit as Codex (MAX_EDIT_IMAGES).
   // https://github.com/openai/codex/blob/a4ebc509f4cdff88a8e58e175541970a30a2d385/codex-rs/ext/image-generation/src/tool.rs#L59
@@ -27,13 +31,13 @@ export const argsShape = {
     .max(5)
     .nullish()
     .describe(
-      "Optional local reference image paths, up to 5, relative to the project directory unless absolute. Their contents are uploaded to the provider, and a nonempty list makes the call a generative edit: areas the prompt does not mention can still change.",
+      "Optional local reference image paths, up to 5, relative to the project directory unless absolute; they are sent in order, so call them Image 1, Image 2 in the prompt. Their contents are uploaded to the provider, and a nonempty list makes the call a generative edit: areas the prompt does not mention can still change, so pixel-exact edits belong in an image editor.",
     ),
   background: z
     .enum(["opaque", "transparent"])
     .nullish()
     .describe(
-      "Optional background requested from the backend; defaults to opaque. The tool does not check or clean up the returned alpha channel.",
+      "Optional background requested from the backend; defaults to opaque. Use transparent for a cut-out instead of asking for one in the prompt. The returned alpha can be soft, and the tool does not check or clean it up.",
     ),
 }
 

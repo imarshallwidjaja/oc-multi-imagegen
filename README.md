@@ -1,6 +1,8 @@
 # oc-multi-imagegen
 
-Image generation and editing for OpenCode agents, exposed through the `imagegen` tool. One package loads in OpenCode 1 and OpenCode 2. It targets OpenCode 1.18.29 and newer and OpenCode 2.0.32 and newer; those versions are the support floors. Container runs with real agents have covered OpenCode 1.19.3 and 2.0.32 (images generated). OpenCode 1.18.29 was checked for plugin load only, and versions between the floors and those runs, or newer, are untested.
+Image generation and editing for OpenCode agents, exposed through the `imagegen` tool. One package loads in OpenCode 1 and OpenCode 2. It targets OpenCode 1.18.29 and newer and OpenCode 2.0.32 and newer; those versions are the support floors. Container runs with real agents have covered OpenCode 1.19.3 and 2.0.32 (skill loaded, images generated). OpenCode 1.18.29 was checked for plugin load and skill registration only, and versions between the floors and those runs, or newer, are untested.
+
+The package also ships one skill, `oc-multi-imagegen`, with the technique for image work: choosing raster or code, labelling reference images, correcting a result, keeping related images consistent, transparency, and checking what came back. The `imagegen` description tells agents to load it before image work when it is available and permitted, and the tool works without it.
 
 The current implementation uses ChatGPT OAuth and the Codex image backend. Provider-agnostic agentic image generation is the intended direction; additional providers, API-key authentication, and provider selection are not implemented.
 
@@ -33,6 +35,8 @@ OpenCode 2 reads the `plugins` list:
 
 Replace the example path with your checkout path. Rebuild after changing source files and restart OpenCode to load the new build. This setup uses the local package; it does not assume a registry release exists. Both hosts load the same build: OpenCode 1 calls the default export's `server()`, OpenCode 2 calls its `setup()`, and the package root also exposes `server.js` (the `./server` export) because OpenCode 2 looks for `server` before the package's `main`. The package imports neither OpenCode SDK at runtime.
 
+Both hosts find the skill without skills configuration. OpenCode 1's `config` hook adds the package's absolute `skills/` directory to `skills.paths` once, and keeps your own `paths` and `urls`. OpenCode 2 registers the skill from the plugin and leaves an existing skill with the same id alone. Neither host gets a copy in a user directory. If a skill named `oc-multi-imagegen` also comes from elsewhere, OpenCode 1 keeps one of the two without a defined order. A package whose `skills/` file is missing or malformed fails when the plugin loads, with a message that names the file.
+
 ## Authentication
 
 Authenticate OpenCode with ChatGPT before generating, and keep credentials outside this repository. An OpenAI API key is not sufficient on either host.
@@ -47,40 +51,47 @@ OpenCode 2 asks the host for the active `openai` connection on every call, so a 
 
 ## Permissions
 
-Both hosts ask for the `imagegen` permission once per call, before the plugin reads credentials or reference images or contacts the provider, so a deny rule stops the call without spending quota. A rule set that denies everything and allows only this tool runs without prompts. In OpenCode 1:
+Both hosts ask for the `imagegen` permission once per call, before the plugin reads credentials or reference images or contacts the provider, so a deny rule stops the call without spending quota. A rule set that denies everything and allows this tool and the skill runs without prompts. In OpenCode 1:
 
 ```json
 {
-  "permission": { "*": "deny", "imagegen": "allow" }
+  "permission": {
+    "*": "deny",
+    "imagegen": "allow",
+    "skill": { "*": "deny", "oc-multi-imagegen": "allow" }
+  }
 }
 ```
 
-In OpenCode 2, the same rules go in `permissions`, with the broad rule first and the narrower one last:
+In OpenCode 2, the same rules go in `permissions`, with the broad rule first and the narrower ones last:
 
 ```jsonc
 {
   "permissions": [
     { "action": "*", "resource": "*", "effect": "deny" },
-    { "action": "imagegen", "resource": "*", "effect": "allow" }
+    { "action": "imagegen", "resource": "*", "effect": "allow" },
+    { "action": "skill", "resource": "oc-multi-imagegen", "effect": "allow" }
   ]
 }
 ```
 
-The permission covers the whole operation. It does not contain file access: `out` and `images` accept absolute paths, including paths outside the project directory.
+The `skill` rule is optional. The skill is guidance, and the plugin never asks for the `skill` permission: with `imagegen` allowed and `skill` denied, the agent still generates images, using only the guidance in the tool description. An allowed `skill` rule with `imagegen` denied lets the agent load the guidance but not generate.
+
+The permission covers the whole operation. It does not contain file access: `out` and `images` accept absolute paths, including paths outside the project directory. An agent that should look at the result needs a `read` rule too; scope it to the files you mean (for example `*.png`), because `read` opens whatever its rule matches.
 
 In OpenCode 2, `imagegen` is a direct tool, so allowing it does not require allowing the `execute` tool.
 
 ## Use
 
-Ask your agent, for example:
+Ask your agent for an image; naming the tool is not required. In the recorded container runs (one model, one account), requests that named neither `imagegen` nor the skill made the agent load the skill and then call `imagegen`. For example:
 
-> Use imagegen to create a mountain lake illustration at images/lake.png, size 1672x941.
+> Create a wide illustration of a mountain lake at dawn and save it as images/lake.png.
 
-To edit or combine existing images, pass them as references:
+To edit or combine existing images, name the files in the request:
 
-> Use imagegen with images/lake.png as a reference to add a wooden pier on the left, saved to images/lake-pier.png, size 1672x941.
+> Add a wooden pier on the left of images/lake.png and save the result as images/lake-pier.png.
 
-The tool accepts:
+The agent chooses any size you leave out and passes existing files as `images`. The tool accepts:
 
 - `prompt`: description of the image to generate, or of the edit to make when `images` is set.
 - `out`: destination path. Relative paths resolve against the OpenCode project directory; absolute paths are accepted.
@@ -100,7 +111,7 @@ Recorded: the presets have come back at the requested dimensions, except that so
 
 ### Reference images
 
-The contents of each reference image are uploaded to the provider. A nonempty `images` list sends the request to the backend's image-editing endpoint, and the backend generates a new image guided by the references and the prompt. The plugin makes no pixel-preservation guarantee: recorded edits changed areas outside the region the prompt asked to change. Use a local image editor when untouched areas must stay identical.
+Name each reference's role in the prompt ("Image 1: style; Image 2: layout"); the references are sent in the order given. The contents of each reference image are uploaded to the provider. A nonempty `images` list sends the request to the backend's image-editing endpoint, and the backend generates a new image guided by the references and the prompt. The plugin makes no pixel-preservation guarantee: recorded edits changed areas outside the region the prompt asked to change. Use a local image editor when untouched areas must stay identical.
 
 ### Background
 
@@ -144,7 +155,7 @@ bun run build
 npm pack --dry-run
 ```
 
-`test` runs only the mocked unit suite. `check` checks formatting and lint without rewriting files. The package includes the built entry point, `server.js`, README, license, and package metadata; local source references under `.tmp` are ignored.
+`test` runs only the mocked unit suite. It includes a check that packs the package, bundles the entry point into the extracted copy, and resolves the skill from there; it shows the skill ships and is found relative to the module, and it does not exercise the exact built `dist/index.js` or its dependencies, which the container runbook covers. `check` checks formatting and lint without rewriting files. The package includes the built entry point, `server.js`, the `skills/` directory, README, license, and package metadata; local source references under `.tmp` are ignored.
 
 The optional `bun run test:e2e` suite launches OpenCode and makes real authenticated image-generation calls. Run it only when you intend to use account quota. Set `OPENCODE_MODEL` to select the agent model, or leave it unset to use OpenCode's default. Live generation is separate from unit checks and CI.
 

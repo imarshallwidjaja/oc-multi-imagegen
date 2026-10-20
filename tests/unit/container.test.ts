@@ -16,11 +16,13 @@ import {
 import os from "node:os"
 import path from "node:path"
 
-// The container runbook's two scripts, run as subprocesses against synthetic credentials and a fake `docker`.
-// Nothing here needs Docker, OpenCode, a real credential or the network.
+// The container runbook's scripts, run as subprocesses against synthetic credentials, a fake `docker` and, for the
+// in-container skill probe, a fake `opencode` and `wget`. Nothing here needs Docker, OpenCode, a real credential or
+// the network.
 
 const repoRoot = path.resolve(import.meta.dir, "../..")
 const helper = path.join(repoRoot, "scripts/opencode-container.sh")
+const probe = path.join(repoRoot, "scripts/container-skill-probe.sh")
 const seeder = path.join(repoRoot, "scripts/seed-container-auth.ts")
 
 const ACCESS = "SYNTHETIC-HOST-ACCESS-TOKEN"
@@ -546,6 +548,19 @@ describe("opencode-container.sh cases", () => {
     ])
   })
 
+  test("asks for the images in plain terms that name neither the tool nor the skill", async () => {
+    const { c, env } = await prepared()
+
+    await c.run(["cases", "v1"], env)
+
+    const prompts = c
+      .calls()
+      .filter((line) => line.startsWith("run "))
+      .map((line) => line.split("--model provider/model-under-test ")[1])
+    expect(prompts).toHaveLength(4)
+    for (const prompt of prompts) expect(prompt).not.toMatch(/imagegen|skill|image generation/i)
+  })
+
   test("stops at the first failed case", async () => {
     const { c, env } = await prepared()
 
@@ -596,5 +611,286 @@ describe("opencode-container.sh cases", () => {
 
     expect(result.code).not.toBe(0)
     expect(c.calls()).toEqual([])
+  })
+})
+
+describe("opencode-container.sh host configuration", () => {
+  const configOf = (sandbox: string, host: string) =>
+    JSON.parse(readFileSync(path.join(sandbox, host, "config/opencode/opencode.json"), "utf-8"))
+
+  test("the default permits imagegen, the plugin's skill and PNG reads on both hosts, and nothing else", async () => {
+    const c = container()
+    const sandbox = await c.ready("v1", "v2")
+
+    expect(configOf(sandbox, "v1").permission).toEqual({
+      "*": "deny",
+      imagegen: "allow",
+      skill: { "*": "deny", "oc-multi-imagegen": "allow" },
+      read: { "*": "deny", "*.png": "allow" },
+    })
+    expect(configOf(sandbox, "v2").permissions).toEqual([
+      { action: "*", resource: "*", effect: "deny" },
+      { action: "imagegen", resource: "*", effect: "allow" },
+      { action: "skill", resource: "oc-multi-imagegen", effect: "allow" },
+      { action: "read", resource: "*.png", effect: "allow" },
+    ])
+  })
+
+  test("tool-only permits imagegen and leaves the skill denied, and ask permits nothing without a prompt", async () => {
+    const c = container()
+    const sandbox = await c.ready()
+
+    for (const [mode, effect] of [
+      ["tool-only", "allow"],
+      ["ask", "ask"],
+    ]) {
+      for (const host of ["v1", "v2"]) {
+        expect((await c.run(["prepare", host, mode], { OC_SANDBOX: sandbox })).code).toBe(0)
+      }
+      expect(configOf(sandbox, "v1").permission).toEqual({ "*": "deny", imagegen: effect })
+      expect(configOf(sandbox, "v2").permissions).toEqual([
+        { action: "*", resource: "*", effect: "deny" },
+        { action: "imagegen", resource: "*", effect: effect },
+      ])
+    }
+    expect((await c.run(["prepare", "v1", "everything"], { OC_SANDBOX: sandbox })).code).toBe(2)
+  })
+
+  test("skills lists what a host registered, and lifecycle needs a host that reloads plugins", async () => {
+    const c = container()
+    const sandbox = await c.ready("v1", "v2")
+
+    expect((await c.run(["skills", "v1"], { OC_SANDBOX: sandbox })).code).toBe(0)
+    expect((await c.run(["skills", "v2"], { OC_SANDBOX: sandbox })).code).toBe(0)
+    expect((await c.run(["lifecycle", "v1"], { OC_SANDBOX: sandbox })).code).toBe(2)
+    expect((await c.run(["lifecycle", "v2"], { OC_SANDBOX: sandbox })).code).toBe(0)
+
+    const runs = c.calls().filter((line) => line.startsWith("run "))
+    expect(runs).toHaveLength(3)
+    expect(runs[0]).toContain("debug skill")
+    // The v2 check runs the probe, which starts a private server inside the container; the lifecycle check edits
+    // the package it mounts. The probe's behavior is tested below.
+    for (const [run, mode] of [
+      [runs[1], "skills"],
+      [runs[2], "lifecycle"],
+    ]) {
+      expect(run).toContain("OPENCODE_SERVER_PASSWORD=probe")
+      expect(run).toContain(`${probe}:/probe.sh:ro`)
+      expect(run).toEndWith(` /probe.sh ${mode}`)
+    }
+    expect(runs[1]).toContain(":/pluginpkg:ro")
+    expect(runs[2]).toContain(":/pluginpkg ")
+    expect(runs[2]).not.toContain(":/pluginpkg:ro")
+  })
+
+  test("skills and lifecycle fail when the probe in the container fails", async () => {
+    const c = container()
+    const sandbox = await c.ready("v2")
+
+    for (const mode of ["skills", "lifecycle"]) {
+      const result = await c.run([mode, "v2"], { OC_SANDBOX: sandbox, FAKE_DOCKER_MODE: "fail", FAKE_DOCKER_EXIT: "1" })
+      expect({ mode, code: result.code }).toEqual({ mode, code: 1 })
+    }
+  })
+})
+
+// scripts/container-skill-probe.sh runs `opencode serve` and `wget` inside the OpenCode 2 container. Here both are
+// fakes: `opencode` only stays alive and logs, and `wget` answers /api/skill from the state the probe edits (the
+// package's SKILL.md and the config's plugin list) unless FAKE_SKILLS picks a failure.
+const FAKE_OPENCODE = `#!/bin/sh
+echo "fake opencode serve started"
+echo $$ >"$PROBE_TMP/server.pid"
+exec /bin/sleep 600
+`
+
+const FAKE_WGET = `#!/bin/sh
+for last; do :; done
+own() {
+  printf '{"id":"oc-multi-imagegen","name":"oc-multi-imagegen","path":"/pluginpkg/skills/oc-multi-imagegen/SKILL.md","content":"%s"}' "$1"
+}
+builtin() { printf '{"id":"opencode","name":"OpenCode","path":"/builtin/opencode.md","content":"%s"}' "$1"; }
+case $last in
+  */api/location) echo '{"directory":"/work"}'; exit 0 ;;
+esac
+content=$(tr '\\n' ' ' <"$PROBE_PKG/skills/oc-multi-imagegen/SKILL.md")
+case \${FAKE_SKILLS:-live} in
+  down) echo "wget: server returned error: HTTP/1.1 500 Internal Server Error" >&2; exit 1 ;;
+  truncated) printf '{"location":{"directory":"/work"},"data":[{"id":"oc-multi-imag'; exit 0 ;;
+  # An exit-0 reply cut off after a complete entry, once the plugin has left the config.
+  cut-after-entry)
+    if grep -q '"/pluginpkg"' "$PROBE_CONFIG"; then
+      printf '{"location":{"directory":"/work"},"data":[%s,%s]}' "$(builtin 'guide')" "$(own "$content")"
+    else
+      printf '{"location":{"directory":"/work"},"data":[%s' "$(builtin 'guide')"
+    fi
+    exit 0 ;;
+  html) echo '<html>502 Bad Gateway for oc-multi-imagegen LIFECYCLE-MARKER</html>'; exit 0 ;;
+  duplicate) printf '{"location":{},"data":[%s,%s]}' "$(own "$content")" "$(own "$content")"; exit 0 ;;
+  # Another skill carries the marker while this skill's entry never changes.
+  foreign-marker) printf '{"location":{},"data":[%s,%s]}' "$(builtin 'LIFECYCLE-MARKER')" "$(own 'unchanged')"; exit 0 ;;
+  # The plugin entry stays registered after the plugin leaves the config.
+  stale) printf '{"location":{},"data":[%s,%s]}' "$(builtin 'guide')" "$(own "$content")"; exit 0 ;;
+esac
+if grep -q '"/pluginpkg"' "$PROBE_CONFIG"; then
+  printf '{"location":{"directory":"/work"},"data":[%s,%s]}' "$(builtin 'guide')" "$(own "$content")"
+else
+  printf '{"location":{"directory":"/work"},"data":[%s]}' "$(builtin 'guide')"
+fi
+`
+
+function skillProbe() {
+  const root = temporaryDirectory()
+  const bin = path.join(root, "bin")
+  mkdirSync(bin)
+  writeFileSync(path.join(bin, "opencode"), FAKE_OPENCODE, { mode: 0o755 })
+  writeFileSync(path.join(bin, "wget"), FAKE_WGET, { mode: 0o755 })
+  writeFileSync(path.join(bin, "sleep"), "#!/bin/sh\nexec /bin/sleep 0.01\n", { mode: 0o755 })
+  const pkg = path.join(root, "pkg")
+  mkdirSync(path.join(pkg, "skills/oc-multi-imagegen"), { recursive: true })
+  writeFileSync(path.join(pkg, "skills/oc-multi-imagegen/SKILL.md"), "# Image generation\nGuidance.\n")
+  writeFileSync(path.join(pkg, "server.js"), "export default {}\n")
+  const config = path.join(root, "opencode.json")
+  const tmp = privateDirectory(root, "tmp")
+  const configText = `{\n  "plugins": ["/pluginpkg"],\n  "update": "disable"\n}\n`
+  writeFileSync(config, configText)
+  const env = { PATH: `${bin}:${process.env.PATH}`, PROBE_PKG: pkg, PROBE_CONFIG: config, PROBE_TMP: tmp }
+  return {
+    pkg,
+    config,
+    configText,
+    run: (mode: string, extra: Record<string, string> = {}) => exec(["sh", probe, mode], { ...env, ...extra }),
+    skillText: () => readFileSync(path.join(pkg, "skills/oc-multi-imagegen/SKILL.md"), "utf-8"),
+    serverStopped: () => {
+      const pid = Number(readFileSync(path.join(tmp, "server.pid"), "utf-8"))
+      try {
+        process.kill(pid, 0)
+        return false
+      } catch {
+        return true
+      }
+    },
+  }
+}
+
+describe("container-skill-probe.sh", () => {
+  test("lifecycle reports each state it read from a successful reply, then stops its server", async () => {
+    const p = skillProbe()
+
+    const result = await p.run("lifecycle")
+
+    expect(result.stdout).toBe("loaded: entries=1 marker=0\nupdated: entries=1 marker=1\nremoved: entries=0\n")
+    expect(result.code).toBe(0)
+    expect(p.skillText()).toContain("LIFECYCLE-MARKER")
+    expect(readFileSync(p.config, "utf-8")).toBe(p.configText.replace('["/pluginpkg"]', "[]"))
+    await until(p.serverStopped)
+  })
+
+  test("skills prints the list once the plugin's skill is in it", async () => {
+    const p = skillProbe()
+
+    const result = await p.run("skills")
+
+    expect(result.code).toBe(0)
+    expect(result.stdout).toStartWith('{"location":')
+    expect(result.stdout.match(/\{"id":"oc-multi-imagegen"/g)).toHaveLength(1)
+  })
+
+  test("an unknown mode is a usage error", async () => {
+    const result = await skillProbe().run("everything")
+
+    expect(result.code).toBe(2)
+    expect(result.stderr).toContain("usage")
+  })
+
+  // A failed request is not an empty list, and a state that never arrives is not a result: the probe exits 1,
+  // reports only the states it did reach, and prints the last reply and the server's log.
+  const failures: Array<{
+    label: string
+    mode: string
+    skills: string
+    noPlugin?: true
+    reported: string
+    seen: string
+  }> = [
+    {
+      label: "a listing request that fails",
+      mode: "skills",
+      skills: "down",
+      reported: "",
+      seen: "request failed: wget: server returned error",
+    },
+    {
+      label: "a truncated listing",
+      mode: "skills",
+      skills: "truncated",
+      reported: "",
+      seen: "reply is not a skill list",
+    },
+    {
+      label: "a listing cut off after a complete entry, once the plugin has left the config",
+      mode: "lifecycle",
+      skills: "cut-after-entry",
+      reported: "loaded: entries=1 marker=0\nupdated: entries=1 marker=1\n",
+      seen: "reply is not a skill list",
+    },
+    {
+      label: "an error page that names the skill",
+      mode: "skills",
+      skills: "html",
+      reported: "",
+      seen: "reply is not a skill list",
+    },
+    {
+      label: "only built-in skills",
+      mode: "skills",
+      skills: "live",
+      noPlugin: true,
+      reported: "",
+      seen: "saw entries=0 marker=0, wanted entries=1",
+    },
+    { label: "the skill listed twice", mode: "skills", skills: "duplicate", reported: "", seen: "saw entries=2" },
+    {
+      label: "a listing request that fails before the plugin loads",
+      mode: "lifecycle",
+      skills: "down",
+      reported: "",
+      seen: "request failed",
+    },
+    {
+      label: "only built-in skills at the start",
+      mode: "lifecycle",
+      skills: "live",
+      noPlugin: true,
+      reported: "",
+      seen: "saw entries=0 marker=0, wanted entries=1",
+    },
+    {
+      label: "a marker that only another skill carries",
+      mode: "lifecycle",
+      skills: "foreign-marker",
+      reported: "loaded: entries=1 marker=0\n",
+      seen: "saw entries=1 marker=0, wanted entries=1 marker=1",
+    },
+    {
+      label: "an entry that stays registered after the plugin leaves the config",
+      mode: "lifecycle",
+      skills: "stale",
+      reported: "loaded: entries=1 marker=0\nupdated: entries=1 marker=1\n",
+      seen: "saw entries=1 marker=1, wanted entries=0 marker=0",
+    },
+  ]
+  test.each(failures)("fails on $label, with the last reply and the server log", async (failure) => {
+    const p = skillProbe()
+    if (failure.noPlugin) writeFileSync(p.config, p.configText.replace('["/pluginpkg"]', "[]"))
+
+    const result = await p.run(failure.mode, { FAKE_SKILLS: failure.skills })
+
+    expect(result.code).toBe(1)
+    expect(result.stdout).toBe(failure.reported)
+    expect(result.stderr).toContain("Probe failed: timed out waiting for")
+    expect(result.stderr).toContain(failure.seen)
+    expect(result.stderr).toContain("Last reply")
+    expect(result.stderr).toContain("fake opencode serve started")
+    await until(p.serverStopped)
   })
 })

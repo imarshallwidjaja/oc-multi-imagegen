@@ -2,6 +2,7 @@ import type { Hooks, Plugin, ToolContext, ToolDefinition, ToolResult } from "@op
 import { loadOpenAIAuth } from "./auth"
 import { generateImage, IMAGEGEN_DESCRIPTION, IMAGEGEN_TOOL } from "./imagegen"
 import { argsShape } from "./schema"
+import { loadPackagedSkill, SKILLS_DIRECTORY } from "./skill"
 
 // A plain tool definition, so the module needs no runtime import from the OpenCode 1 SDK.
 const imagegenTool = {
@@ -26,8 +27,24 @@ const imagegenTool = {
   },
 }
 
+// The published OpenCode 1 Config type omits `skills`, which the host reads at runtime.
+type SkillConfig = { skills?: { paths?: string[]; urls?: string[] } }
+
+// Adds the package's skills directory once, keeping the user's own paths and urls. The path is absolute
+// because OpenCode 1 resolves relative skill paths against the project.
+function registerSkillsDirectory(config: SkillConfig): void {
+  const paths = config.skills?.paths ?? []
+  if (paths.includes(SKILLS_DIRECTORY)) return
+  config.skills = { ...config.skills, paths: [...paths, SKILLS_DIRECTORY] }
+}
+
 // OpenCode 1 entry point. The SDK types its own pinned Zod copy, which TypeScript treats as a different
 // type from this package's Zod; the schemas are structurally the same and OpenCode 1 composes them at runtime.
-export const server: Plugin = async (): Promise<Hooks> => ({
-  tool: { [IMAGEGEN_TOOL]: imagegenTool as unknown as ToolDefinition },
-})
+export const server: Plugin = async (): Promise<Hooks> => {
+  // The host would skip an unreadable skill silently, so check the shipped file when the plugin loads.
+  await loadPackagedSkill()
+  return {
+    config: async (config) => registerSkillsDirectory(config as SkillConfig),
+    tool: { [IMAGEGEN_TOOL]: imagegenTool as unknown as ToolDefinition },
+  }
+}

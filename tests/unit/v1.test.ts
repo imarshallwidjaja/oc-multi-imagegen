@@ -5,6 +5,7 @@ import path from "node:path"
 import type { ToolContext } from "@opencode-ai/plugin"
 import { IMAGEGEN_DESCRIPTION } from "../../src/imagegen"
 import plugin from "../../src/index"
+import { SKILLS_DIRECTORY } from "../../src/skill"
 import { PNG_BASE64, PNG_BUFFER } from "./fixtures"
 import { v1ToolContext } from "./hosts"
 
@@ -36,8 +37,9 @@ function stubFetch() {
   return fetchMock
 }
 
-async function loadTool() {
-  const hooks = await plugin.server({} as never)
+// Pass a config to run the plugin's config hook on it before the tool is used, as the host does at startup.
+async function loadTool(config?: Record<string, unknown>) {
+  const hooks = config ? await runConfigHook(config) : await plugin.server({} as never)
   const tool = hooks.tool?.imagegen
   if (!tool) throw new Error("imagegen is not registered")
   return tool
@@ -50,6 +52,54 @@ function recordAsks() {
   }
   return { asks, ask }
 }
+
+// The hook's parameter is the SDK Config, which omits the `skills` key the host reads at runtime.
+async function runConfigHook(config: Record<string, unknown>) {
+  const hooks = await plugin.server({} as never)
+  await hooks.config?.(config as never)
+  return hooks
+}
+
+describe("OpenCode 1 skill registration", () => {
+  test("adds the absolute packaged skills directory to a config without skills", async () => {
+    const config: Record<string, unknown> = {}
+
+    await runConfigHook(config)
+
+    expect(config).toEqual({ skills: { paths: [SKILLS_DIRECTORY] } })
+    expect(path.isAbsolute(SKILLS_DIRECTORY)).toBe(true)
+  })
+
+  test("keeps the user's skill paths and urls and adds the directory once across repeated runs", async () => {
+    const config = {
+      skills: { paths: ["./team-skills", "~/skills"], urls: ["https://example.com/.well-known/skills/"] },
+    }
+
+    await runConfigHook(config)
+    await runConfigHook(config)
+
+    expect(config).toEqual({
+      skills: {
+        paths: ["./team-skills", "~/skills", SKILLS_DIRECTORY],
+        urls: ["https://example.com/.well-known/skills/"],
+      },
+    })
+  })
+
+  test("leaves other configuration alone", async () => {
+    const config: Record<string, unknown> = {
+      model: "openai/example",
+      skills: { urls: ["https://example.com/skills/"] },
+    }
+
+    await runConfigHook(config)
+
+    expect(config).toEqual({
+      model: "openai/example",
+      skills: { urls: ["https://example.com/skills/"], paths: [SKILLS_DIRECTORY] },
+    })
+  })
+})
 
 describe("OpenCode 1 adapter", () => {
   test("registers one imagegen tool with the documented arguments", async () => {
@@ -85,9 +135,9 @@ describe("OpenCode 1 adapter", () => {
     })
   })
 
-  test("asks for the imagegen permission over the whole operation", async () => {
+  test("asks only for the imagegen permission, over the whole operation, with the skills directory registered", async () => {
     stubFetch()
-    const tool = await loadTool()
+    const tool = await loadTool({})
     const { asks, ask } = recordAsks()
     const args = { prompt: "a cat", out: "cat.png", size: "1672x941" } as const
 

@@ -5,10 +5,12 @@
 #
 #   export OC_SANDBOX=$(scripts/opencode-container.sh init)     one new private sandbox per attempt
 #   scripts/opencode-container.sh pack                          build, npm pack, extract, install runtime deps
-#   scripts/opencode-container.sh prepare <host> [allow|ask]
+#   scripts/opencode-container.sh prepare <host> [allow|tool-only|ask]
 #   scripts/opencode-container.sh seed <host> [min-hours]       credential seed (v1, v2); v1-floor needs none
 #   scripts/opencode-container.sh run <host> <name> -- <opencode args>
 #   scripts/opencode-container.sh tools <host>                  tool ids (v1 and v1-floor only; no model)
+#   scripts/opencode-container.sh skills <host>                 skills the host registered (no model)
+#   scripts/opencode-container.sh lifecycle v2                  skill update and removal on a running server (no model)
 #   OC_MODEL=... scripts/opencode-container.sh cases <host>     the four image cases, in order (v1, v2)
 #   scripts/opencode-container.sh clean                         remove credentials and session state
 #
@@ -152,13 +154,14 @@ base_args() {
     -v "$sandbox/pkg/package:/pluginpkg:ro" -w /work)
 }
 
+# Generic requests: they name neither the tool nor the skill, so a run shows whether the agent finds both itself.
 case_prompt() {
   local style="hand-drawn 90s Japanese animation style"
   case $1 in
-    A) echo "Use the imagegen tool to generate an image at character.png. Content: a man wearing a navy-blue samue and a red hachimaki headband, standing in a garden of cherry blossoms in full bloom. Style: $style. Size: 1024x1536 (portrait)." ;;
-    B) echo "Use the imagegen tool to generate an image at character.png. Content: a woman wearing a yellow yukata and holding a red wagasa parasol, standing in a garden at night with fireflies dancing around her. Style: $style. Size: 1536x1024 (landscape)." ;;
-    C) echo "Use the imagegen tool to generate an image at together.png. Pass ./character.png and ./character-v2.png in the images argument. Content: the man from Image 1 (navy samue + red hachimaki) and the woman from Image 2 (yellow yukata + red wagasa) standing side by side on the engawa veranda of an old Japanese house, smiling at the viewer. Preserve each character's outfit, hairstyle, and props exactly. Style: $style. Size: 1672x941." ;;
-    D) echo "Use the imagegen tool to generate an image at sticker.png. Content: a sticker of a red paper lantern with a transparent background. Style: $style. Size: 1254x1254." ;;
+    A) echo "Create a wide illustration of a lighthouse on a rocky coast at dusk, in a $style. Save it as lighthouse.png in the project folder." ;;
+    B) echo "Make a sticker of a red paper lantern in a $style, with a transparent background so it can be placed on other designs. Save it as lantern-sticker.png in the project folder." ;;
+    C) echo "Change lighthouse.png so the sky is stormy with heavy dark clouds and the lighthouse lamp is lit. Keep the rest of the scene as it is. Save the result as lighthouse-storm.png." ;;
+    D) echo "Design two portrait screens of a meal-planning mobile app: a weekly plan screen and a shopping list screen. They must look like the same app, with the same colours, type and style. Save them as plan-screen.png and shopping-screen.png in the project folder." ;;
   esac
 }
 
@@ -197,12 +200,23 @@ case $cmd in
     ;;
 
   prepare)
+    # allow: imagegen, the plugin's skill and reading PNG files (to look at results) are permitted.
+    # tool-only: imagegen alone, so the skill is denied. ask: imagegen asks and nothing else is permitted.
+    # Everything else is denied, so the agent has no shell and cannot read the credential.
     host=${1:?host}; perm=${2:-allow}
     image_of "$host" >/dev/null
-    case $perm in allow | ask) ;; *) die "Permission must be allow or ask" ;; esac
+    case $perm in allow | tool-only | ask) ;; *) die "Permission must be allow, tool-only or ask" ;; esac
     use_sandbox
     mkdir -p "$sandbox/$host"/{home,config/opencode,data/opencode,state,cache,work}
+    tool_effect=$perm
+    [ "$perm" != tool-only ] || tool_effect=allow
+    extra=''
     if [ "$host" = v2 ]; then
+      if [ "$perm" = allow ]; then
+        extra=',
+    { "action": "skill", "resource": "oc-multi-imagegen", "effect": "allow" },
+    { "action": "read", "resource": "*.png", "effect": "allow" }'
+      fi
       # update and share are OpenCode 2's own settings; the run needs neither the updater nor sharing.
       cat >"$sandbox/$host/config/opencode/opencode.json" <<EOF
 {
@@ -210,18 +224,21 @@ case $cmd in
   "plugins": ["/pluginpkg"],
   "permissions": [
     { "action": "*", "resource": "*", "effect": "deny" },
-    { "action": "imagegen", "resource": "*", "effect": "$perm" }
+    { "action": "imagegen", "resource": "*", "effect": "$tool_effect" }$extra
   ],
   "update": "disable",
   "share": "disabled"
 }
 EOF
     else
+      if [ "$perm" = allow ]; then
+        extra=', "skill": { "*": "deny", "oc-multi-imagegen": "allow" }, "read": { "*": "deny", "*.png": "allow" }'
+      fi
       cat >"$sandbox/$host/config/opencode/opencode.json" <<EOF
 {
   "\$schema": "https://opencode.ai/config.json",
   "plugin": ["file:///pluginpkg"],
-  "permission": { "*": "deny", "imagegen": "$perm" },
+  "permission": { "*": "deny", "imagegen": "$tool_effect"$extra },
   "autoupdate": false,
   "share": "disabled"
 }
@@ -278,6 +295,39 @@ EOF
     container_run
     ;;
 
+  skills)
+    # Lists the skills a host registered: a load check that needs no model and no credential. OpenCode 1 has
+    # `debug skill`. OpenCode 2 has no such command, so scripts/container-skill-probe.sh starts a private server in
+    # the container and prints its skill list once oc-multi-imagegen is in it; it fails, with the server log, if
+    # that never happens. The server's password is a throwaway for this one container, not a credential.
+    host=${1:?host}
+    image_of "$host" >/dev/null
+    use_sandbox
+    base_args "$host" skills
+    if [ "$host" = v2 ]; then
+      ARGS+=(-e OPENCODE_SERVER_PASSWORD=probe -v "$repo/scripts/container-skill-probe.sh:/probe.sh:ro" --entrypoint sh "$V2_IMAGE" /probe.sh skills)
+    else
+      ARGS+=("$(image_of "$host")" debug skill)
+    fi
+    container_run
+    ;;
+
+  lifecycle)
+    # Edits the sandbox's package and config while an OpenCode 2 server runs, and prints what its skill list does:
+    # registered, updated after the package changes, removed after the plugin leaves the config. Each state must
+    # show in a successful reply, or the command fails (scripts/container-skill-probe.sh). It changes the sandbox
+    # package, so use a sandbox that is not also used for a model run. No model, no credential.
+    host=${1:?host}
+    [ "$host" = v2 ] || die "lifecycle runs on v2, which reloads plugins while running; for v1, edit the sandbox package or config and run 'skills v1' again"
+    use_sandbox
+    base_args v2 lifecycle
+    for i in "${!ARGS[@]}"; do
+      case ${ARGS[i]} in *:/pluginpkg:ro) ARGS[i]=${ARGS[i]%:ro} ;; esac
+    done
+    ARGS+=(-e OPENCODE_SERVER_PASSWORD=probe -v "$repo/scripts/container-skill-probe.sh:/probe.sh:ro" --entrypoint sh "$V2_IMAGE" /probe.sh lifecycle)
+    container_run
+    ;;
+
   cases)
     # The paid scenario: four model-driven image calls per host, in order, stopping at the first failure.
     # Later cases build on earlier outputs, so it only starts from an empty work directory and no earlier logs.
@@ -312,7 +362,7 @@ EOF
     ;;
 
   *)
-    sed -n '2,18p' "${BASH_SOURCE[0]}" >&2
+    sed -n '2,21p' "${BASH_SOURCE[0]}" >&2
     exit 2
     ;;
 esac
