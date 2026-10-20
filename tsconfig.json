@@ -1,0 +1,12 @@
+{
+  "extends": "@tsconfig/node22/tsconfig.json",
+  "compilerOptions": {
+    "strict": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["es2022", "dom", "dom.iterable", "dom.asynciterable"],
+    "types": ["bun"],
+    "noEmit": true
+  },
+  "include": ["src", "tests"]
+}
