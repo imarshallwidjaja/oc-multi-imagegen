@@ -1,5 +1,9 @@
 # Plugin source instructions
 
-- Treat the plugin/tool identity, `imagegen` arguments, supported sizes, and `{ out, versioned }` result metadata as public contracts. Internal helpers can change in place. Update the README's "Use" and "Current limits" sections when documented behavior changes.
-- Keep argument and reference-image validation before `callViaCodexImages`; invalid inputs must fail before quota-consuming requests. Propagate generation and save failures instead of returning a success-shaped result.
+- Treat the plugin/tool identity, `imagegen` arguments, supported sizes, and `{ out, versioned }` result metadata as public contracts. Internal helpers can change in place. Update the README's "Authentication", "Permissions", "Use" and "Current limits" sections when documented behavior changes.
+- One default export serves OpenCode 1 (`server`, `v1.ts`) and OpenCode 2 (`setup`, `v2.ts`). Both adapters stay thin: they supply the permission request, session directory, credential, and cancellation signal to `generateImage` in `imagegen.ts` and shape the host's result. Behavior that applies to both hosts goes in the shared flow.
+- Import `@opencode-ai/plugin` and `@opencode/plugin` for types only. A runtime import makes the package require an SDK its host may not provide; `tests/unit/index.test.ts` checks this.
+- `schema.ts` owns the argument and result schemas; OpenCode 1 consumes the shape and OpenCode 2 the object schema. Keep `zod` at 4.2 or newer: OpenCode 2 uses the schema's own JSON Schema output only from that version, and otherwise loses the argument descriptions.
+- Keep argument and reference-image validation before `callViaCodexImages`; invalid inputs must fail before quota-consuming requests. Request the `imagegen` permission before credentials, reference images or the provider are touched. Propagate generation, save, permission and cancellation failures instead of returning a success-shaped result, and do not retry.
+- OpenCode 2 credentials come only from `ctx.integration.connection` and are resolved per call. Do not fall back to `auth.ts` (the OpenCode 1 loader), environment variables, or Codex files, and do not refresh tokens in the plugin.
 - The implemented backend is ChatGPT OAuth through Codex. Introduce provider abstractions alongside a concrete second implementation.

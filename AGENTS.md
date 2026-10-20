@@ -9,6 +9,7 @@
 ## Working here
 
 - Use `bun run test` for routine mocked tests. Bare `bun test` also discovers the live e2e suite. Run `bun run test:e2e` only when live generation and account-quota use are in scope, and run the whole file: later cases reuse earlier outputs.
-- OpenCode loads generated `dist/index.js`. Edit `src/`, then `bun run build` and reload the OpenCode process that loaded the plugin. The e2e harness builds and starts its own process.
+- OpenCode 1 and OpenCode 2 both load generated `dist/index.js` (OpenCode 2 through the root `server.js`). Edit `src/`, then `bun run build` and reload the OpenCode process that loaded the plugin. The e2e harness builds and starts its own OpenCode 1 process.
 - Follow the README's "Local setup" and "Development checks" sections for setup and verification; `package.json` and `.github/workflows/ci.yml` own the executable commands.
+- For a qualitative run with real agents on OpenCode 1 and 2, follow `docs/container-testing.md`. It uses account quota and a disposable credential seed: run it only when asked, and never mount or print the host's OpenCode credential store. Use a new `init` sandbox per attempt and run hosts and cases one after another, never in parallel or in the background.
 - Ignored `.tmp/` material may include an upstream checkout. Treat it as reference data; this checkout's source and configuration govern tool names and workflows.

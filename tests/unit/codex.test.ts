@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, mock, test } from "bun:test"
 import { callViaCodexImages } from "../../src/codex"
-import type { GenerateArgs } from "../../src/types"
+import type { GenerateArgs } from "../../src/schema"
 
 function imagesResponse(data: Array<{ b64_json: string }>): Response {
   return new Response(JSON.stringify({ created: 0, data }))

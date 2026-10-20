@@ -1,5 +1,6 @@
+import type { GenerateArgs } from "./schema"
 import { appendSizeToPrompt } from "./size"
-import type { GenerateArgs, OpenAIAuth } from "./types"
+import type { OpenAIAuth } from "./types"
 
 // Codex OAuth images endpoint URLs. Codex calls edits when reference images are given.
 // https://github.com/openai/codex/blob/a4ebc509f4cdff88a8e58e175541970a30a2d385/codex-rs/model-provider-info/src/lib.rs#L80
@@ -17,6 +18,7 @@ export async function callViaCodexImages(
   auth: OpenAIAuth,
   args: GenerateArgs,
   inputImageDataUrls: string[],
+  signal?: AbortSignal,
 ): Promise<string> {
   const isEdit = inputImageDataUrls.length > 0
   const body = {
@@ -35,6 +37,7 @@ export async function callViaCodexImages(
       originator: "opencode",
     },
     body: JSON.stringify(body),
+    signal,
   })
   if (!res.ok) {
     const detail = await res.text().catch(() => "")
