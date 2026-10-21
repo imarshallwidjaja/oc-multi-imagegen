@@ -3,7 +3,8 @@ import { existsSync, readFileSync } from "node:fs"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { IMAGEGEN_DESCRIPTION } from "../../src/imagegen"
+import { selectBackend } from "../../src/backend"
+import { describeImagegen } from "../../src/imagegen"
 import { loadPackagedSkill, SKILL_FILE, SKILL_NAME, SKILLS_DIRECTORY } from "../../src/skill"
 
 let dir: string
@@ -41,9 +42,12 @@ describe("packaged skill", () => {
     expect(Bun.YAML.parse(yaml)).toEqual({ name: skill.name, description: skill.description })
   })
 
-  test("the tool description points to the skill by name", () => {
-    expect(IMAGEGEN_DESCRIPTION).toContain(SKILL_NAME)
-  })
+  test.each([undefined, { backend: "openai-api" }])(
+    "the tool description points to the skill by name for %p",
+    (options) => {
+      expect(describeImagegen(selectBackend(options))).toContain(SKILL_NAME)
+    },
+  )
 
   test.each([
     ["has no frontmatter", "# Body\n", "no frontmatter"],

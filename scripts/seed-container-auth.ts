@@ -6,6 +6,10 @@
 //   --host v1  an OpenCode 1 auth.json, placed in the container's XDG data directory
 //   --host v2  a file for `opencode auth import`
 //
+// --image-key-env-file <file> adds the OpenAI Images API key to the seed, as the `openai-images` credential the
+// plugin's openai-api backend reads from OpenCode's own store. The key comes from the OPENAI_API_KEY line of that
+// dotenv file, which is read here and nowhere else; it is never printed and never passed on a command line.
+//
 // The output path must be new. The seed is written to a fresh private file next to it and linked into
 // place only after the host file is confirmed unchanged, so an existing file, symlink or hard link at the
 // output path (including the host auth file itself) is refused and left as it was. The output directory
@@ -23,14 +27,32 @@ import {
 } from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { parseArgs } from "node:util"
+import { parseArgs, parseEnv } from "node:util"
 
 const REFRESH_PLACEHOLDER = "container-seed-has-no-refresh-token"
-const USAGE = "Usage: bun scripts/seed-container-auth.ts --host v1|v2 --out <new file> [--min-hours 24]"
+const USAGE =
+  "Usage: bun scripts/seed-container-auth.ts --host v1|v2 --out <new file> [--min-hours 24] [--image-key-env-file <dotenv file>]"
+const IMAGE_KEY_VARIABLE = "OPENAI_API_KEY"
 
 class SeedError extends Error {}
 
-function seedFor(host: "v1" | "v2", openai: { access: string; expires: number; accountId?: string }) {
+// Reads the last OPENAI_API_KEY assignment of a dotenv file. Errors name the file and the reason, never its contents.
+function readImageKey(file: string): string {
+  const stat = statSync(file, { throwIfNoEntry: false })
+  if (!stat?.isFile()) throw new SeedError(`${file} is not a file.`)
+  const key = parseEnv(readFileSync(file, "utf-8"))[IMAGE_KEY_VARIABLE]
+  if (!key) throw new SeedError(`${file} has no ${IMAGE_KEY_VARIABLE} value.`)
+  if (!/^[\x21-\x7e]+$/.test(key)) {
+    throw new SeedError(`The ${IMAGE_KEY_VARIABLE} value in ${file} is not usable as an API key.`)
+  }
+  return key
+}
+
+function seedFor(
+  host: "v1" | "v2",
+  openai: { access: string; expires: number; accountId?: string },
+  imageKey?: string,
+) {
   if (host === "v1") {
     return {
       openai: {
@@ -40,6 +62,7 @@ function seedFor(host: "v1" | "v2", openai: { access: string; expires: number; a
         expires: openai.expires,
         ...(openai.accountId ? { accountId: openai.accountId } : {}),
       },
+      ...(imageKey ? { "openai-images": { type: "api", key: imageKey } } : {}),
     }
   }
   return [
@@ -57,6 +80,17 @@ function seedFor(host: "v1" | "v2", openai: { access: string; expires: number; a
         ...(openai.accountId ? { metadata: { accountID: openai.accountId } } : {}),
       },
     },
+    ...(imageKey
+      ? [
+          {
+            id: "crd_containerimages",
+            integrationID: "openai-images",
+            label: "API key",
+            active: true,
+            value: { type: "key", key: imageKey },
+          },
+        ]
+      : []),
   ]
 }
 
@@ -66,6 +100,7 @@ function main() {
       host: { type: "string" },
       out: { type: "string" },
       "min-hours": { type: "string", default: "24" },
+      "image-key-env-file": { type: "string" },
     },
     strict: true,
   })
@@ -101,11 +136,17 @@ function main() {
       `The host OpenAI access token has ${hoursLeft.toFixed(1)} h left; ${minHours} h required. Sign in again on the host.`,
     )
   }
-  const seed = seedFor(values.host, {
-    access: openai.access,
-    expires: openai.expires,
-    accountId: typeof openai.accountId === "string" ? openai.accountId : undefined,
-  })
+  const imageKeyFile = values["image-key-env-file"]
+  const imageKey = imageKeyFile ? readImageKey(path.resolve(imageKeyFile)) : undefined
+  const seed = seedFor(
+    values.host,
+    {
+      access: openai.access,
+      expires: openai.expires,
+      accountId: typeof openai.accountId === "string" ? openai.accountId : undefined,
+    },
+    imageKey,
+  )
 
   const temporary = `${out}.${process.pid}.tmp`
   let created = false
@@ -139,7 +180,9 @@ function main() {
     // Only the file this run created; an earlier file at that name is not ours to remove.
     if (created) unlinkSync(temporary)
   }
-  console.log(`Wrote ${out} (OpenAI access token valid for ${hoursLeft.toFixed(1)} h, placeholder refresh token).`)
+  console.log(
+    `Wrote ${out} (OpenAI access token valid for ${hoursLeft.toFixed(1)} h, placeholder refresh token${imageKey ? ", OpenAI Images API key" : ""}).`,
+  )
 }
 
 try {

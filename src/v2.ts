@@ -1,25 +1,35 @@
 import type { Plugin } from "@opencode/plugin"
-import { generateImage, IMAGEGEN_DESCRIPTION, IMAGEGEN_TOOL } from "./imagegen"
-import { argsSchema, resultSchema } from "./schema"
+import { selectBackend } from "./backend"
+import { describeImagegen, generateImage, IMAGEGEN_TOOL } from "./imagegen"
+import { resultSchema } from "./schema"
 import { loadPackagedSkill } from "./skill"
-import type { OpenAIAuth } from "./types"
+import type { CredentialSpec, ImageCredential } from "./types"
 
 // The OpenAI integration methods whose OAuth credential the Codex images endpoint accepts.
 const CHATGPT_METHOD_IDS = new Set(["chatgpt-browser", "chatgpt-headless"])
 const TOKEN_SHARING_METHOD_ID = "chatgpt-token-sharing"
 const SIGN_IN_HINT = "Sign in to the OpenAI integration with the Codex browser or Codex device code method."
 
-// Resolved on every call so a refreshed or switched account takes effect without reloading the plugin.
-// Resolution failures propagate unchanged, and no other credential source is consulted.
-async function resolveChatGptAuth(integration: Plugin.Context["integration"]): Promise<OpenAIAuth> {
-  const connection = await integration.connection.active("openai")
+type Integration = Plugin.Context["integration"]
+
+// The credential is resolved on every call so a refreshed or switched account takes effect without reloading the
+// plugin. Resolution failures propagate unchanged, and no other credential source is consulted.
+async function resolveActiveCredential(integration: Integration, spec: CredentialSpec) {
+  const name = spec.type === "oauth" ? "OpenAI" : spec.label
+  const hint = spec.type === "oauth" ? SIGN_IN_HINT : `Add an API key to the ${spec.provider} integration.`
+  const connection = await integration.connection.active(spec.provider)
   if (!connection) {
-    throw new Error(`No OpenAI connection is active. ${SIGN_IN_HINT}`)
+    throw new Error(`No ${name} connection is active. ${hint}`)
   }
   const credential = await integration.connection.resolve(connection)
   if (!credential) {
-    throw new Error(`The active OpenAI connection has no usable credential. ${SIGN_IN_HINT}`)
+    throw new Error(`The active ${name} connection has no usable credential. ${hint}`)
   }
+  return credential
+}
+
+async function resolveChatGptAuth(integration: Integration, spec: CredentialSpec): Promise<ImageCredential> {
+  const credential = await resolveActiveCredential(integration, spec)
   if (credential.type !== "oauth") {
     throw new Error(
       `The active OpenAI connection is not a ChatGPT sign-in; an API key is not sufficient. ${SIGN_IN_HINT}`,
@@ -39,11 +49,23 @@ async function resolveChatGptAuth(integration: Plugin.Context["integration"]): P
   }
 }
 
+async function resolveApiKey(integration: Integration, spec: CredentialSpec): Promise<ImageCredential> {
+  const credential = await resolveActiveCredential(integration, spec)
+  if (credential.type !== "key") {
+    throw new Error(
+      `The active ${spec.label} connection is not an API key. Add an API key to the ${spec.provider} integration.`,
+    )
+  }
+  return { type: "key", key: credential.key }
+}
+
 type SkillEditor = Parameters<Parameters<Plugin.Context["skill"]["transform"]>[0]>[0]
 
 // OpenCode 2 entry point. The tool is called directly (not through Code Mode, no namespace), so it is
 // available to agents that allow imagegen without also allowing the execute tool.
 export const setup: Plugin.Plugin["setup"] = async (ctx) => {
+  const backend = selectBackend(ctx.options)
+  const { credential: spec } = backend
   const skill = await loadPackagedSkill()
   // The host replays this callback on every skill reload, so it must not add a second copy, and an existing
   // skill with the same id is left alone.
@@ -59,29 +81,40 @@ export const setup: Plugin.Plugin["setup"] = async (ctx) => {
       content: skill.content,
     } as Parameters<SkillEditor["add"]>[0])
   })
+  // A key credential is a key-only integration owned by this plugin. The OpenAI integration is the host's.
+  if (spec.type === "key") {
+    await ctx.integration.transform((editor) => {
+      editor.update(spec.provider, (integration) => {
+        integration.name = spec.label
+      })
+      editor.method.update({ integrationID: spec.provider, method: { type: "key" } })
+    })
+  }
   await ctx.tool.transform((editor) => {
     editor.add({
       name: IMAGEGEN_TOOL,
-      description: IMAGEGEN_DESCRIPTION,
-      input: argsSchema,
+      description: describeImagegen(backend),
+      input: backend.argsSchema,
       output: resultSchema,
       options: { codemode: false },
       async execute(input, context) {
-        const saved = await generateImage(input, {
+        const saved = await generateImage(input, backend, {
           signal: context.signal,
+          // The resource is the backend id, so a grant saved for one backend does not cover another.
           authorize: (args) =>
             ctx.permission.assert({
               sessionID: context.sessionID,
               agent: context.agent,
               action: IMAGEGEN_TOOL,
-              resources: ["*"],
-              save: ["*"],
+              resources: [backend.id],
+              save: [backend.id],
               metadata: { ...args },
               source: { type: "tool", messageID: context.messageID, id: context.id },
             }),
           // A session can run in a different directory than the one that loaded the plugin.
           resolveDirectory: async () => (await ctx.session.get({ sessionID: context.sessionID })).location.directory,
-          resolveAuth: () => resolveChatGptAuth(ctx.integration),
+          resolveCredential: () =>
+            spec.type === "oauth" ? resolveChatGptAuth(ctx.integration, spec) : resolveApiKey(ctx.integration, spec),
         })
         const result = { out: saved.savedPath, versioned: saved.versioned }
         return { output: result, content: saved.message, metadata: result }

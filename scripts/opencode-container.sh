@@ -5,13 +5,15 @@
 #
 #   export OC_SANDBOX=$(scripts/opencode-container.sh init)     one new private sandbox per attempt
 #   scripts/opencode-container.sh pack                          build, npm pack, extract, install runtime deps
-#   scripts/opencode-container.sh prepare <host> [allow|tool-only|ask]
+#   scripts/opencode-container.sh prepare <host> [allow|tool-only|ask] [codex|openai-api]  openai-api sets the plugin option
 #   scripts/opencode-container.sh seed <host> [min-hours]       credential seed (v1, v2); v1-floor needs none
+#                                                               OC_IMAGE_KEY_ENV_FILE=<dotenv file> adds its OPENAI_API_KEY
 #   scripts/opencode-container.sh run <host> <name> -- <opencode args>
 #   scripts/opencode-container.sh tools <host>                  tool ids (v1 and v1-floor only; no model)
 #   scripts/opencode-container.sh skills <host>                 skills the host registered (no model)
+#   scripts/opencode-container.sh backend <host> <backend>      the sign-in and tool a host registered for the backend (no model)
 #   scripts/opencode-container.sh lifecycle v2                  skill update and removal on a running server (no model)
-#   OC_MODEL=... scripts/opencode-container.sh cases <host>     the four image cases, in order (v1, v2)
+#   OC_MODEL=... scripts/opencode-container.sh cases <host> [smoke]  the four image cases, or one generation and one edit
 #   scripts/opencode-container.sh clean                         remove credentials and session state
 #
 # <host> is v1, v1-floor or v2. Each host gets its own HOME and XDG directories under $OC_SANDBOX.
@@ -162,6 +164,10 @@ case_prompt() {
     B) echo "Make a sticker of a red paper lantern in a $style, with a transparent background so it can be placed on other designs. Save it as lantern-sticker.png in the project folder." ;;
     C) echo "Change lighthouse.png so the sky is stormy with heavy dark clouds and the lighthouse lamp is lit. Keep the rest of the scene as it is. Save the result as lighthouse-storm.png." ;;
     D) echo "Design two portrait screens of a meal-planning mobile app: a weekly plan screen and a shopping list screen. They must look like the same app, with the same colours, type and style. Save them as plan-screen.png and shopping-screen.png in the project folder." ;;
+    # The smoke cases name the tool and ask for low quality at 1536x1024, a size both backends accept, so a run proves one
+    # generation and one reference edit through the selected backend without the four-case spend.
+    G) echo "Use the imagegen tool to create a simple flat illustration of a red paper lantern on a plain light background. Use quality low and size 1536x1024. Save it as smoke-generate.png in the project folder." ;;
+    E) echo "Use the imagegen tool to edit smoke-generate.png: make the lantern blue and keep everything else as it is. Pass the file in images, and use quality low and size 1536x1024. Save the result as smoke-edit.png in the project folder." ;;
   esac
 }
 
@@ -203,10 +209,17 @@ case $cmd in
     # allow: imagegen, the plugin's skill and reading PNG files (to look at results) are permitted.
     # tool-only: imagegen alone, so the skill is denied. ask: imagegen asks and nothing else is permitted.
     # Everything else is denied, so the agent has no shell and cannot read the credential.
-    host=${1:?host}; perm=${2:-allow}
+    # The optional backend is the plugin's `backend` option: codex (the default, no option written) or openai-api.
+    host=${1:?host}; perm=${2:-allow}; backend=${3:-codex}
     image_of "$host" >/dev/null
     case $perm in allow | tool-only | ask) ;; *) die "Permission must be allow, tool-only or ask" ;; esac
+    case $backend in codex | openai-api) ;; *) die "Backend must be codex or openai-api" ;; esac
     use_sandbox
+    v1_plugin='"file:///pluginpkg"' v2_plugin='"/pluginpkg"'
+    if [ "$backend" != codex ]; then
+      v1_plugin='["file:///pluginpkg", { "backend": "'$backend'" }]'
+      v2_plugin='{ "package": "/pluginpkg", "options": { "backend": "'$backend'" } }'
+    fi
     mkdir -p "$sandbox/$host"/{home,config/opencode,data/opencode,state,cache,work}
     tool_effect=$perm
     [ "$perm" != tool-only ] || tool_effect=allow
@@ -221,7 +234,7 @@ case $cmd in
       cat >"$sandbox/$host/config/opencode/opencode.json" <<EOF
 {
   "\$schema": "https://opencode.ai/config.json",
-  "plugins": ["/pluginpkg"],
+  "plugins": [$v2_plugin],
   "permissions": [
     { "action": "*", "resource": "*", "effect": "deny" },
     { "action": "imagegen", "resource": "*", "effect": "$tool_effect" }$extra
@@ -237,7 +250,7 @@ EOF
       cat >"$sandbox/$host/config/opencode/opencode.json" <<EOF
 {
   "\$schema": "https://opencode.ai/config.json",
-  "plugin": ["file:///pluginpkg"],
+  "plugin": [$v1_plugin],
   "permission": { "*": "deny", "imagegen": "$tool_effect"$extra },
   "autoupdate": false,
   "share": "disabled"
@@ -252,11 +265,15 @@ EOF
     use_sandbox
     hours=()
     [ -z "${2:-}" ] || hours=(--min-hours "$2")
+    # OC_IMAGE_KEY_ENV_FILE names a dotenv file whose OPENAI_API_KEY is added as the openai-images credential. Only
+    # the path travels through this script; the seed script reads the key and writes it to the host's own store.
+    imagekey=()
+    [ -z "${OC_IMAGE_KEY_ENV_FILE:-}" ] || imagekey=(--image-key-env-file "$OC_IMAGE_KEY_ENV_FILE")
     if [ "$host" = v2 ]; then
       # A new private directory per invocation, so cleanup() removes only what this run made. It exists only
       # while the import runs; cleanup() removes it however this command ends, unless the container may still read it.
       seeddir=$(mktemp -d "$sandbox/seed.XXXXXX")
-      (cd "$repo" && bun scripts/seed-container-auth.ts --host v2 --out "$seeddir/import.json" ${hours[@]+"${hours[@]}"})
+      (cd "$repo" && bun scripts/seed-container-auth.ts --host v2 --out "$seeddir/import.json" ${hours[@]+"${hours[@]}"} ${imagekey[@]+"${imagekey[@]}"})
       base_args v2 seed-import
       ARGS+=(-v "$seeddir:/seed:ro" "$V2_IMAGE" auth import --standalone /seed/import.json)
       rc=0
@@ -267,7 +284,7 @@ EOF
       fi
     else
       # OpenCode 1 reads this file as its auth.json until `clean` removes it.
-      (cd "$repo" && bun scripts/seed-container-auth.ts --host v1 --out "$sandbox/$host/data/opencode/auth.json" ${hours[@]+"${hours[@]}"})
+      (cd "$repo" && bun scripts/seed-container-auth.ts --host v1 --out "$sandbox/$host/data/opencode/auth.json" ${hours[@]+"${hours[@]}"} ${imagekey[@]+"${imagekey[@]}"})
     fi
     ;;
 
@@ -312,6 +329,21 @@ EOF
     container_run
     ;;
 
+  backend)
+    # Prints what a host registered for the backend the sandbox was prepared with (prepare <host> <perm> <backend>):
+    # the sign-in method and tool on OpenCode 1, the integration on OpenCode 2. It fails when that does not match the
+    # backend named here. No model, no credential. scripts/container-backend-probe.sh runs in the container.
+    host=${1:?host}; backend=${2:?backend (codex or openai-api)}
+    image_of "$host" >/dev/null
+    case $backend in codex | openai-api) ;; *) die "Backend must be codex or openai-api" ;; esac
+    use_sandbox
+    base_args "$host" backend
+    probe_host=v1
+    [ "$host" != v2 ] || { probe_host=v2; ARGS+=(-e OPENCODE_SERVER_PASSWORD=probe); }
+    ARGS+=(-v "$repo/scripts/container-backend-probe.sh:/probe.sh:ro" --entrypoint sh "$(image_of "$host")" /probe.sh "$probe_host" "$backend")
+    container_run
+    ;;
+
   lifecycle)
     # Edits the sandbox's package and config while an OpenCode 2 server runs, and prints what its skill list does:
     # registered, updated after the package changes, removed after the plugin leaves the config. Each state must
@@ -330,8 +362,10 @@ EOF
 
   cases)
     # The paid scenario: four model-driven image calls per host, in order, stopping at the first failure.
+    # `cases <host> smoke` runs two instead: one low-quality generation and one reference edit of its output.
     # Later cases build on earlier outputs, so it only starts from an empty work directory and no earlier logs.
-    host=${1:?host}
+    host=${1:?host}; mode=${2:-full}
+    case $mode in full) case_ids="A B C D" ;; smoke) case_ids="G E" ;; *) die "Cases mode must be full or smoke" ;; esac
     model=${OC_MODEL:?Set OC_MODEL to the agent model, for example openai/gpt-6.1-sol-fast}
     case $host in v1) opts=(run --format json --dir /work --model "$model") ;; v2) opts=(run --standalone --format json --model "$model") ;; *) die "cases runs on v1 or v2" ;; esac
     use_sandbox
@@ -340,7 +374,7 @@ EOF
     for log in "$sandbox/logs/$host-case-"*; do
       [ ! -e "$log" ] || die "$log exists from an earlier attempt; start a new attempt with '$0 init'"
     done
-    for c in A B C D; do
+    for c in $case_ids; do
       echo "Case $c on $host" >&2
       base_args "$host" "case-$c"
       ARGS+=("$(image_of "$host")" "${opts[@]}" "$(case_prompt "$c")")
@@ -362,7 +396,7 @@ EOF
     ;;
 
   *)
-    sed -n '2,21p' "${BASH_SOURCE[0]}" >&2
+    sed -n '2,24p' "${BASH_SOURCE[0]}" >&2
     exit 2
     ;;
 esac

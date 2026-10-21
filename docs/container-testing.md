@@ -1,8 +1,8 @@
 # Container testing with real OpenCode agents
 
-This runbook runs OpenCode 1 and OpenCode 2 in containers with the packed plugin and asks a real agent for images in plain terms, without naming the tool or the skill. It is for ad-hoc qualitative checks, such as before a release or after a change to a host adapter. The unit suite (`bun run test`) stays the routine check, and CI only needs the mocked tests. The runbook makes real model and image-generation calls on your ChatGPT account.
+This runbook runs OpenCode 1 and OpenCode 2 in containers with the packed plugin and asks a real agent for images in plain terms, without naming the tool or the skill. It is for ad-hoc qualitative checks, such as before a release or after a change to a host adapter. The unit suite (`bun run test`) stays the routine check, and CI only needs the mocked tests. The runbook makes real model and image-generation calls on your ChatGPT account, and, for the OpenAI Images API backend, on the account of an API key you provide.
 
-It is written for a source checkout of this repository. The scripts and this file are not part of the npm package: [scripts/opencode-container.sh](../scripts/opencode-container.sh) builds and packs the checkout itself, [scripts/seed-container-auth.ts](../scripts/seed-container-auth.ts) builds a disposable credential, and [scripts/container-skill-probe.sh](../scripts/container-skill-probe.sh) runs inside the OpenCode 2 container for the skill load checks.
+It is written for a source checkout of this repository. The scripts and this file are not part of the npm package: [scripts/opencode-container.sh](../scripts/opencode-container.sh) builds and packs the checkout itself, [scripts/seed-container-auth.ts](../scripts/seed-container-auth.ts) builds a disposable credential, [scripts/container-skill-probe.sh](../scripts/container-skill-probe.sh) runs inside the OpenCode 2 container for the skill load checks, and [scripts/container-backend-probe.sh](../scripts/container-backend-probe.sh) runs inside either host for the backend registration checks. The procedure below covers the Codex backend, which is the default; "OpenAI Images API backend" describes the other.
 
 ## What a run shows
 
@@ -32,7 +32,7 @@ The image digests live in `scripts/opencode-container.sh` and nowhere else. The 
 
 ## Credential safety
 
-The container never sees your OpenCode home or credential store. `seed` reads the host's `auth.json` and writes a mode-600 file in a private directory under `$OC_SANDBOX`. The file carries the OpenAI access token, its expiry and account id, with a placeholder refresh token, so the container cannot rotate your session. It carries no other provider's key.
+The container never sees your OpenCode home or credential store. `seed` reads the host's `auth.json` and writes a mode-600 file in a private directory under `$OC_SANDBOX`. The file carries the OpenAI access token, its expiry and account id, with a placeholder refresh token, so the container cannot rotate your session. It carries no other provider's key, except the OpenAI Images API key when you ask for it (see "OpenAI Images API backend").
 
 The seed script prints validity facts only, and its errors name paths and reasons, never file contents. It creates the file exclusively: an existing path, symlink or hard link at the output path (including the host auth file) is refused and left as it was, and the file appears only after the host file is confirmed unchanged since it was read. It does not create or change directories; the output directory must already be private and yours.
 
@@ -200,9 +200,34 @@ stat -c '%y' "${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json"   # uncha
 
 `clean` removes the credential seed, any `seed.*` directory a run kept, the OpenCode 2 database that holds the imported credential, and session state for each host. The `work` directories (images), `logs`, `pkg` and `identity.txt` stay for review, and the hosts cannot run again until `prepare`. The helper never deletes the sandbox itself; remove `$OC_SANDBOX` yourself when you have finished reviewing it.
 
+## OpenAI Images API backend
+
+The `openai-api` backend reads an API key from OpenCode's own store under `openai-images`, so a run needs that credential in each host's store. Agents still need a chat model, which the key cannot authenticate, so the chat sign-in is seeded as before and the same `seed` adds the key. You provide the key as a dotenv file with an `OPENAI_API_KEY` line, ideally for a key limited to image generation; the file is read only by `scripts/seed-container-auth.ts`, never by the plugin. `OC_IMAGE_KEY_ENV_FILE` carries the file's path through the helper, and the key is never a command-line argument, never printed, and lands only in the sandbox's own store: OpenCode 1's `auth.json` as an `api` entry, OpenCode 2's connection store through `opencode auth import`. `clean` removes both.
+
+```bash
+S=scripts/opencode-container.sh
+export OC_SANDBOX=$($S init)
+bun install --frozen-lockfile && $S pack
+for h in v1 v1-floor v2; do $S prepare $h allow openai-api; done   # the plugin option, written for each host's config
+
+# No model and no key: what each host registered for the backend.
+for h in v1 v1-floor v2; do $S backend $h openai-api; done
+$S tools v1; $S tools v1-floor
+
+# One generation and one reference edit per host, at low quality and a size both backends accept.
+export OC_IMAGE_KEY_ENV_FILE=/path/to/dotenv OC_MODEL=openai/gpt-6.1-sol-fast
+for h in v1 v2; do $S seed $h; done
+$S cases v1 smoke && $S cases v2 smoke
+$S clean
+```
+
+`backend <host> openai-api` starts a private server in the container and fails unless the host registered the key sign-in under `openai-images` as its only method and no provider entry for it. On OpenCode 1 that is a `/provider/auth` entry whose one method has type `api`, an absent `/config` provider entry and the tool; on OpenCode 2 it is an `openai-images` integration whose one method has type `key`. `backend <host> codex` checks that the Codex backend registers neither, after `prepare <host> allow codex`. `cases <host> smoke` runs two cases, G and E, in the same way as the four-case run: G asks the agent to use `imagegen` for one flat illustration at `quality low` and size `1536x1024` (a size both backends accept), and E edits that file with `images`. Check them as in "Check the results": both `imagegen` calls `completed`, `images` naming G's file in E, and two PNGs at the requested size.
+
+`lifecycle v2` edits the default Codex configuration, so run it on a sandbox prepared without a backend.
+
 ## Last validated run
 
-Run on 2026-10-20 with the pinned versions above, plugin source at commit `a183e39` (clean worktree), built `dist/index.js` sha256 `7e0ffb0354539d4a4210abfce51b11459083a50ef02140d27b892a8a9d50ce04`, tarball sha256 `d9964c9ebb259dd74aa5db48e288d337386087ece8a7ec2c737f433e2639d31c`, agent model `openai/gpt-6.1-sol-fast`. The package under test came from `npm pack` with `npm install --omit=dev`; no `@opencode*` package was installed. This is one model on one ChatGPT account, so it shows what happened in these runs and says nothing about other models.
+Codex backend, run on 2026-10-20 with the pinned versions above, plugin source at commit `a183e39` (clean worktree), built `dist/index.js` sha256 `7e0ffb0354539d4a4210abfce51b11459083a50ef02140d27b892a8a9d50ce04`, tarball sha256 `d9964c9ebb259dd74aa5db48e288d337386087ece8a7ec2c737f433e2639d31c`, agent model `openai/gpt-6.1-sol-fast`. The package under test came from `npm pack` with `npm install --omit=dev`; no `@opencode*` package was installed. This is one model on one ChatGPT account, so it shows what happened in these runs and says nothing about other models.
 
 - Load, no model: `tools v1` (1.19.3) and `tools v1-floor` (1.18.29) listed `imagegen`. `skills v1`, `skills v1-floor` and `skills v2` each listed `oc-multi-imagegen` with the packaged body (compared after trimming), from `/pluginpkg/skills/oc-multi-imagegen/SKILL.md`; OpenCode 2 listed it with `autoinvoke: true`. With a user `skills.paths` entry added, both OpenCode 1 versions listed the user's skill and ours. On OpenCode 1, a marker appended to the sandbox `SKILL.md` appeared on the next start, and an empty `plugin` list removed the skill. `lifecycle v2` on 2.0.32 printed `loaded: entries=1 marker=0`, `updated: entries=1 marker=1`, `removed: entries=0`. The OpenCode 2 load line was logged with no failure.
 - Package from an unrelated working directory: loading `server.js` from the extracted production package with plain `node` registered `imagegen` and the skill, resolved the skills directory inside that package, and added it once to a config that already held a path and a URL.
@@ -214,6 +239,14 @@ Run on 2026-10-20 with the pinned versions above, plugin source at commit `a183e
 
 After the load-check probe was moved into `scripts/container-skill-probe.sh` (2026-10-21), `skills v2` and `lifecycle v2` were rerun on 2.0.32 in new sandboxes with no model and no credential. The plugin and skill were unchanged: `dist/index.js` had the same sha256 as above. With the plugin loaded, `skills v2` listed `oc-multi-imagegen` once at `/pluginpkg/skills/oc-multi-imagegen/SKILL.md` with `autoinvoke: true` and exited 0, and `lifecycle v2` printed `loaded: entries=1 marker=0`, `updated: entries=1 marker=1`, `removed: entries=0` and exited 0. With the plugin absent from the config, both commands now exit 1 after about 31 seconds, print "Probe failed: timed out waiting for oc-multi-imagegen to be listed once (saw entries=0 ...)" with the last reply and the server log, and print nothing to stdout. The earlier inline probe exited 0 in that state, and `lifecycle v2` printed `loaded: entries=0 marker=0`, `updated: entries=0 marker=0`, `removed: entries=0`. The model-driven results above did not involve the probe and were not rerun.
 
+OpenAI Images API backend, run on 2026-10-21 with the pinned versions above and plugin source at commit `6e2149e` (clean worktree): `dist/index.js` sha256 `54abdf31e6a10938e3b21b77eb69ec53a732364483c98cbb926565db65bef1f9`, tarball sha256 `dfd7b0c1b819e299aa5bef58a548fb4ac67df6e4a01f16f8a2a91ff2cae4b1e0` (later commits that only change documentation change the README inside the tarball, not `dist/index.js`). The key came from an image-only dotenv file through `OC_IMAGE_KEY_ENV_FILE`; the agent model was `openai/gpt-6.1-sol-fast`.
+
+- Registration, no model and no key: `backend <host> openai-api` exited 0 on 1.18.29, 1.19.3 and 2.0.32. OpenCode 1 reported `"openai-images":[{"type":"api","label":"OpenAI Images API"}]` from `/provider/auth`, no `openai-images` string in `/config`, and the API tool description; OpenCode 2 reported `{"id":"openai-images","name":"OpenAI Images API","methods":[{"type":"key"}]}`. After `prepare <host> allow codex`, `backend <host> codex` exited 0 on all three hosts and reported no sign-in method, provider entry or integration. `tools` listed `imagegen` on both OpenCode 1 versions. A `backend` option of `dall-e` made both OpenCode 1.19.3 and 2.0.32 log `failed to load plugin` with the message `Invalid oc-multi-imagegen options. ... expected one of "codex"|"openai-api"`; on OpenCode 1 the tool list then had no `imagegen` and `skills v1` no `oc-multi-imagegen`.
+- Seeded run: with both the chat sign-in and the image key in the OpenCode 1 store, `models openai` still listed the OpenAI chat models (24 ids).
+- `cases v1 smoke` on 1.19.3 and `cases v2 smoke` on 2.0.32 each exited 0 in about 58 seconds. These runs asked for 1024x1024, which the API backend accepts but Codex does not list as a preset; the smoke prompts now ask for 1536x1024. On both hosts the agent loaded the skill and called `imagegen` for G with `size 1024x1024` and `quality low`, then for E with `images` naming `smoke-generate.png` and the same size and quality; all four calls had status `completed`, and the results reported 1024x1024 pixels. The four PNGs are 1024x1024 RGB. Of the images, only OpenCode 1's G (a red paper lantern on a light background) and OpenCode 2's E (the lantern now blue, with its cap, base and cord also changed, so the edit regenerated the image rather than recolouring it) were looked at. The agent's `read` of each result also completed.
+- Credentials: the host `auth.json` modification time (2026-10-21 13:20:14 +1100) was the same before the first seed and after `clean`. A scan for key-shaped strings (`sk-` followed by 20 or more key characters) found none in the case logs, the host logs or the retained evidence; it found one in the OpenCode 2 database, which holds the imported credential and is removed by `clean`.
+- Retained for review (local and temporary, outside the repository): `/tmp/opencode/evidence/openai-images-backend/` holds the commands' output, the case logs, the four images, the three host configs and the packed identity. Nothing in it is a credential.
+
 Earlier runs with explicit prompts and no skill covered the same hosts with the four-case scenario. The helper's lifecycle handling (a normal exit, a timeout with status 124, SIGTERM, a `seed v2` import, a timed-out import, an unreachable daemon, and `OC_TIMEOUT=0`) was checked against the pinned images with a synthetic credential and no model; a stop that Docker cannot confirm is covered only by the unit tests' fake `docker`.
 
 ## Limits
@@ -221,6 +254,7 @@ Earlier runs with explicit prompts and no skill covered the same hosts with the 
 - The agent must choose to load the skill and to call the tool. The case prompts name neither, so a run shows what one model did with them, not that every model will.
 - The permission probe still names `imagegen`, because it tests the plugin's permission request and not discovery.
 - Token-sharing, missing-connection and API-key credentials on OpenCode 2 are covered by the unit tests with a fake host, not by this runbook. Exercising them in a container needs a model that does not depend on the same OpenAI sign-in.
+- The interactive sign-in prompts for `openai-images` (`opencode auth login` on either host, the TUI's **Other** entry) were not driven in a container. The runs show that each host registers the method, and the seed writes the key in the format each host's store uses; they do not show a person typing a key into the prompt.
 - OpenCode 1 installs its own SDK into the config directory on first start, so a run without network can start slowly or fail.
 - The runbook pins one version per host. Versions between the documented minimum and the pins, and newer releases, are untested until you change the pins and run it.
 - A container that ignores SIGTERM adds about 5 to 10 seconds to a timeout or interrupt while Docker waits before killing it.

@@ -29,6 +29,17 @@ export async function pickNonOverwritePath(requested: string, maxVersion = MAX_O
 
 type PixelSize = { width: number; height: number }
 
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+
+// A PNG starts with the signature and an IHDR chunk, which holds the size read below.
+function decodePng(base64: string): Buffer {
+  const png = Buffer.from(base64, "base64")
+  if (png.length < 24 || !png.subarray(0, 8).equals(PNG_SIGNATURE) || png.toString("latin1", 12, 16) !== "IHDR") {
+    throw new Error("the backend returned data that is not a PNG image; nothing was saved")
+  }
+  return png
+}
+
 // The width and height sit at fixed offsets in the IHDR chunk, which always follows the 8-byte PNG signature.
 function readPngSize(png: Buffer): PixelSize {
   return { width: png.readUInt32BE(16), height: png.readUInt32BE(20) }
@@ -51,9 +62,10 @@ type SaveResult = { savedPath: string; versioned: boolean; message: string }
 // clobbered. Returns the user-facing message alongside the saved path.
 export async function saveGeneratedImage(out: string, ctxDir: string, base64: string): Promise<SaveResult> {
   const requestedPath = path.isAbsolute(out) ? out : path.resolve(ctxDir, out)
+  // Decode and check the bytes first, so data that is not a PNG creates no directory and no file.
+  const png = decodePng(base64)
   await fs.mkdir(path.dirname(requestedPath), { recursive: true })
   const savedPath = await pickNonOverwritePath(requestedPath)
-  const png = Buffer.from(base64, "base64")
   await fs.writeFile(savedPath, png)
   return {
     savedPath,

@@ -1,5 +1,5 @@
-// Accepted size presets and their aspect ratios. The size is requested only through the prompt sentence below,
-// so returned dimensions are not enforced; recorded runs have returned an edge 1px off.
+// Accepted Codex size presets and their aspect ratios. The Codex backend takes the size only through the prompt
+// sentence below, so returned dimensions are not enforced; recorded runs have returned an edge 1px off.
 export const IMAGE_SIZES = {
   "1254x1254": "1:1",
   "1536x1024": "3:2",
@@ -16,7 +16,9 @@ export const SIZE_CHOICES = Object.entries(IMAGE_SIZES)
   .map(([size, aspectRatio]) => `${size} (${aspectRatio})`)
   .join(", ")
 
-export function appendSizeToPrompt(prompt: string, size: ImageSize): string {
+export function appendSizeToPrompt(prompt: string, size: string): string {
+  const aspectRatio = (IMAGE_SIZES as Record<string, string>)[size]
+  if (!aspectRatio) throw new Error(`"${size}" is not a Codex size preset.`)
   const [width, height] = size.split("x")
-  return `${prompt} Generate the image with a width of ${width} pixels and a height of ${height} pixels (${IMAGE_SIZES[size]} aspect ratio).`
+  return `${prompt} Generate the image with a width of ${width} pixels and a height of ${height} pixels (${aspectRatio} aspect ratio).`
 }

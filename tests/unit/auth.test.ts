@@ -9,7 +9,7 @@ mkdirSync(path.dirname(AUTH_FILE), { recursive: true })
 
 // Capture so this file's env edits don't leak into other test files sharing the bun test process.
 const ORIGINAL_AUTH_CONTENT = process.env.OPENCODE_AUTH_CONTENT
-let loadOpenAIAuth: typeof import("../../src/auth").loadOpenAIAuth
+let loadStoredCredential: typeof import("../../src/auth").loadStoredCredential
 
 function restoreEnv(key: string, value: string | undefined): void {
   if (value === undefined) {
@@ -24,7 +24,7 @@ beforeAll(async () => {
   // may import it before this one. mock.module also replaces the module for files that already
   // imported it, so auth.json is read from the temp dir regardless of the test file order.
   mock.module("xdg-basedir", () => ({ xdgData: XDG }))
-  loadOpenAIAuth = (await import("../../src/auth")).loadOpenAIAuth
+  loadStoredCredential = (await import("../../src/auth")).loadStoredCredential
 })
 
 afterAll(() => {
@@ -46,48 +46,76 @@ afterEach(() => {
   delete process.env.OPENCODE_AUTH_CONTENT
 })
 
-describe("loadOpenAIAuth", () => {
+const OAUTH = { type: "oauth", provider: "openai", label: "OpenAI ChatGPT OAuth" } as const
+const KEY = { type: "key", provider: "openai-images", label: "OpenAI Images API" } as const
+
+describe("loadStoredCredential", () => {
   test("reads a valid oauth entry from OPENCODE_AUTH_CONTENT", async () => {
     process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({
-      openai: { type: "oauth", access: "tok-env", accountId: "acct-1" },
+      openai: { type: "oauth", access: "tok-env", refresh: "r", expires: 1, accountId: "acct-1" },
     })
-    expect(await loadOpenAIAuth()).toEqual({ type: "oauth", access: "tok-env", accountId: "acct-1" })
+    expect(await loadStoredCredential(OAUTH)).toEqual({ type: "oauth", access: "tok-env", accountId: "acct-1" })
+  })
+
+  test("reads a key saved as an api entry and ignores its metadata", async () => {
+    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({
+      "openai-images": { type: "api", key: "sk-images", metadata: { note: "x" } },
+    })
+    expect(await loadStoredCredential(KEY)).toEqual({ type: "key", key: "sk-images" })
   })
 
   test("prefers OPENCODE_AUTH_CONTENT over the auth.json file", async () => {
     writeAuthFile(JSON.stringify({ openai: { type: "oauth", access: "tok-file" } }))
     process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({ openai: { type: "oauth", access: "tok-env" } })
-    expect(await loadOpenAIAuth()).toEqual({ type: "oauth", access: "tok-env" })
+    expect(await loadStoredCredential(OAUTH)).toEqual({ type: "oauth", access: "tok-env" })
   })
 
   test("falls back to the auth.json file when the env var is unset", async () => {
-    writeAuthFile(JSON.stringify({ openai: { type: "oauth", access: "tok-file" } }))
-    expect(await loadOpenAIAuth()).toEqual({ type: "oauth", access: "tok-file" })
+    writeAuthFile(JSON.stringify({ "openai-images": { type: "api", key: "sk-file" } }))
+    expect(await loadStoredCredential(KEY)).toEqual({ type: "key", key: "sk-file" })
   })
 
-  test("returns undefined when the entry is not an oauth type", async () => {
-    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({ openai: { type: "api", access: "tok" } })
-    expect(await loadOpenAIAuth()).toBeUndefined()
+  test("falls back to the auth.json file when OPENCODE_AUTH_CONTENT does not parse, as OpenCode does", async () => {
+    writeAuthFile(JSON.stringify({ "openai-images": { type: "api", key: "sk-file" } }))
+    process.env.OPENCODE_AUTH_CONTENT = "{not json sk-secret-in-the-text"
+    expect(await loadStoredCredential(KEY)).toEqual({ type: "key", key: "sk-file" })
   })
 
-  test("returns undefined when access is not a string", async () => {
-    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({ openai: { type: "oauth", access: 123 } })
-    expect(await loadOpenAIAuth()).toBeUndefined()
+  test("reads only the entry the backend names", async () => {
+    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({
+      openai: { type: "oauth", access: "tok" },
+      "openai-images": { type: "api", key: "sk-images" },
+    })
+    expect(await loadStoredCredential(OAUTH)).toEqual({ type: "oauth", access: "tok" })
+    expect(await loadStoredCredential(KEY)).toEqual({ type: "key", key: "sk-images" })
+    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({ openai: { type: "oauth", access: "tok" } })
+    expect(await loadStoredCredential(KEY)).toBeUndefined()
+    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({ openai: { type: "api", key: "sk-chat" } })
+    expect(await loadStoredCredential(KEY)).toBeUndefined()
   })
 
-  test("returns undefined when there is no openai entry", async () => {
-    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({ anthropic: { type: "oauth", access: "tok" } })
-    expect(await loadOpenAIAuth()).toBeUndefined()
+  test.each([
+    ["an api entry where oauth is needed", OAUTH, { openai: { type: "api", key: "sk" } }],
+    ["an oauth entry where a key is needed", KEY, { "openai-images": { type: "oauth", access: "tok" } }],
+    ["an oauth entry whose access is not a string", OAUTH, { openai: { type: "oauth", access: 123 } }],
+    ["a key that is empty", KEY, { "openai-images": { type: "api", key: "" } }],
+    ["a key that is not a string", KEY, { "openai-images": { type: "api", key: 7 } }],
+    ["an entry that is not an object", KEY, { "openai-images": "sk-images" }],
+    ["no entry for the provider", OAUTH, { anthropic: { type: "oauth", access: "tok" } }],
+    ["content that is not an object", OAUTH, ["openai"]],
+  ])("returns undefined for %s", async (_name, spec, content) => {
+    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify(content)
+    expect(await loadStoredCredential(spec)).toBeUndefined()
   })
 
-  test("returns undefined when the content is not valid JSON", async () => {
+  test("returns undefined, without an error, when neither source holds usable JSON", async () => {
     process.env.OPENCODE_AUTH_CONTENT = "{not json"
-    expect(await loadOpenAIAuth()).toBeUndefined()
+    writeAuthFile("{also not json")
+    expect(await loadStoredCredential(KEY)).toBeUndefined()
   })
 
   test("returns undefined when the auth.json file is missing", async () => {
     rmSync(AUTH_FILE, { force: true })
-    // The read rejects; loadOpenAIAuth swallows it and reports no credentials.
-    expect(await loadOpenAIAuth()).toBeUndefined()
+    expect(await loadStoredCredential(OAUTH)).toBeUndefined()
   })
 })

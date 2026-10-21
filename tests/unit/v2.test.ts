@@ -3,10 +3,11 @@ import { mkdtemp, readFile, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { z } from "zod"
-import { IMAGEGEN_DESCRIPTION } from "../../src/imagegen"
+import { selectBackend } from "../../src/backend"
+import { describeImagegen } from "../../src/imagegen"
 import { loadPackagedSkill, SKILL_FILE } from "../../src/skill"
 import { PNG_BASE64, PNG_BUFFER } from "./fixtures"
-import { CHATGPT_BROWSER_CREDENTIAL, loadV2Tool } from "./hosts"
+import { CHATGPT_BROWSER_CREDENTIAL, FLAVOURS, loadV2Tool, SHARED_SIZE } from "./hosts"
 
 // Capture so this file's env edits don't leak into other test files sharing the bun test process.
 const ORIGINAL_AUTH_CONTENT = process.env.OPENCODE_AUTH_CONTENT
@@ -15,7 +16,10 @@ let dir: string
 
 beforeEach(async () => {
   // A valid OpenCode 1 credential must never be used by the OpenCode 2 adapter.
-  process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({ openai: { type: "oauth", access: "legacy-token" } })
+  process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({
+    openai: { type: "oauth", access: "legacy-token" },
+    "openai-images": { type: "api", key: "legacy-images-key" },
+  })
   dir = await mkdtemp(path.join(os.tmpdir(), "v2-"))
 })
 
@@ -37,7 +41,8 @@ function stubFetch() {
   return fetchMock
 }
 
-const args = { prompt: "a cat", out: "cat.png", size: "1254x1254" } as const
+const args = { prompt: "a cat", out: "cat.png", size: SHARED_SIZE } as const
+const API_OPTIONS = { backend: "openai-api" }
 
 describe("OpenCode 2 tool registration", () => {
   test("registers imagegen as a direct tool without a namespace", async () => {
@@ -57,8 +62,16 @@ describe("OpenCode 2 tool registration", () => {
       properties: Record<string, { enum?: string[]; description?: string }>
     }
 
-    expect(tool.description).toBe(IMAGEGEN_DESCRIPTION)
-    expect(Object.keys(schema.properties)).toEqual(["prompt", "out", "size", "images", "background"])
+    expect(tool.description).toBe(describeImagegen(selectBackend(undefined)))
+    expect(Object.keys(schema.properties)).toEqual([
+      "prompt",
+      "out",
+      "size",
+      "images",
+      "background",
+      "model",
+      "quality",
+    ])
     for (const property of Object.values(schema.properties)) {
       expect(property.description).toEqual(expect.stringMatching(/\S/))
     }
@@ -90,9 +103,15 @@ describe("OpenCode 2 tool registration", () => {
   test("the host-validated input drops unknown keys and keeps null optional arguments", async () => {
     const { tool } = await loadV2Tool({ directory: dir })
 
-    const result = await tool.input["~standard"].validate({ ...args, quality: "low", images: null, background: null })
+    const result = await tool.input["~standard"].validate({
+      ...args,
+      n: 2,
+      images: null,
+      background: null,
+      model: null,
+    })
 
-    expect(result).toEqual({ value: { ...args, images: null, background: null } })
+    expect(result).toEqual({ value: { ...args, images: null, background: null, model: null } })
   })
 
   test("replaying the registration produces the same definition", async () => {
@@ -100,6 +119,49 @@ describe("OpenCode 2 tool registration", () => {
     const second = await loadV2Tool({ directory: dir })
 
     expect({ ...first.tool, execute: undefined }).toEqual({ ...second.tool, execute: undefined })
+  })
+})
+
+describe("OpenCode 2 backend selection", () => {
+  test.each(FLAVOURS)("registers the $backend schema and description from the plugin options", async (flavour) => {
+    const { tool } = await loadV2Tool({ directory: dir, pluginOptions: flavour.options })
+
+    expect(tool.description).toBe(describeImagegen(selectBackend(flavour.options)))
+    expect(tool.input).toBe(selectBackend(flavour.options).argsSchema)
+  })
+
+  test("serves a different size contract for each backend", async () => {
+    const codex = await loadV2Tool({ directory: dir })
+    const api = await loadV2Tool({ directory: dir, pluginOptions: API_OPTIONS })
+    const sizeOf = (tool: typeof codex.tool) =>
+      (
+        z.toJSONSchema(tool.input, { target: "draft-2020-12", io: "input" }) as unknown as {
+          properties: { size: object }
+        }
+      ).properties.size
+
+    expect(sizeOf(codex.tool)).toHaveProperty("enum")
+    expect(sizeOf(api.tool)).not.toHaveProperty("enum")
+  })
+
+  test("fails the setup for invalid options, before registering anything", async () => {
+    await expect(loadV2Tool({ directory: dir, pluginOptions: { backend: "dall-e" } })).rejects.toThrow(
+      "Invalid oc-multi-imagegen options.",
+    )
+  })
+
+  test("registers no integration for the Codex backend, whose OpenAI integration belongs to the host", async () => {
+    const { integrations, integrationMethods } = await loadV2Tool({ directory: dir })
+
+    expect([...integrations.keys()]).toEqual([])
+    expect(integrationMethods).toEqual([])
+  })
+
+  test("registers openai-images as a key-only integration named OpenAI Images API", async () => {
+    const { integrations, integrationMethods } = await loadV2Tool({ directory: dir, pluginOptions: API_OPTIONS })
+
+    expect([...integrations.entries()]).toEqual([["openai-images", { name: "OpenAI Images API" }]])
+    expect(integrationMethods).toEqual([{ integrationID: "openai-images", method: { type: "key" } }])
   })
 })
 
@@ -176,11 +238,22 @@ describe("OpenCode 2 execution", () => {
         sessionID: "ses_test",
         agent: "build",
         action: "imagegen",
-        resources: ["*"],
-        save: ["*"],
+        resources: ["codex"],
+        save: ["codex"],
         metadata: { ...args, background: "transparent" },
         source: { type: "tool", messageID: "msg_test", id: "call_test" },
       },
+    ])
+  })
+
+  test("asks for the openai-api resource when that backend is selected, so a Codex grant does not cover it", async () => {
+    stubFetch()
+    const { calls, run } = await loadV2Tool({ directory: dir, pluginOptions: API_OPTIONS })
+
+    await run(args)
+
+    expect(calls.assert.map(({ resources, save }) => ({ resources, save }))).toEqual([
+      { resources: ["openai-api"], save: ["openai-api"] },
     ])
   })
 
@@ -326,6 +399,84 @@ describe("OpenCode 2 credentials", () => {
 
     await expect(run(args)).rejects.toBe(failure)
 
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
+describe("OpenCode 2 image API key", () => {
+  function runApi(options: Parameters<typeof loadV2Tool>[0] = {}) {
+    return loadV2Tool({ directory: dir, pluginOptions: API_OPTIONS, ...options })
+  }
+
+  test("resolves only the openai-images connection, on every call, and sends its key", async () => {
+    const fetchMock = stubFetch()
+    const { calls, run } = await runApi()
+
+    await run(args)
+    await run(args)
+
+    expect(calls.active).toEqual(["openai-images", "openai-images"])
+    expect(calls.resolve).toHaveLength(2)
+    const headers = fetchMock.mock.calls.map(([, init]) => init.headers as Record<string, string>)
+    expect(headers.map((header) => header.Authorization)).toEqual(["Bearer sk-images", "Bearer sk-images"])
+    expect(fetchMock.mock.calls[0][0]).toBe("https://api.openai.com/v1/images/generations")
+  })
+
+  test("never falls back to the OpenAI sign-in or to OpenCode 1 credentials", async () => {
+    const fetchMock = stubFetch()
+    const { calls, run } = await runApi({ integrations: { "openai-images": { connection: undefined } } })
+
+    await expect(run(args)).rejects.toThrow(
+      "No OpenAI Images API connection is active. Add an API key to the openai-images integration.",
+    )
+
+    expect(calls.active).toEqual(["openai-images"])
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  test("leaves the OpenAI chat credentials unread and unchanged", async () => {
+    stubFetch()
+    const { calls, run } = await runApi()
+
+    await run(args)
+
+    expect(calls.active).not.toContain("openai")
+    expect(calls.resolve).not.toContain(undefined)
+  })
+
+  test("the Codex backend reads only the OpenAI connection, never the image key", async () => {
+    stubFetch()
+    const { calls, run } = await loadV2Tool({ directory: dir })
+
+    await run(args)
+
+    expect(calls.active).toEqual(["openai"])
+  })
+
+  test.each([
+    ["a connection without a credential", undefined, "has no usable credential. Add an API key"],
+    [
+      "an OAuth credential",
+      CHATGPT_BROWSER_CREDENTIAL,
+      "is not an API key. Add an API key to the openai-images integration.",
+    ],
+  ])("fails clearly for %s", async (_name, credential, message) => {
+    const fetchMock = stubFetch()
+    const connection = { type: "credential", id: "cred_2", method: "key" }
+    const { run } = await runApi({ integrations: { "openai-images": { connection, credential } } })
+
+    await expect(run(args)).rejects.toThrow(message)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  test.each([
+    ["active", new Error("connection store unavailable")],
+    ["resolve", new Error("could not read the connection")],
+  ])("propagates a %s lookup failure unchanged", async (stage, failure) => {
+    const fetchMock = stubFetch()
+    const { run } = await runApi(stage === "active" ? { activeError: failure } : { resolveError: failure })
+
+    await expect(run(args)).rejects.toBe(failure)
     expect(fetchMock).not.toHaveBeenCalled()
   })
 })

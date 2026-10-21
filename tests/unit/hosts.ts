@@ -1,10 +1,55 @@
 import type { Plugin } from "@opencode/plugin"
 import type { ToolContext } from "@opencode-ai/plugin"
+import type { z } from "zod"
 import plugin from "../../src/index"
-import type { argsSchema, resultSchema } from "../../src/schema"
+import type { ArgsShape, resultSchema } from "../../src/schema"
 
 // Test doubles for the two host contracts. They stand in for OpenCode 1's ToolContext and
 // OpenCode 2's plugin Context; the adapters under test never import either SDK at runtime.
+
+// The two backends and what is specific to each in these tests. Shared host behavior runs against both.
+export type Flavour = {
+  backend: "codex" | "openai-api"
+  // The plugin options that select it; Codex is the default and takes none.
+  options: Record<string, unknown> | undefined
+  generationsUrl: string
+  editsUrl: string
+  authorization: string
+  // The permission resource the host is asked for.
+  resource: string
+  // The credential provider id it reads from the OpenCode credential store.
+  provider: string
+}
+
+export const FLAVOURS: Flavour[] = [
+  {
+    backend: "codex",
+    options: undefined,
+    generationsUrl: "https://chatgpt.com/backend-api/codex/images/generations",
+    editsUrl: "https://chatgpt.com/backend-api/codex/images/edits",
+    authorization: "Bearer tok",
+    resource: "codex",
+    provider: "openai",
+  },
+  {
+    backend: "openai-api",
+    options: { backend: "openai-api" },
+    generationsUrl: "https://api.openai.com/v1/images/generations",
+    editsUrl: "https://api.openai.com/v1/images/edits",
+    authorization: "Bearer sk-images",
+    resource: "openai-api",
+    provider: "openai-images",
+  },
+]
+
+// OpenCode 1's stored credentials for both backends: the chat provider's ChatGPT sign-in and the image key.
+export const STORED_CREDENTIALS = {
+  openai: { type: "oauth", access: "tok", refresh: "refresh", expires: 4102444800000 },
+  "openai-images": { type: "api", key: "sk-images" },
+}
+
+// A size both backends accept.
+export const SHARED_SIZE = "1536x1024"
 
 export type NormalizedResult = { message: string; out: string; versioned: boolean }
 
@@ -23,7 +68,7 @@ export type RegisteredTool = {
   name: string
   description: string
   options: Record<string, unknown>
-  input: typeof argsSchema
+  input: z.ZodObject<ArgsShape>
   output: typeof resultSchema
   execute: (
     input: unknown,
@@ -44,8 +89,14 @@ export type V2Options = {
   // Directory returned for any session; override per call with sessionDirectories.
   directory?: string
   sessionDirectories?: Record<string, string>
+  // Plugin options as the host passes them; none selects Codex.
+  pluginOptions?: Record<string, unknown>
+  // The OpenAI integration's connection and credential. Another integration is only present when `integrations`
+  // names it.
   connection?: unknown
   credential?: unknown
+  // Connections and credentials by integration id, in addition to the defaults below.
+  integrations?: Record<string, { connection?: unknown; credential?: unknown }>
   activeError?: Error
   resolveError?: Error
   // Skills the host already holds, keyed by id, such as one the user installed.
@@ -62,6 +113,8 @@ export const CHATGPT_BROWSER_CREDENTIAL = {
   expires: Number.MAX_SAFE_INTEGER,
 }
 
+export const IMAGES_KEY_CREDENTIAL = { type: "key", key: "sk-images" }
+
 export function createV2Context(options: V2Options = {}) {
   const calls = {
     assert: [] as Array<Record<string, unknown>>,
@@ -69,6 +122,20 @@ export function createV2Context(options: V2Options = {}) {
     active: [] as string[],
     resolve: [] as unknown[],
   }
+  // Like the host, each integration has its own connection and credential; an unknown integration has none.
+  const store: Record<string, { connection?: unknown; credential?: unknown }> = {
+    openai: {
+      connection: "connection" in options ? options.connection : { type: "credential", id: "cred_1", method: "oauth" },
+      credential: "credential" in options ? options.credential : CHATGPT_BROWSER_CREDENTIAL,
+    },
+    "openai-images": {
+      connection: { type: "credential", id: "cred_2", method: "key" },
+      credential: IMAGES_KEY_CREDENTIAL,
+    },
+    ...options.integrations,
+  }
+  const integrations = new Map<string, { name: string }>()
+  const integrationMethods: unknown[] = []
   const registered: RegisteredTool[] = []
   const skills = new Map<string, Record<string, unknown>>(Object.entries(options.existingSkills ?? {}) as never)
   const skillCallbacks: Array<(editor: SkillEditor) => void> = []
@@ -84,6 +151,7 @@ export function createV2Context(options: V2Options = {}) {
   const context = {
     // A directory the adapter must not use: sessions carry their own location.
     location: { directory: "/plugin-load-directory" },
+    options: options.pluginOptions ?? {},
     tool: {
       transform: async (callback: (editor: { add: (tool: RegisteredTool) => void }) => void) => {
         callback({ add: (tool) => registered.push(tool) })
@@ -110,16 +178,35 @@ export function createV2Context(options: V2Options = {}) {
       },
     },
     integration: {
+      // Like the host, updating an integration that does not exist yet creates it.
+      transform: async (
+        callback: (editor: {
+          update: (id: string, update: (integration: { name: string }) => void) => void
+          method: { update: (input: unknown) => void }
+        }) => void,
+      ) => {
+        callback({
+          update: (id, update) => {
+            const integration = integrations.get(id) ?? { name: id }
+            update(integration)
+            integrations.set(id, integration)
+          },
+          method: { update: (input) => integrationMethods.push(input) },
+        })
+        return { dispose: async () => {} }
+      },
       connection: {
         active: async (integrationID: string) => {
           calls.active.push(integrationID)
           if (options.activeError) throw options.activeError
-          return "connection" in options ? options.connection : { type: "credential", id: "cred_1", method: "oauth" }
+          return store[integrationID]?.connection
         },
         resolve: async (connection: unknown) => {
           calls.resolve.push(connection)
           if (options.resolveError) throw options.resolveError
-          return "credential" in options ? options.credential : CHATGPT_BROWSER_CREDENTIAL
+          const entry = Object.values(store).find((candidate) => candidate.connection === connection)
+          if (!entry) throw new Error("the fake host does not know this connection")
+          return entry.credential
         },
       },
     },
@@ -128,6 +215,8 @@ export function createV2Context(options: V2Options = {}) {
     context: context as unknown as Plugin.Context,
     calls,
     registered,
+    integrations,
+    integrationMethods,
     skills,
     // Runs every skill callback again against the skills the host already holds.
     replaySkills: () => {
@@ -159,8 +248,8 @@ export function v1ToolContext(directory: string, signal: AbortSignal, ask: ToolC
   return { directory, abort: signal, ask } as unknown as ToolContext
 }
 
-export async function v1Harness(directory: string): Promise<ToolHarness> {
-  const hooks = await plugin.server({} as never)
+export async function v1Harness(directory: string, flavour?: Flavour): Promise<ToolHarness> {
+  const hooks = await plugin.server({} as never, flavour?.options)
   const tool = hooks.tool?.imagegen
   if (!tool) throw new Error("imagegen is not registered")
   const permissionRequests: unknown[] = []
@@ -184,8 +273,8 @@ export async function v1Harness(directory: string): Promise<ToolHarness> {
   }
 }
 
-export async function v2Harness(directory: string): Promise<ToolHarness> {
-  const loaded = await loadV2Tool({ directory })
+export async function v2Harness(directory: string, flavour?: Flavour): Promise<ToolHarness> {
+  const loaded = await loadV2Tool({ directory, pluginOptions: flavour?.options })
   return {
     permissionRequests: loaded.calls.assert,
     denyPermission: loaded.denyPermission,

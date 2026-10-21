@@ -17,7 +17,7 @@ Icons, logos, charts, diagrams, and anything that must scale, be recoloured or b
 - Pass geometry as a picture (a rendered layout, a crop, a sketch). Dimensions written in words come out approximate.
 - Order the prompt: medium and framing, the role of each reference, content in reading order with every visible string in quotes, then hard constraints. For an app screen, state "flat screen capture, no device frame".
 - Assign colour by role and name where colour must not appear; otherwise labels and states get colour-coded on their own.
-- Pick the size preset whose aspect ratio fits the use.
+- Pick the size whose aspect ratio fits the use.
 
 ## Correct
 

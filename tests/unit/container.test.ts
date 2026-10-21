@@ -23,6 +23,7 @@ import path from "node:path"
 const repoRoot = path.resolve(import.meta.dir, "../..")
 const helper = path.join(repoRoot, "scripts/opencode-container.sh")
 const probe = path.join(repoRoot, "scripts/container-skill-probe.sh")
+const backendProbe = path.join(repoRoot, "scripts/container-backend-probe.sh")
 const seeder = path.join(repoRoot, "scripts/seed-container-auth.ts")
 
 const ACCESS = "SYNTHETIC-HOST-ACCESS-TOKEN"
@@ -157,6 +158,81 @@ describe("seed-container-auth", () => {
 
     expect(result.code).not.toBe(0)
     expect(result.output).not.toContain(ACCESS)
+    expect(existsSync(out)).toBe(false)
+  })
+})
+
+describe("seed-container-auth image key", () => {
+  const KEY = "sk-SYNTHETIC-IMAGE-KEY"
+  const seedWithKey = (host: string, out: string, dataHome: string, envFile: string) =>
+    exec([process.execPath, seeder, "--host", host, "--out", out, "--image-key-env-file", envFile], {
+      XDG_DATA_HOME: dataHome,
+    })
+
+  function dotenv(root: string, text: string) {
+    const file = path.join(root, ".env")
+    writeFileSync(file, text, { mode: 0o600 })
+    return file
+  }
+
+  test.each(["v1", "v2"])(
+    "adds the last OPENAI_API_KEY of a dotenv file to the %s seed and prints no secret",
+    async (host) => {
+      const root = temporaryDirectory()
+      const { dataHome } = hostDataHome(root)
+      const env = dotenv(root, `OTHER=1\nOPENAI_API_KEY=sk-OLD\n# comment\nexport OPENAI_API_KEY="${KEY}" # trailing\n`)
+      const out = path.join(privateDirectory(root, "out"), "seed.json")
+
+      const result = await seedWithKey(host, out, dataHome, env)
+
+      expect(result.code).toBe(0)
+      expect(result.output).not.toContain(KEY)
+      expect(result.output).not.toContain(ACCESS)
+      expect(result.stdout).toContain("OpenAI Images API key")
+      const written = JSON.parse(readFileSync(out, "utf-8"))
+      if (host === "v1") {
+        expect(written["openai-images"]).toEqual({ type: "api", key: KEY })
+        expect(written.openai.access).toBe(ACCESS)
+      } else {
+        expect(written.map((entry: { integrationID: string }) => entry.integrationID)).toEqual([
+          "openai",
+          "openai-images",
+        ])
+        expect(written[1]).toMatchObject({
+          integrationID: "openai-images",
+          active: true,
+          value: { type: "key", key: KEY },
+        })
+      }
+    },
+  )
+
+  test.each([
+    ["has no OPENAI_API_KEY value", "OTHER=1\n", "has no OPENAI_API_KEY value"],
+    ["has an empty value", "OPENAI_API_KEY=\n", "has no OPENAI_API_KEY value"],
+    ["has a value that cannot be a header", 'OPENAI_API_KEY="sk bad value"\n', "is not usable as an API key"],
+  ])("refuses a dotenv file that %s, without echoing it or writing a seed", async (_name, text, reason) => {
+    const root = temporaryDirectory()
+    const { dataHome } = hostDataHome(root)
+    const out = path.join(privateDirectory(root, "out"), "seed.json")
+
+    const result = await seedWithKey("v1", out, dataHome, dotenv(root, text))
+
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toContain(reason)
+    expect(result.output).not.toContain("sk bad value")
+    expect(existsSync(out)).toBe(false)
+  })
+
+  test("refuses a dotenv path that is not a file", async () => {
+    const root = temporaryDirectory()
+    const { dataHome } = hostDataHome(root)
+    const out = path.join(privateDirectory(root, "out"), "seed.json")
+
+    const result = await seedWithKey("v1", out, dataHome, path.join(root, "missing.env"))
+
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toContain("is not a file")
     expect(existsSync(out)).toBe(false)
   })
 })
@@ -548,6 +624,30 @@ describe("opencode-container.sh cases", () => {
     ])
   })
 
+  test("smoke runs one low-quality generation and one edit of its output, and rejects other modes", async () => {
+    const { c, sandbox, env } = await prepared()
+
+    const result = await c.run(["cases", "v1", "smoke"], env)
+
+    expect(result.code).toBe(0)
+    const runs = c.calls().filter((line) => line.startsWith("run "))
+    expect(runs.map((line) => line.split(" ")[1].replace(/-\d+-\d+$/, ""))).toEqual([
+      "ocimg-v1-case-G",
+      "ocimg-v1-case-E",
+    ])
+    expect(runs[0]).toContain("quality low")
+    expect(runs[0]).toContain("size 1536x1024")
+    expect(runs[1]).toContain("size 1536x1024")
+    expect(runs[1]).toContain("smoke-generate.png")
+    expect(readdirSync(path.join(sandbox, "logs")).sort()).toEqual([
+      "v1-case-E.err",
+      "v1-case-E.out",
+      "v1-case-G.err",
+      "v1-case-G.out",
+    ])
+    expect((await c.run(["cases", "v1", "everything"], env)).code).toBe(2)
+  })
+
   test("asks for the images in plain terms that name neither the tool nor the skill", async () => {
     const { c, env } = await prepared()
 
@@ -681,6 +781,57 @@ describe("opencode-container.sh host configuration", () => {
     expect(runs[1]).toContain(":/pluginpkg:ro")
     expect(runs[2]).toContain(":/pluginpkg ")
     expect(runs[2]).not.toContain(":/pluginpkg:ro")
+  })
+
+  test("prepare writes the plugin's backend option for the selected backend and leaves the default without one", async () => {
+    const c = container()
+    const sandbox = await c.sandbox()
+    mkdirSync(path.join(sandbox, "pkg/package"), { recursive: true })
+
+    for (const host of ["v1", "v1-floor", "v2"]) {
+      expect((await c.run(["prepare", host, "allow", "openai-api"], { OC_SANDBOX: sandbox })).code).toBe(0)
+    }
+
+    expect(configOf(sandbox, "v1").plugin).toEqual([["file:///pluginpkg", { backend: "openai-api" }]])
+    expect(configOf(sandbox, "v1-floor").plugin).toEqual([["file:///pluginpkg", { backend: "openai-api" }]])
+    expect(configOf(sandbox, "v2").plugins).toEqual([{ package: "/pluginpkg", options: { backend: "openai-api" } }])
+    // The permission rules are the same whichever backend is selected: the wildcard covers both resources.
+    expect(configOf(sandbox, "v1").permission.imagegen).toBe("allow")
+
+    expect((await c.run(["prepare", "v1", "allow", "codex"], { OC_SANDBOX: sandbox })).code).toBe(0)
+    expect(configOf(sandbox, "v1").plugin).toEqual(["file:///pluginpkg"])
+    expect((await c.run(["prepare", "v1", "allow", "dall-e"], { OC_SANDBOX: sandbox })).code).toBe(2)
+  })
+
+  test("seed hands the image key file to the seed script by path and writes the key into the host's own store", async () => {
+    const c = container()
+    const sandbox = await c.ready("v1")
+    const env = path.join(c.root, "image.env")
+    writeFileSync(env, "OPENAI_API_KEY=sk-SYNTHETIC-IMAGE-KEY\n", { mode: 0o600 })
+
+    const result = await c.run(["seed", "v1"], { OC_SANDBOX: sandbox, OC_IMAGE_KEY_ENV_FILE: env })
+
+    expect(result.code).toBe(0)
+    expect(result.output).not.toContain("sk-SYNTHETIC-IMAGE-KEY")
+    const store = JSON.parse(readFileSync(path.join(sandbox, "v1/data/opencode/auth.json"), "utf-8"))
+    expect(store["openai-images"]).toEqual({ type: "api", key: "sk-SYNTHETIC-IMAGE-KEY" })
+  })
+
+  test("backend runs the probe for the host and backend, and rejects a backend it does not know", async () => {
+    const c = container()
+    const sandbox = await c.ready("v1", "v2")
+
+    expect((await c.run(["backend", "v1", "openai-api"], { OC_SANDBOX: sandbox })).code).toBe(0)
+    expect((await c.run(["backend", "v2", "codex"], { OC_SANDBOX: sandbox })).code).toBe(0)
+    expect((await c.run(["backend", "v1", "dall-e"], { OC_SANDBOX: sandbox })).code).toBe(2)
+
+    const runs = c.calls().filter((line) => line.startsWith("run "))
+    expect(runs).toHaveLength(2)
+    expect(runs[0]).toContain(`${backendProbe}:/probe.sh:ro`)
+    expect(runs[0]).toEndWith(" /probe.sh v1 openai-api")
+    expect(runs[0]).not.toContain("OPENCODE_SERVER_PASSWORD")
+    expect(runs[1]).toContain("OPENCODE_SERVER_PASSWORD=probe")
+    expect(runs[1]).toEndWith(" /probe.sh v2 codex")
   })
 
   test("skills and lifecycle fail when the probe in the container fails", async () => {
@@ -892,5 +1043,136 @@ describe("container-skill-probe.sh", () => {
     expect(result.stderr).toContain("Last reply")
     expect(result.stderr).toContain("fake opencode serve started")
     await until(p.serverStopped)
+  })
+})
+
+// scripts/container-backend-probe.sh runs `opencode serve` and `wget` inside a container. Here `wget` answers from
+// what FAKE_REGISTERED and FAKE_PROVIDER_ENTRY say the host registered, with the openai-images methods in FAKE_METHODS.
+const FAKE_BACKEND_WGET = `#!/bin/sh
+for last; do :; done
+registered() { [ -n "$FAKE_REGISTERED" ]; }
+case $last in
+  */api/location | */path) echo '{"directory":"/work"}' ;;
+  */provider/auth*)
+    if registered; then echo '{"openai":[{"type":"api","label":"Manually enter API Key"}],"openai-images":'"$FAKE_METHODS"'}'
+    else echo '{"openai":[{"type":"api","label":"Manually enter API Key"}]}'; fi ;;
+  */config*)
+    if [ -n "$FAKE_PROVIDER_ENTRY" ]; then echo '{"provider":{"openai-images":{}}}'; else echo '{"model":"openai/example"}'; fi ;;
+  */experimental/tool*)
+    if [ -n "$FAKE_TOOLS" ]; then echo "$FAKE_TOOLS"
+    else echo '[{"id":"invalid","description":"Do not use"},{"id":"imagegen","description":"Generate or edit one raster image through the OpenAI Images API. Load the skill.","parameters":{}}]'; fi ;;
+  */api/integration)
+    if registered; then echo '{"data":[{"id":"openai","name":"OpenAI","methods":[{"type":"key"}],"connections":[]},{"id":"openai-images","name":"OpenAI Images API","methods":'"$FAKE_METHODS"',"connections":[]}]}'
+    else echo '{"data":[{"id":"openai","name":"OpenAI","methods":[{"type":"key"}],"connections":[]}]}'; fi ;;
+  *) echo "wget: unexpected $last" >&2; exit 1 ;;
+esac
+`
+
+// The methods each host reports for the plugin's key sign-in, as seen on the pinned hosts.
+const REAL_METHODS = {
+  v1: '[{"type":"api","label":"OpenAI Images API"}]',
+  v2: '[{"type":"key"}]',
+}
+
+describe("container-backend-probe.sh", () => {
+  function backendProbeRunner() {
+    const root = temporaryDirectory()
+    const bin = path.join(root, "bin")
+    mkdirSync(bin)
+    writeFileSync(path.join(bin, "opencode"), FAKE_OPENCODE, { mode: 0o755 })
+    writeFileSync(path.join(bin, "wget"), FAKE_BACKEND_WGET, { mode: 0o755 })
+    writeFileSync(path.join(bin, "sleep"), "#!/bin/sh\nexec /bin/sleep 0.01\n", { mode: 0o755 })
+    const tmp = privateDirectory(root, "tmp")
+    const env = { PATH: `${bin}:${process.env.PATH}`, PROBE_TMP: tmp }
+    return (args: string[], extra: Record<string, string> = {}) =>
+      exec(["sh", backendProbe, ...args], {
+        FAKE_REGISTERED: "",
+        FAKE_PROVIDER_ENTRY: "",
+        FAKE_METHODS: REAL_METHODS[args[0] as "v1" | "v2"] ?? "[]",
+        ...env,
+        ...extra,
+      })
+  }
+
+  test("OpenCode 1 with openai-api shows the key sign-in and the tool, and no provider entry", async () => {
+    const result = await backendProbeRunner()(["v1", "openai-api"], { FAKE_REGISTERED: "1" })
+
+    expect(result.code).toBe(0)
+    expect(result.stdout).toContain('sign-in method: "openai-images":[{"type":"api","label":"OpenAI Images API"}]')
+    expect(result.stdout).toContain("provider entry: none")
+    expect(result.stdout).toContain("tool: Generate or edit one raster image through the OpenAI Images API.")
+  })
+
+  test("OpenCode 2 with openai-api shows the key-only integration", async () => {
+    const result = await backendProbeRunner()(["v2", "openai-api"], { FAKE_REGISTERED: "1" })
+
+    expect(result.code).toBe(0)
+    expect(result.stdout).toContain(
+      'integration: {"id":"openai-images","name":"OpenAI Images API","methods":[{"type":"key"}]',
+    )
+  })
+
+  test.each(["v1", "v2"])("codex registers nothing on %s", async (host) => {
+    const result = await backendProbeRunner()([host, "codex"])
+
+    expect(result.code).toBe(0)
+    expect(result.stdout).toMatch(/(sign-in method|integration): none/)
+  })
+
+  test.each([
+    ["v1", "openai-api", {}, "sign-in method is missing"],
+    ["v2", "openai-api", {}, "integration is missing"],
+    ["v1", "codex", { FAKE_REGISTERED: "1" }, "sign-in method is registered but should not be"],
+    ["v2", "codex", { FAKE_REGISTERED: "1" }, "integration is registered but should not be"],
+    [
+      "v1",
+      "openai-api",
+      { FAKE_REGISTERED: "1", FAKE_PROVIDER_ENTRY: "1" },
+      "provider entry is registered but should not be",
+    ],
+  ])("fails for %s with %s when %j", async (host, backend, extra, message) => {
+    const result = await backendProbeRunner()([host, backend], extra)
+
+    expect(result.code).toBe(1)
+    expect(result.stderr).toContain(message)
+    expect(result.stderr).toContain("Server log (last 30 lines):")
+  })
+
+  // The key is registered under openai-images, but not as the one key-only method the backend promises.
+  test.each([
+    ["v1", "an empty list", "[]"],
+    ["v1", "another type", '[{"type":"oauth","label":"OpenAI Images API"}]'],
+    ["v1", "an extra method", '[{"type":"api","label":"OpenAI Images API"},{"type":"oauth","label":"Other"}]'],
+    ["v2", "an empty list", "[]"],
+    ["v2", "another type", '[{"type":"oauth"}]'],
+    ["v2", "an extra method", '[{"type":"key"},{"type":"oauth"}]'],
+  ])("fails for %s when openai-images has %s as its methods", async (host, _name, methods) => {
+    const result = await backendProbeRunner()([host, "openai-api"], { FAKE_REGISTERED: "1", FAKE_METHODS: methods })
+
+    expect(result.code).toBe(1)
+    expect(result.stderr).toContain("has the wrong shape")
+    expect(result.stderr).toContain("Server log (last 30 lines):")
+  })
+
+  test.each(["v1", "v2"])("codex still fails on %s when openai-images is registered with no methods", async (host) => {
+    const result = await backendProbeRunner()([host, "codex"], { FAKE_REGISTERED: "1", FAKE_METHODS: "[]" })
+
+    expect(result.code).toBe(1)
+    expect(result.stderr).toContain("is registered but should not be")
+  })
+
+  test("the OpenCode 1 tool check fails on a reply that has no imagegen entry", async () => {
+    const result = await backendProbeRunner()(["v1", "openai-api"], {
+      FAKE_REGISTERED: "1",
+      FAKE_TOOLS: '{"error":"x"}',
+    })
+
+    expect(result.code).toBe(1)
+    expect(result.stderr).toContain("tool is missing")
+  })
+
+  test("an unknown host or backend is a usage error", async () => {
+    expect((await backendProbeRunner()(["v3", "codex"])).code).toBe(2)
+    expect((await backendProbeRunner()(["v1", "dall-e"])).code).toBe(2)
   })
 })

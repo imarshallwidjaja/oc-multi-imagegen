@@ -3,11 +3,14 @@ import { mkdtemp, readFile, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import type { ToolContext } from "@opencode-ai/plugin"
-import { IMAGEGEN_DESCRIPTION } from "../../src/imagegen"
+import { selectBackend } from "../../src/backend"
+import { describeImagegen } from "../../src/imagegen"
 import plugin from "../../src/index"
 import { SKILLS_DIRECTORY } from "../../src/skill"
 import { PNG_BASE64, PNG_BUFFER } from "./fixtures"
-import { v1ToolContext } from "./hosts"
+import { FLAVOURS, SHARED_SIZE, STORED_CREDENTIALS, v1ToolContext } from "./hosts"
+
+const API_OPTIONS = { backend: "openai-api" }
 
 // Capture so this file's env edits don't leak into other test files sharing the bun test process.
 const ORIGINAL_AUTH_CONTENT = process.env.OPENCODE_AUTH_CONTENT
@@ -15,7 +18,10 @@ const originalFetch = globalThis.fetch
 let dir: string
 
 beforeEach(async () => {
-  process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({ openai: { type: "oauth", access: "tok", accountId: "acct-1" } })
+  process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({
+    ...STORED_CREDENTIALS,
+    openai: { ...STORED_CREDENTIALS.openai, accountId: "acct-1" },
+  })
   dir = await mkdtemp(path.join(os.tmpdir(), "v1-"))
 })
 
@@ -38,8 +44,8 @@ function stubFetch() {
 }
 
 // Pass a config to run the plugin's config hook on it before the tool is used, as the host does at startup.
-async function loadTool(config?: Record<string, unknown>) {
-  const hooks = config ? await runConfigHook(config) : await plugin.server({} as never)
+async function loadTool(config?: Record<string, unknown>, options?: Record<string, unknown>) {
+  const hooks = config ? await runConfigHook(config, options) : await plugin.server({} as never, options)
   const tool = hooks.tool?.imagegen
   if (!tool) throw new Error("imagegen is not registered")
   return tool
@@ -54,8 +60,8 @@ function recordAsks() {
 }
 
 // The hook's parameter is the SDK Config, which omits the `skills` key the host reads at runtime.
-async function runConfigHook(config: Record<string, unknown>) {
-  const hooks = await plugin.server({} as never)
+async function runConfigHook(config: Record<string, unknown>, options?: Record<string, unknown>) {
+  const hooks = await plugin.server({} as never, options)
   await hooks.config?.(config as never)
   return hooks
 }
@@ -101,22 +107,34 @@ describe("OpenCode 1 skill registration", () => {
   })
 })
 
+const ARGUMENTS = ["prompt", "out", "size", "images", "background", "model", "quality"]
+const args = { prompt: "a cat", out: "cat.png", size: SHARED_SIZE }
+
 describe("OpenCode 1 adapter", () => {
-  test("registers one imagegen tool with the documented arguments", async () => {
-    const hooks = await plugin.server({} as never)
+  test.each(FLAVOURS)("registers one imagegen tool with the documented arguments for $backend", async (flavour) => {
+    const hooks = await plugin.server({} as never, flavour.options)
 
     expect(Object.keys(hooks.tool ?? {})).toEqual(["imagegen"])
-    expect(Object.keys((await loadTool()).args)).toEqual(["prompt", "out", "size", "images", "background"])
+    expect(Object.keys((await loadTool(undefined, flavour.options)).args)).toEqual(ARGUMENTS)
   })
 
-  test("exposes the shared tool description and a description for every argument", async () => {
-    const tool = await loadTool()
+  test.each(FLAVOURS)("exposes the $backend description and a description for every argument", async (flavour) => {
+    const tool = await loadTool(undefined, flavour.options)
 
-    expect(tool.description).toBe(IMAGEGEN_DESCRIPTION)
+    expect(tool.description).toBe(describeImagegen(selectBackend(flavour.options)))
     for (const arg of Object.values(tool.args)) {
       // The SDK types args with its own Zod core type, which does not declare the description getter.
       expect((arg as { description?: string }).description).toEqual(expect.stringMatching(/\S/))
     }
+  })
+
+  test("defaults to the Codex backend and fails the load for invalid options", async () => {
+    const tool = await loadTool()
+    expect(tool.description).toBe(describeImagegen(selectBackend({ backend: "codex" })))
+
+    await expect(plugin.server({} as never, { backend: "dall-e" })).rejects.toThrow(
+      "Invalid oc-multi-imagegen options.",
+    )
   })
 
   test("returns the saved path as output text and { out, versioned } metadata", async () => {
@@ -125,7 +143,7 @@ describe("OpenCode 1 adapter", () => {
     const { ask } = recordAsks()
     const ctx = v1ToolContext(dir, new AbortController().signal, ask)
 
-    const result = await tool.execute({ prompt: "a cat", out: "cat.png", size: "1672x941" }, ctx)
+    const result = await tool.execute({ ...args, size: "1672x941" }, ctx)
 
     const savedPath = path.join(dir, "cat.png")
     expect(await readFile(savedPath)).toEqual(PNG_BUFFER)
@@ -135,20 +153,19 @@ describe("OpenCode 1 adapter", () => {
     })
   })
 
-  test("asks only for the imagegen permission, over the whole operation, with the skills directory registered", async () => {
+  test.each(FLAVOURS)("asks only for the imagegen permission on the $resource resource", async (flavour) => {
     stubFetch()
-    const tool = await loadTool({})
+    const tool = await loadTool({}, flavour.options)
     const { asks, ask } = recordAsks()
-    const args = { prompt: "a cat", out: "cat.png", size: "1672x941" } as const
 
     await tool.execute(args, v1ToolContext(dir, new AbortController().signal, ask))
 
     expect(asks).toEqual([
       {
         permission: "imagegen",
-        patterns: ["*"],
-        always: ["*"],
-        metadata: { prompt: "a cat", out: "cat.png", size: "1672x941" },
+        patterns: [flavour.resource],
+        always: [flavour.resource],
+        metadata: args,
       },
     ])
   })
@@ -158,31 +175,30 @@ describe("OpenCode 1 adapter", () => {
     const tool = await loadTool()
     const { ask } = recordAsks()
 
-    await tool.execute(
-      { prompt: "a cat", out: "cat.png", size: "1254x1254" },
-      v1ToolContext(dir, new AbortController().signal, ask),
-    )
+    await tool.execute(args, v1ToolContext(dir, new AbortController().signal, ask))
 
     const headers = fetchMock.mock.calls[0][1].headers as Record<string, string>
     expect(headers.Authorization).toBe("Bearer tok")
     expect(headers["ChatGPT-Account-Id"]).toBe("acct-1")
   })
 
-  test("reports missing credentials after the permission was granted and before the backend call", async () => {
-    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({})
-    const fetchMock = stubFetch()
-    const tool = await loadTool()
-    const { asks, ask } = recordAsks()
+  test.each(FLAVOURS)(
+    "reports missing $provider credentials after the permission and before the backend call",
+    async (flavour) => {
+      process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({})
+      const fetchMock = stubFetch()
+      const tool = await loadTool(undefined, flavour.options)
+      const { asks, ask } = recordAsks()
 
-    const act = tool.execute(
-      { prompt: "a cat", out: "cat.png", size: "1254x1254" },
-      v1ToolContext(dir, new AbortController().signal, ask),
-    )
+      const act = tool.execute(args, v1ToolContext(dir, new AbortController().signal, ask))
 
-    await expect(act).rejects.toThrow("OpenAI ChatGPT OAuth credentials not configured.")
-    expect(asks).toHaveLength(1)
-    expect(fetchMock).not.toHaveBeenCalled()
-  })
+      await expect(act).rejects.toThrow(
+        `credentials not configured. Run \`opencode auth login --provider ${flavour.provider}\`.`,
+      )
+      expect(asks).toHaveLength(1)
+      expect(fetchMock).not.toHaveBeenCalled()
+    },
+  )
 
   test("does not read credentials when the permission is denied", async () => {
     // Reaching the credential loader would report missing credentials instead of the denial.
@@ -193,12 +209,72 @@ describe("OpenCode 1 adapter", () => {
       throw new Error("denied by the host")
     }
 
-    const act = tool.execute(
-      { prompt: "a cat", out: "cat.png", size: "1254x1254" },
-      v1ToolContext(dir, new AbortController().signal, ask),
-    )
+    const act = tool.execute(args, v1ToolContext(dir, new AbortController().signal, ask))
 
     await expect(act).rejects.toThrow("denied by the host")
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
+describe("OpenCode 1 image API key", () => {
+  test("registers the openai-images sign-in as a native api method with no loader or provider entry", async () => {
+    const hooks = await plugin.server({} as never, API_OPTIONS)
+    const config: Record<string, unknown> = { model: "openai/example" }
+    await hooks.config?.(config as never)
+
+    expect(hooks.auth).toEqual({
+      provider: "openai-images",
+      methods: [{ type: "api", label: "OpenAI Images API" }],
+    })
+    // A provider or model entry would take part in OpenCode's default chat model choice.
+    expect(hooks.provider).toBeUndefined()
+    expect(config).not.toHaveProperty("provider")
+  })
+
+  test("registers no sign-in for the Codex backend, whose OpenAI sign-in belongs to the host", async () => {
+    const hooks = await plugin.server({} as never)
+
+    expect(hooks.auth).toBeUndefined()
+  })
+
+  test("authenticates with the openai-images key from OpenCode's auth data, read on every call", async () => {
+    const fetchMock = stubFetch()
+    const tool = await loadTool(undefined, API_OPTIONS)
+    const { ask } = recordAsks()
+    const context = v1ToolContext(dir, new AbortController().signal, ask)
+
+    await tool.execute(args, context)
+    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({ "openai-images": { type: "api", key: "sk-rotated" } })
+    await tool.execute({ ...args, out: "second.png" }, context)
+
+    const headers = fetchMock.mock.calls.map(([, init]) => init.headers as Record<string, string>)
+    expect(headers.map((header) => header.Authorization)).toEqual(["Bearer sk-images", "Bearer sk-rotated"])
+    expect(headers[0]).not.toHaveProperty("ChatGPT-Account-Id")
+  })
+
+  test("never uses the OpenAI chat sign-in as an image key", async () => {
+    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({
+      openai: { type: "oauth", access: "tok", refresh: "r", expires: 1 },
+    })
+    const fetchMock = stubFetch()
+    const tool = await loadTool(undefined, API_OPTIONS)
+    const { ask } = recordAsks()
+
+    const act = tool.execute(args, v1ToolContext(dir, new AbortController().signal, ask))
+
+    await expect(act).rejects.toThrow("OpenAI Images API credentials not configured.")
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  test("the Codex backend never uses the image key", async () => {
+    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({ "openai-images": { type: "api", key: "sk-images" } })
+    const fetchMock = stubFetch()
+    const tool = await loadTool()
+    const { ask } = recordAsks()
+
+    const act = tool.execute(args, v1ToolContext(dir, new AbortController().signal, ask))
+
+    await expect(act).rejects.toThrow("OpenAI ChatGPT OAuth credentials not configured.")
     expect(fetchMock).not.toHaveBeenCalled()
   })
 })
