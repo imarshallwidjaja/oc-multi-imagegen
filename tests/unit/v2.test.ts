@@ -6,11 +6,10 @@ import { z } from "zod"
 import { selectBackend } from "../../src/backend"
 import { describeImagegen } from "../../src/imagegen"
 import { loadPackagedSkill, SKILL_FILE } from "../../src/skill"
-import { PNG_BASE64, PNG_BUFFER } from "./fixtures"
-import { CHATGPT_BROWSER_CREDENTIAL, FLAVOURS, loadV2Tool, SHARED_SIZE } from "./hosts"
+import { isolateEnvironment, PNG_BASE64, PNG_BUFFER } from "./fixtures"
+import { CHATGPT_BROWSER_CREDENTIAL, ENVIRONMENT_KEY, FLAVOURS, loadV2Tool, SHARED_SIZE } from "./hosts"
 
-// Capture so this file's env edits don't leak into other test files sharing the bun test process.
-const ORIGINAL_AUTH_CONTENT = process.env.OPENCODE_AUTH_CONTENT
+isolateEnvironment()
 const originalFetch = globalThis.fetch
 let dir: string
 
@@ -24,11 +23,6 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
-  if (ORIGINAL_AUTH_CONTENT === undefined) {
-    delete process.env.OPENCODE_AUTH_CONTENT
-  } else {
-    process.env.OPENCODE_AUTH_CONTENT = ORIGINAL_AUTH_CONTENT
-  }
   globalThis.fetch = originalFetch
   await rm(dir, { recursive: true, force: true })
 })
@@ -42,7 +36,6 @@ function stubFetch() {
 }
 
 const args = { prompt: "a cat", out: "cat.png", size: SHARED_SIZE } as const
-const API_OPTIONS = { backend: "openai-api" }
 
 describe("OpenCode 2 tool registration", () => {
   test("registers imagegen as a direct tool without a namespace", async () => {
@@ -123,16 +116,16 @@ describe("OpenCode 2 tool registration", () => {
 })
 
 describe("OpenCode 2 backend selection", () => {
-  test.each(FLAVOURS)("registers the $backend schema and description from the plugin options", async (flavour) => {
-    const { tool } = await loadV2Tool({ directory: dir, pluginOptions: flavour.options })
+  test.each(FLAVOURS)("registers the $backend schema and description it is selected with", async (flavour) => {
+    const { tool } = await loadV2Tool({ directory: dir, backend: flavour.backend })
 
-    expect(tool.description).toBe(describeImagegen(selectBackend(flavour.options)))
-    expect(tool.input).toBe(selectBackend(flavour.options).argsSchema)
+    expect(tool.description).toBe(describeImagegen(selectBackend(undefined)))
+    expect(tool.input).toBe(selectBackend(undefined).argsSchema)
   })
 
   test("serves a different size contract for each backend", async () => {
     const codex = await loadV2Tool({ directory: dir })
-    const api = await loadV2Tool({ directory: dir, pluginOptions: API_OPTIONS })
+    const api = await loadV2Tool({ directory: dir, backend: "openai-api" })
     const sizeOf = (tool: typeof codex.tool) =>
       (
         z.toJSONSchema(tool.input, { target: "draft-2020-12", io: "input" }) as unknown as {
@@ -144,12 +137,6 @@ describe("OpenCode 2 backend selection", () => {
     expect(sizeOf(api.tool)).not.toHaveProperty("enum")
   })
 
-  test("fails the setup for invalid options, before registering anything", async () => {
-    await expect(loadV2Tool({ directory: dir, pluginOptions: { backend: "dall-e" } })).rejects.toThrow(
-      "Invalid oc-multi-imagegen options.",
-    )
-  })
-
   test("registers no integration for the Codex backend, whose OpenAI integration belongs to the host", async () => {
     const { integrations, integrationMethods } = await loadV2Tool({ directory: dir })
 
@@ -157,11 +144,14 @@ describe("OpenCode 2 backend selection", () => {
     expect(integrationMethods).toEqual([])
   })
 
-  test("registers openai-images as a key-only integration named OpenAI Images API", async () => {
-    const { integrations, integrationMethods } = await loadV2Tool({ directory: dir, pluginOptions: API_OPTIONS })
+  test("registers openai-images as an integration named OpenAI Images API with a key and an env method", async () => {
+    const { integrations, integrationMethods } = await loadV2Tool({ directory: dir, backend: "openai-api" })
 
     expect([...integrations.entries()]).toEqual([["openai-images", { name: "OpenAI Images API" }]])
-    expect(integrationMethods).toEqual([{ integrationID: "openai-images", method: { type: "key" } }])
+    expect(integrationMethods).toEqual([
+      { integrationID: "openai-images", method: { type: "key" } },
+      { integrationID: "openai-images", method: { type: "env", names: ["OC_MULTI_IMAGEGEN_OPENAI_API_KEY"] } },
+    ])
   })
 })
 
@@ -248,7 +238,7 @@ describe("OpenCode 2 execution", () => {
 
   test("asks for the openai-api resource when that backend is selected, so a Codex grant does not cover it", async () => {
     stubFetch()
-    const { calls, run } = await loadV2Tool({ directory: dir, pluginOptions: API_OPTIONS })
+    const { calls, run } = await loadV2Tool({ directory: dir, backend: "openai-api" })
 
     await run(args)
 
@@ -257,21 +247,25 @@ describe("OpenCode 2 execution", () => {
     ])
   })
 
-  test("rethrows the host's denial before resolving credentials or reading the session, and the skill stays registered", async () => {
-    const fetchMock = stubFetch()
-    const { calls, denyPermission, run, skills } = await loadV2Tool({ directory: dir })
-    const denial = new Error("denied by the host")
-    denyPermission(denial)
+  test.each(FLAVOURS)(
+    "rethrows the host's denial for $backend before resolving credentials or reading the session, and the skill stays registered",
+    async (flavour) => {
+      process.env.OC_MULTI_IMAGEGEN_OPENAI_API_KEY = ENVIRONMENT_KEY
+      const fetchMock = stubFetch()
+      const { calls, denyPermission, run, skills } = await loadV2Tool({ directory: dir, backend: flavour.backend })
+      const denial = new Error("denied by the host")
+      denyPermission(denial)
 
-    await expect(run(args)).rejects.toBe(denial)
+      await expect(run(args)).rejects.toBe(denial)
 
-    expect(calls.assert.map((request) => request.action)).toEqual(["imagegen"])
-    expect(skills.has("oc-multi-imagegen")).toBe(true)
-    expect(calls.active).toEqual([])
-    expect(calls.resolve).toEqual([])
-    expect(calls.sessionGet).toEqual([])
-    expect(fetchMock).not.toHaveBeenCalled()
-  })
+      expect(calls.assert.map((request) => request.action)).toEqual(["imagegen"])
+      expect(skills.has("oc-multi-imagegen")).toBe(true)
+      expect(calls.active).toEqual([])
+      expect(calls.resolve).toEqual([])
+      expect(calls.sessionGet).toEqual([])
+      expect(fetchMock).not.toHaveBeenCalled()
+    },
+  )
 
   test("resolves the directory from each call's session, not from where the plugin loaded", async () => {
     stubFetch()
@@ -405,7 +399,7 @@ describe("OpenCode 2 credentials", () => {
 
 describe("OpenCode 2 image API key", () => {
   function runApi(options: Parameters<typeof loadV2Tool>[0] = {}) {
-    return loadV2Tool({ directory: dir, pluginOptions: API_OPTIONS, ...options })
+    return loadV2Tool({ directory: dir, backend: "openai-api", ...options })
   }
 
   test("resolves only the openai-images connection, on every call, and sends its key", async () => {
@@ -427,10 +421,38 @@ describe("OpenCode 2 image API key", () => {
     const { calls, run } = await runApi({ integrations: { "openai-images": { connection: undefined } } })
 
     await expect(run(args)).rejects.toThrow(
-      "No OpenAI Images API connection is active. Add an API key to the openai-images integration.",
+      "No OpenAI Images API connection is active. Set OC_MULTI_IMAGEGEN_OPENAI_API_KEY in the environment of the OpenCode process, or add an API key to the openai-images integration.",
     )
 
     expect(calls.active).toEqual(["openai-images"])
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  test("resolves OC_MULTI_IMAGEGEN_OPENAI_API_KEY through the host as an environment connection, not the saved key", async () => {
+    process.env.OC_MULTI_IMAGEGEN_OPENAI_API_KEY = ENVIRONMENT_KEY
+    const fetchMock = stubFetch()
+    const { calls, run } = await runApi()
+
+    await run(args)
+
+    // The host lists the saved credential first, so `active` would return it: the plugin selects the environment
+    // connection itself and leaves the saved one alone.
+    expect(calls.active).toEqual([])
+    expect(calls.resolve).toEqual([{ type: "env", name: "OC_MULTI_IMAGEGEN_OPENAI_API_KEY" }])
+    expect((fetchMock.mock.calls[0][1].headers as Record<string, string>).Authorization).toBe(
+      `Bearer ${ENVIRONMENT_KEY}`,
+    )
+  })
+
+  test("a present variable that the host cannot resolve fails without looking up the saved key", async () => {
+    process.env.OC_MULTI_IMAGEGEN_OPENAI_API_KEY = ENVIRONMENT_KEY
+    const fetchMock = stubFetch()
+    const failure = new Error("host environment lookup failed")
+    const { calls, run } = await runApi({ resolveError: failure })
+
+    await expect(run(args)).rejects.toBe(failure)
+
+    expect(calls.active).toEqual([])
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
@@ -454,7 +476,7 @@ describe("OpenCode 2 image API key", () => {
   })
 
   test.each([
-    ["a connection without a credential", undefined, "has no usable credential. Add an API key"],
+    ["a connection without a credential", undefined, "has no usable credential. Set OC_MULTI_IMAGEGEN_OPENAI_API_KEY"],
     [
       "an OAuth credential",
       CHATGPT_BROWSER_CREDENTIAL,

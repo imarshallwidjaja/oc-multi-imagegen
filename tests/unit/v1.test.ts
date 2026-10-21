@@ -7,13 +7,18 @@ import { selectBackend } from "../../src/backend"
 import { describeImagegen } from "../../src/imagegen"
 import plugin from "../../src/index"
 import { SKILLS_DIRECTORY } from "../../src/skill"
-import { PNG_BASE64, PNG_BUFFER } from "./fixtures"
-import { FLAVOURS, SHARED_SIZE, STORED_CREDENTIALS, v1ToolContext } from "./hosts"
+import { isolateEnvironment, PNG_BASE64, PNG_BUFFER } from "./fixtures"
+import {
+  type Backend,
+  ENVIRONMENT_KEY,
+  FLAVOURS,
+  SHARED_SIZE,
+  STORED_CREDENTIALS,
+  selectBackendVariable,
+  v1ToolContext,
+} from "./hosts"
 
-const API_OPTIONS = { backend: "openai-api" }
-
-// Capture so this file's env edits don't leak into other test files sharing the bun test process.
-const ORIGINAL_AUTH_CONTENT = process.env.OPENCODE_AUTH_CONTENT
+isolateEnvironment()
 const originalFetch = globalThis.fetch
 let dir: string
 
@@ -26,11 +31,6 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
-  if (ORIGINAL_AUTH_CONTENT === undefined) {
-    delete process.env.OPENCODE_AUTH_CONTENT
-  } else {
-    process.env.OPENCODE_AUTH_CONTENT = ORIGINAL_AUTH_CONTENT
-  }
   globalThis.fetch = originalFetch
   await rm(dir, { recursive: true, force: true })
 })
@@ -44,8 +44,9 @@ function stubFetch() {
 }
 
 // Pass a config to run the plugin's config hook on it before the tool is used, as the host does at startup.
-async function loadTool(config?: Record<string, unknown>, options?: Record<string, unknown>) {
-  const hooks = config ? await runConfigHook(config, options) : await plugin.server({} as never, options)
+async function loadTool(config?: Record<string, unknown>, backend?: Backend) {
+  selectBackendVariable(backend)
+  const hooks = config ? await runConfigHook(config) : await plugin.server({} as never)
   const tool = hooks.tool?.imagegen
   if (!tool) throw new Error("imagegen is not registered")
   return tool
@@ -60,8 +61,8 @@ function recordAsks() {
 }
 
 // The hook's parameter is the SDK Config, which omits the `skills` key the host reads at runtime.
-async function runConfigHook(config: Record<string, unknown>, options?: Record<string, unknown>) {
-  const hooks = await plugin.server({} as never, options)
+async function runConfigHook(config: Record<string, unknown>) {
+  const hooks = await plugin.server({} as never)
   await hooks.config?.(config as never)
   return hooks
 }
@@ -112,29 +113,21 @@ const args = { prompt: "a cat", out: "cat.png", size: SHARED_SIZE }
 
 describe("OpenCode 1 adapter", () => {
   test.each(FLAVOURS)("registers one imagegen tool with the documented arguments for $backend", async (flavour) => {
-    const hooks = await plugin.server({} as never, flavour.options)
+    selectBackendVariable(flavour.backend)
+    const hooks = await plugin.server({} as never)
 
     expect(Object.keys(hooks.tool ?? {})).toEqual(["imagegen"])
-    expect(Object.keys((await loadTool(undefined, flavour.options)).args)).toEqual(ARGUMENTS)
+    expect(Object.keys((await loadTool(undefined, flavour.backend)).args)).toEqual(ARGUMENTS)
   })
 
   test.each(FLAVOURS)("exposes the $backend description and a description for every argument", async (flavour) => {
-    const tool = await loadTool(undefined, flavour.options)
+    const tool = await loadTool(undefined, flavour.backend)
 
-    expect(tool.description).toBe(describeImagegen(selectBackend(flavour.options)))
+    expect(tool.description).toBe(describeImagegen(selectBackend(undefined)))
     for (const arg of Object.values(tool.args)) {
       // The SDK types args with its own Zod core type, which does not declare the description getter.
       expect((arg as { description?: string }).description).toEqual(expect.stringMatching(/\S/))
     }
-  })
-
-  test("defaults to the Codex backend and fails the load for invalid options", async () => {
-    const tool = await loadTool()
-    expect(tool.description).toBe(describeImagegen(selectBackend({ backend: "codex" })))
-
-    await expect(plugin.server({} as never, { backend: "dall-e" })).rejects.toThrow(
-      "Invalid oc-multi-imagegen options.",
-    )
   })
 
   test("returns the saved path as output text and { out, versioned } metadata", async () => {
@@ -155,7 +148,7 @@ describe("OpenCode 1 adapter", () => {
 
   test.each(FLAVOURS)("asks only for the imagegen permission on the $resource resource", async (flavour) => {
     stubFetch()
-    const tool = await loadTool({}, flavour.options)
+    const tool = await loadTool({}, flavour.backend)
     const { asks, ask } = recordAsks()
 
     await tool.execute(args, v1ToolContext(dir, new AbortController().signal, ask))
@@ -187,14 +180,13 @@ describe("OpenCode 1 adapter", () => {
     async (flavour) => {
       process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({})
       const fetchMock = stubFetch()
-      const tool = await loadTool(undefined, flavour.options)
+      const tool = await loadTool(undefined, flavour.backend)
       const { asks, ask } = recordAsks()
 
       const act = tool.execute(args, v1ToolContext(dir, new AbortController().signal, ask))
 
-      await expect(act).rejects.toThrow(
-        `credentials not configured. Run \`opencode auth login --provider ${flavour.provider}\`.`,
-      )
+      await expect(act).rejects.toThrow(`credentials not configured.`)
+      await expect(act).rejects.toThrow(`\`opencode auth login --provider ${flavour.provider}\``)
       expect(asks).toHaveLength(1)
       expect(fetchMock).not.toHaveBeenCalled()
     },
@@ -218,7 +210,8 @@ describe("OpenCode 1 adapter", () => {
 
 describe("OpenCode 1 image API key", () => {
   test("registers the openai-images sign-in as a native api method with no loader or provider entry", async () => {
-    const hooks = await plugin.server({} as never, API_OPTIONS)
+    selectBackendVariable("openai-api")
+    const hooks = await plugin.server({} as never)
     const config: Record<string, unknown> = { model: "openai/example" }
     await hooks.config?.(config as never)
 
@@ -239,7 +232,7 @@ describe("OpenCode 1 image API key", () => {
 
   test("authenticates with the openai-images key from OpenCode's auth data, read on every call", async () => {
     const fetchMock = stubFetch()
-    const tool = await loadTool(undefined, API_OPTIONS)
+    const tool = await loadTool(undefined, "openai-api")
     const { ask } = recordAsks()
     const context = v1ToolContext(dir, new AbortController().signal, ask)
 
@@ -252,12 +245,37 @@ describe("OpenCode 1 image API key", () => {
     expect(headers[0]).not.toHaveProperty("ChatGPT-Account-Id")
   })
 
+  test("reads the key from OC_MULTI_IMAGEGEN_OPENAI_API_KEY itself, since OpenCode 1 has no resolver for it", async () => {
+    process.env.OPENCODE_AUTH_CONTENT = "{}"
+    process.env.OC_MULTI_IMAGEGEN_OPENAI_API_KEY = ENVIRONMENT_KEY
+    const fetchMock = stubFetch()
+    const tool = await loadTool(undefined, "openai-api")
+    const { ask } = recordAsks()
+
+    await tool.execute(args, v1ToolContext(dir, new AbortController().signal, ask))
+
+    const headers = fetchMock.mock.calls[0][1].headers as Record<string, string>
+    expect(headers.Authorization).toBe(`Bearer ${ENVIRONMENT_KEY}`)
+  })
+
+  test("names the variable and the sign-in command when neither holds a key", async () => {
+    process.env.OPENCODE_AUTH_CONTENT = "{}"
+    const tool = await loadTool(undefined, "openai-api")
+    const { ask } = recordAsks()
+
+    const act = tool.execute(args, v1ToolContext(dir, new AbortController().signal, ask))
+
+    await expect(act).rejects.toThrow(
+      "OpenAI Images API credentials not configured. Set OC_MULTI_IMAGEGEN_OPENAI_API_KEY in the environment of the OpenCode process, or run `opencode auth login --provider openai-images`.",
+    )
+  })
+
   test("never uses the OpenAI chat sign-in as an image key", async () => {
     process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({
       openai: { type: "oauth", access: "tok", refresh: "r", expires: 1 },
     })
     const fetchMock = stubFetch()
-    const tool = await loadTool(undefined, API_OPTIONS)
+    const tool = await loadTool(undefined, "openai-api")
     const { ask } = recordAsks()
 
     const act = tool.execute(args, v1ToolContext(dir, new AbortController().signal, ask))

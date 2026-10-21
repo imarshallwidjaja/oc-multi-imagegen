@@ -122,7 +122,7 @@ describe("OpenAI Images API backend request", () => {
 
       expect(error).toBeInstanceOf(Error)
       expect((error as Error).message).toBe(
-        "The stored OpenAI Images API key contains characters that cannot be sent in an HTTP header.",
+        "The OpenAI Images API key contains characters that cannot be sent in an HTTP header.",
       )
       expect(fetchMock).not.toHaveBeenCalled()
     },

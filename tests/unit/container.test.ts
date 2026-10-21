@@ -164,10 +164,22 @@ describe("seed-container-auth", () => {
 
 describe("seed-container-auth image key", () => {
   const KEY = "sk-SYNTHETIC-IMAGE-KEY"
-  const seedWithKey = (host: string, out: string, dataHome: string, envFile: string) =>
-    exec([process.execPath, seeder, "--host", host, "--out", out, "--image-key-env-file", envFile], {
-      XDG_DATA_HOME: dataHome,
-    })
+  const DECOY = "sk-synthetic-decoy-not-a-real-key"
+  const seedWithKey = (host: string, out: string, dataHome: string, envFile: string, envOut?: string) =>
+    exec(
+      [
+        process.execPath,
+        seeder,
+        "--host",
+        host,
+        "--out",
+        out,
+        "--image-key-env-file",
+        envFile,
+        ...(envOut ? ["--image-key-env-out", envOut] : []),
+      ],
+      { XDG_DATA_HOME: dataHome },
+    )
 
   function dotenv(root: string, text: string) {
     const file = path.join(root, ".env")
@@ -176,22 +188,28 @@ describe("seed-container-auth image key", () => {
   }
 
   test.each(["v1", "v2"])(
-    "adds the last OPENAI_API_KEY of a dotenv file to the %s seed and prints no secret",
+    "writes the last OPENAI_API_KEY of a dotenv file as a private OC_MULTI_IMAGEGEN_OPENAI_API_KEY env file for %s, and a synthetic saved key in the seed",
     async (host) => {
       const root = temporaryDirectory()
       const { dataHome } = hostDataHome(root)
       const env = dotenv(root, `OTHER=1\nOPENAI_API_KEY=sk-OLD\n# comment\nexport OPENAI_API_KEY="${KEY}" # trailing\n`)
-      const out = path.join(privateDirectory(root, "out"), "seed.json")
+      const directory = privateDirectory(root, "out")
+      const out = path.join(directory, "seed.json")
+      const envOut = path.join(directory, "image-key.env")
 
-      const result = await seedWithKey(host, out, dataHome, env)
+      const result = await seedWithKey(host, out, dataHome, env, envOut)
 
       expect(result.code).toBe(0)
       expect(result.output).not.toContain(KEY)
       expect(result.output).not.toContain(ACCESS)
-      expect(result.stdout).toContain("OpenAI Images API key")
+      expect(result.stdout).toContain("synthetic saved image key")
+      expect(readFileSync(envOut, "utf-8")).toBe(`OC_MULTI_IMAGEGEN_OPENAI_API_KEY=${KEY}\n`)
+      expect(statSync(envOut).mode & 0o777).toBe(0o600)
+      // The seed carries the chat sign-in and a saved decoy, never the real key.
+      expect(readFileSync(out, "utf-8")).not.toContain(KEY)
       const written = JSON.parse(readFileSync(out, "utf-8"))
       if (host === "v1") {
-        expect(written["openai-images"]).toEqual({ type: "api", key: KEY })
+        expect(written["openai-images"]).toEqual({ type: "api", key: DECOY })
         expect(written.openai.access).toBe(ACCESS)
       } else {
         expect(written.map((entry: { integrationID: string }) => entry.integrationID)).toEqual([
@@ -201,7 +219,7 @@ describe("seed-container-auth image key", () => {
         expect(written[1]).toMatchObject({
           integrationID: "openai-images",
           active: true,
-          value: { type: "key", key: KEY },
+          value: { type: "key", key: DECOY },
         })
       }
     },
@@ -211,29 +229,151 @@ describe("seed-container-auth image key", () => {
     ["has no OPENAI_API_KEY value", "OTHER=1\n", "has no OPENAI_API_KEY value"],
     ["has an empty value", "OPENAI_API_KEY=\n", "has no OPENAI_API_KEY value"],
     ["has a value that cannot be a header", 'OPENAI_API_KEY="sk bad value"\n', "is not usable as an API key"],
-  ])("refuses a dotenv file that %s, without echoing it or writing a seed", async (_name, text, reason) => {
+  ])("refuses a dotenv file that %s, without echoing it or writing a file", async (_name, text, reason) => {
     const root = temporaryDirectory()
     const { dataHome } = hostDataHome(root)
-    const out = path.join(privateDirectory(root, "out"), "seed.json")
+    const directory = privateDirectory(root, "out")
+    const out = path.join(directory, "seed.json")
+    const envOut = path.join(directory, "image-key.env")
 
-    const result = await seedWithKey("v1", out, dataHome, dotenv(root, text))
+    const result = await seedWithKey("v1", out, dataHome, dotenv(root, text), envOut)
 
     expect(result.code).not.toBe(0)
     expect(result.stderr).toContain(reason)
     expect(result.output).not.toContain("sk bad value")
-    expect(existsSync(out)).toBe(false)
+    expect(readdirSync(directory)).toEqual([])
   })
 
   test("refuses a dotenv path that is not a file", async () => {
     const root = temporaryDirectory()
     const { dataHome } = hostDataHome(root)
-    const out = path.join(privateDirectory(root, "out"), "seed.json")
+    const directory = privateDirectory(root, "out")
 
-    const result = await seedWithKey("v1", out, dataHome, path.join(root, "missing.env"))
+    const result = await seedWithKey(
+      "v1",
+      path.join(directory, "seed.json"),
+      dataHome,
+      path.join(root, "missing.env"),
+      path.join(directory, "image-key.env"),
+    )
 
     expect(result.code).not.toBe(0)
     expect(result.stderr).toContain("is not a file")
-    expect(existsSync(out)).toBe(false)
+    expect(readdirSync(directory)).toEqual([])
+  })
+
+  test("needs the key file and its output together, and two different output paths", async () => {
+    const root = temporaryDirectory()
+    const { dataHome } = hostDataHome(root)
+    const env = dotenv(root, `OPENAI_API_KEY=${KEY}\n`)
+    const directory = privateDirectory(root, "out")
+    const out = path.join(directory, "seed.json")
+
+    const withoutOutput = await seedWithKey("v1", out, dataHome, env)
+    const sameOutput = await seedWithKey("v1", out, dataHome, env, out)
+
+    expect(withoutOutput.stderr).toContain("Usage:")
+    expect(sameOutput.stderr).toContain("must be different paths")
+    expect(readdirSync(directory)).toEqual([])
+  })
+
+  test("is all or nothing: an existing env file path leaves the seed unwritten and the earlier file as it was", async () => {
+    const root = temporaryDirectory()
+    const { dataHome } = hostDataHome(root)
+    const env = dotenv(root, `OPENAI_API_KEY=${KEY}\n`)
+    const directory = privateDirectory(root, "out")
+    const out = path.join(directory, "seed.json")
+    const envOut = path.join(directory, "image-key.env")
+    writeFileSync(envOut, "an earlier file", { mode: 0o600 })
+
+    const result = await seedWithKey("v2", out, dataHome, env, envOut)
+
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toContain("already exists")
+    expect(result.output).not.toContain(KEY)
+    expect(readFileSync(envOut, "utf-8")).toBe("an earlier file")
+    expect(readdirSync(directory)).toEqual(["image-key.env"])
+  })
+
+  test("removes its staged files, and writes none, when closing a staged file fails", async () => {
+    const root = temporaryDirectory()
+    const { dataHome } = hostDataHome(root)
+    const env = dotenv(root, `OPENAI_API_KEY=${KEY}\n`)
+    const directory = privateDirectory(root, "out")
+    // The seed script is the only importer of node:fs rewritten here: its second closeSync, the env file's, throws
+    // after really closing the descriptor.
+    const shim = path.join(root, "fs-close-fails.ts")
+    writeFileSync(
+      shim,
+      `import * as real from "node:fs"
+export * from "node:fs"
+let closes = 0
+export function closeSync(fd: number) {
+  real.closeSync(fd)
+  if (++closes === 2) throw Object.assign(new Error("injected"), { code: "EIO" })
+}
+`,
+    )
+    const preload = path.join(root, "preload.ts")
+    writeFileSync(
+      preload,
+      `import { plugin } from "bun"
+import { readFileSync } from "node:fs"
+plugin({
+  name: "fs-close-fails",
+  setup(build) {
+    build.onLoad({ filter: /seed-container-auth\\.ts$/ }, ({ path }) => ({
+      contents: readFileSync(path, "utf-8").replace('"node:fs"', ${JSON.stringify(JSON.stringify(shim))}),
+      loader: "ts",
+    }))
+  },
+})
+`,
+    )
+
+    const result = await exec(
+      [
+        process.execPath,
+        "--preload",
+        preload,
+        seeder,
+        "--host",
+        "v1",
+        "--out",
+        path.join(directory, "seed.json"),
+        "--image-key-env-file",
+        env,
+        "--image-key-env-out",
+        path.join(directory, "image-key.env"),
+      ],
+      { XDG_DATA_HOME: dataHome },
+    )
+
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toContain("Seed failed (EIO)")
+    expect(result.output).not.toContain(KEY)
+    expect(readdirSync(directory)).toEqual([])
+  })
+
+  test("refuses an env file directory that is readable by others", async () => {
+    const root = temporaryDirectory()
+    const { dataHome } = hostDataHome(root)
+    const env = dotenv(root, `OPENAI_API_KEY=${KEY}\n`)
+    const open = path.join(root, "open")
+    mkdirSync(open)
+    chmodSync(open, 0o755)
+
+    const result = await seedWithKey(
+      "v1",
+      path.join(privateDirectory(root, "out"), "seed.json"),
+      dataHome,
+      env,
+      path.join(open, "image-key.env"),
+    )
+
+    expect(result.code).not.toBe(0)
+    expect(result.stderr).toContain("must be an existing directory you own with mode 700")
+    expect(readdirSync(open)).toEqual([])
   })
 })
 
@@ -783,38 +923,127 @@ describe("opencode-container.sh host configuration", () => {
     expect(runs[2]).not.toContain(":/pluginpkg:ro")
   })
 
-  test("prepare writes the plugin's backend option for the selected backend and leaves the default without one", async () => {
+  test("prepare keeps the plugin entries plain and records the backend the container's environment selects", async () => {
     const c = container()
     const sandbox = await c.sandbox()
     mkdirSync(path.join(sandbox, "pkg/package"), { recursive: true })
 
     for (const host of ["v1", "v1-floor", "v2"]) {
       expect((await c.run(["prepare", host, "allow", "openai-api"], { OC_SANDBOX: sandbox })).code).toBe(0)
+      expect(readFileSync(path.join(sandbox, host, "backend"), "utf-8").trim()).toBe("openai-api")
     }
 
-    expect(configOf(sandbox, "v1").plugin).toEqual([["file:///pluginpkg", { backend: "openai-api" }]])
-    expect(configOf(sandbox, "v1-floor").plugin).toEqual([["file:///pluginpkg", { backend: "openai-api" }]])
-    expect(configOf(sandbox, "v2").plugins).toEqual([{ package: "/pluginpkg", options: { backend: "openai-api" } }])
+    // The backend is never an option of the plugin entry, so the configuration holds no setting to migrate.
+    expect(configOf(sandbox, "v1").plugin).toEqual(["file:///pluginpkg"])
+    expect(configOf(sandbox, "v1-floor").plugin).toEqual(["file:///pluginpkg"])
+    expect(configOf(sandbox, "v2").plugins).toEqual(["/pluginpkg"])
     // The permission rules are the same whichever backend is selected: the wildcard covers both resources.
     expect(configOf(sandbox, "v1").permission.imagegen).toBe("allow")
 
     expect((await c.run(["prepare", "v1", "allow", "codex"], { OC_SANDBOX: sandbox })).code).toBe(0)
-    expect(configOf(sandbox, "v1").plugin).toEqual(["file:///pluginpkg"])
+    expect(existsSync(path.join(sandbox, "v1/backend"))).toBe(false)
     expect((await c.run(["prepare", "v1", "allow", "dall-e"], { OC_SANDBOX: sandbox })).code).toBe(2)
   })
 
-  test("seed hands the image key file to the seed script by path and writes the key into the host's own store", async () => {
+  test("containers get the recorded backend as OC_MULTI_IMAGEGEN_BACKEND and nothing else of the caller's environment", async () => {
+    const c = container()
+    const sandbox = await c.sandbox()
+    mkdirSync(path.join(sandbox, "pkg/package"), { recursive: true })
+    expect((await c.run(["prepare", "v1", "allow", "openai-api"], { OC_SANDBOX: sandbox })).code).toBe(0)
+    expect((await c.run(["prepare", "v2"], { OC_SANDBOX: sandbox })).code).toBe(0)
+    const caller = {
+      OC_SANDBOX: sandbox,
+      OC_MULTI_IMAGEGEN_BACKEND: "caller-backend",
+      OC_MULTI_IMAGEGEN_OPENAI_API_KEY: "sk-CALLER-KEY",
+    }
+
+    expect((await c.run(["tools", "v1"], caller)).code).toBe(0)
+    expect((await c.run(["skills", "v2"], caller)).code).toBe(0)
+
+    const [v1, v2] = c.calls().filter((line) => line.startsWith("run "))
+    expect(v1).toContain("-e OC_MULTI_IMAGEGEN_BACKEND=openai-api")
+    expect(v2).not.toContain("OC_MULTI_IMAGEGEN_BACKEND")
+    for (const run of [v1, v2]) {
+      expect(run).not.toContain("caller-backend")
+      expect(run).not.toContain("sk-CALLER-KEY")
+    }
+  })
+
+  test("a backend file with unusable text is refused before a container starts", async () => {
+    const c = container()
+    const sandbox = await c.ready("v1")
+    writeFileSync(path.join(sandbox, "v1/backend"), "openai-api --privileged\n")
+
+    const result = await c.run(["tools", "v1"], { OC_SANDBOX: sandbox })
+
+    expect(result.code).toBe(2)
+    expect(c.calls().filter((line) => line.startsWith("run "))).toEqual([])
+  })
+
+  test("seed hands the image key to run and cases as a private env file, and clean removes it", async () => {
+    const c = container()
+    const sandbox = await c.ready("v1", "v2")
+    const env = path.join(c.root, "image.env")
+    writeFileSync(env, "OPENAI_API_KEY=sk-SYNTHETIC-IMAGE-KEY\n", { mode: 0o600 })
+    const keyFile = path.join(sandbox, "v1/image-key.env")
+
+    const seeded = await c.run(["seed", "v1"], { OC_SANDBOX: sandbox, OC_IMAGE_KEY_ENV_FILE: env })
+    const imported = await c.run(["seed", "v2"], { OC_SANDBOX: sandbox, OC_IMAGE_KEY_ENV_FILE: env })
+
+    expect(seeded.code).toBe(0)
+    expect(imported.code).toBe(0)
+    expect(seeded.output + imported.output).not.toContain("sk-SYNTHETIC-IMAGE-KEY")
+    expect(readFileSync(keyFile, "utf-8")).toBe("OC_MULTI_IMAGEGEN_OPENAI_API_KEY=sk-SYNTHETIC-IMAGE-KEY\n")
+    expect(statSync(keyFile).mode & 0o777).toBe(0o600)
+    // The store holds a synthetic saved key, so a run that succeeds shows the variable won.
+    const store = JSON.parse(readFileSync(path.join(sandbox, "v1/data/opencode/auth.json"), "utf-8"))
+    expect(store["openai-images"]).toEqual({ type: "api", key: "sk-synthetic-decoy-not-a-real-key" })
+
+    const caller = { OC_SANDBOX: sandbox, OC_MODEL: "provider/model-under-test" }
+    expect((await c.run(["run", "v1", "check", "--", "models"], caller)).code).toBe(0)
+    expect((await c.run(["cases", "v1", "smoke"], caller)).code).toBe(0)
+    expect((await c.run(["tools", "v1"], caller)).code).toBe(0)
+    expect((await c.run(["run", "v2", "check", "--", "models"], caller)).code).toBe(0)
+
+    // Only the containers that can generate images get their host's file, by path; the import and the checks that
+    // never call the tool do not, and no argument carries the key.
+    const runs = c.calls().filter((line) => line.startsWith("run "))
+    const named = (part: string) => runs.filter((line) => line.includes(part))
+    const v2File = path.join(sandbox, "v2/image-key.env")
+    for (const run of [...named("-check-"), ...named("-case-")].filter((line) => line.includes("ocimg-v1-"))) {
+      expect(run).toContain(`--env-file ${keyFile}`)
+    }
+    expect(named("ocimg-v2-check")[0]).toContain(`--env-file ${v2File}`)
+    for (const run of [...named("-tools-"), ...named("-seed-import-")]) expect(run).not.toContain("--env-file")
+    expect(named("-case-")).toHaveLength(2)
+    for (const run of runs) expect(run).not.toContain("sk-SYNTHETIC-IMAGE-KEY")
+
+    // A seed that was interrupted before it linked its file leaves a staging fragment next to the final path.
+    const fragments = [`${keyFile}.4242.tmp`, `${v2File}.4243.tmp`]
+    for (const fragment of fragments)
+      writeFileSync(fragment, "OC_MULTI_IMAGEGEN_OPENAI_API_KEY=staged\n", { mode: 0o600 })
+    const unrelated = path.join(sandbox, "v1/work/image-key.env.4244.tmp")
+    writeFileSync(unrelated, "kept")
+
+    expect((await c.run(["clean"], { OC_SANDBOX: sandbox })).code).toBe(0)
+    expect(existsSync(keyFile)).toBe(false)
+    expect(existsSync(v2File)).toBe(false)
+    for (const fragment of fragments) expect(existsSync(fragment)).toBe(false)
+    expect(readFileSync(unrelated, "utf-8")).toBe("kept")
+  })
+
+  test("seed refuses an image key file path that already exists, and leaves it as it was", async () => {
     const c = container()
     const sandbox = await c.ready("v1")
     const env = path.join(c.root, "image.env")
     writeFileSync(env, "OPENAI_API_KEY=sk-SYNTHETIC-IMAGE-KEY\n", { mode: 0o600 })
+    writeFileSync(path.join(sandbox, "v1/image-key.env"), "earlier", { mode: 0o600 })
 
     const result = await c.run(["seed", "v1"], { OC_SANDBOX: sandbox, OC_IMAGE_KEY_ENV_FILE: env })
 
-    expect(result.code).toBe(0)
-    expect(result.output).not.toContain("sk-SYNTHETIC-IMAGE-KEY")
-    const store = JSON.parse(readFileSync(path.join(sandbox, "v1/data/opencode/auth.json"), "utf-8"))
-    expect(store["openai-images"]).toEqual({ type: "api", key: "sk-SYNTHETIC-IMAGE-KEY" })
+    expect(result.code).not.toBe(0)
+    expect(readFileSync(path.join(sandbox, "v1/image-key.env"), "utf-8")).toBe("earlier")
+    expect(existsSync(path.join(sandbox, "v1/data/opencode/auth.json"))).toBe(false)
   })
 
   test("backend runs the probe for the host and backend, and rejects a backend it does not know", async () => {
@@ -1048,6 +1277,8 @@ describe("container-skill-probe.sh", () => {
 
 // scripts/container-backend-probe.sh runs `opencode serve` and `wget` inside a container. Here `wget` answers from
 // what FAKE_REGISTERED and FAKE_PROVIDER_ENTRY say the host registered, with the openai-images methods in FAKE_METHODS.
+// Like OpenCode 2, it lists a connection for the plugin's variable when a registered env method names it and the
+// probe's own environment sets it.
 const FAKE_BACKEND_WGET = `#!/bin/sh
 for last; do :; done
 registered() { [ -n "$FAKE_REGISTERED" ]; }
@@ -1062,7 +1293,9 @@ case $last in
     if [ -n "$FAKE_TOOLS" ]; then echo "$FAKE_TOOLS"
     else echo '[{"id":"invalid","description":"Do not use"},{"id":"imagegen","description":"Generate or edit one raster image through the OpenAI Images API. Load the skill.","parameters":{}}]'; fi ;;
   */api/integration)
-    if registered; then echo '{"data":[{"id":"openai","name":"OpenAI","methods":[{"type":"key"}],"connections":[]},{"id":"openai-images","name":"OpenAI Images API","methods":'"$FAKE_METHODS"',"connections":[]}]}'
+    connections='[]'
+    case $FAKE_METHODS in *'"env"'*) [ -z "$OC_MULTI_IMAGEGEN_OPENAI_API_KEY" ] || connections='[{"type":"env","name":"OC_MULTI_IMAGEGEN_OPENAI_API_KEY"}]' ;; esac
+    if registered; then echo '{"data":[{"id":"openai","name":"OpenAI","methods":[{"type":"key"}],"connections":[]},{"id":"openai-images","name":"OpenAI Images API","methods":'"$FAKE_METHODS"',"connections":'"$connections"'}]}'
     else echo '{"data":[{"id":"openai","name":"OpenAI","methods":[{"type":"key"}],"connections":[]}]}'; fi ;;
   *) echo "wget: unexpected $last" >&2; exit 1 ;;
 esac
@@ -1071,7 +1304,7 @@ esac
 // The methods each host reports for the plugin's key sign-in, as seen on the pinned hosts.
 const REAL_METHODS = {
   v1: '[{"type":"api","label":"OpenAI Images API"}]',
-  v2: '[{"type":"key"}]',
+  v2: '[{"type":"key"},{"type":"env","names":["OC_MULTI_IMAGEGEN_OPENAI_API_KEY"]}]',
 }
 
 describe("container-backend-probe.sh", () => {
@@ -1103,13 +1336,23 @@ describe("container-backend-probe.sh", () => {
     expect(result.stdout).toContain("tool: Generate or edit one raster image through the OpenAI Images API.")
   })
 
-  test("OpenCode 2 with openai-api shows the key-only integration", async () => {
+  test("OpenCode 2 with openai-api shows the key and env methods and the connection for the variable", async () => {
     const result = await backendProbeRunner()(["v2", "openai-api"], { FAKE_REGISTERED: "1" })
 
     expect(result.code).toBe(0)
     expect(result.stdout).toContain(
-      'integration: {"id":"openai-images","name":"OpenAI Images API","methods":[{"type":"key"}]',
+      'integration: {"id":"openai-images","name":"OpenAI Images API","methods":[{"type":"key"},{"type":"env","names":["OC_MULTI_IMAGEGEN_OPENAI_API_KEY"]}]',
     )
+    expect(result.stdout).toContain('connections: [{"type":"env","name":"OC_MULTI_IMAGEGEN_OPENAI_API_KEY"}]')
+    // The placeholder that makes the host list the connection is not a credential and does not reach the output.
+    expect(result.output).not.toContain("NONSECRET-PROBE-PLACEHOLDER")
+  })
+
+  test("codex shows no connection, whatever the caller's environment holds", async () => {
+    const result = await backendProbeRunner()(["v2", "codex"], { OC_MULTI_IMAGEGEN_OPENAI_API_KEY: "sk-CALLER" })
+
+    expect(result.code).toBe(0)
+    expect(result.stdout).toContain("connections: none")
   })
 
   test.each(["v1", "v2"])("codex registers nothing on %s", async (host) => {
@@ -1138,14 +1381,26 @@ describe("container-backend-probe.sh", () => {
     expect(result.stderr).toContain("Server log (last 30 lines):")
   })
 
-  // The key is registered under openai-images, but not as the one key-only method the backend promises.
+  // The key is registered under openai-images, but not as the methods the backend promises: the api method on
+  // OpenCode 1, the key and env methods on OpenCode 2.
   test.each([
     ["v1", "an empty list", "[]"],
     ["v1", "another type", '[{"type":"oauth","label":"OpenAI Images API"}]'],
     ["v1", "an extra method", '[{"type":"api","label":"OpenAI Images API"},{"type":"oauth","label":"Other"}]'],
     ["v2", "an empty list", "[]"],
     ["v2", "another type", '[{"type":"oauth"}]'],
-    ["v2", "an extra method", '[{"type":"key"},{"type":"oauth"}]'],
+    [
+      "v2",
+      "an extra method",
+      '[{"type":"key"},{"type":"env","names":["OC_MULTI_IMAGEGEN_OPENAI_API_KEY"]},{"type":"oauth"}]',
+    ],
+    ["v2", "only the key method", '[{"type":"key"}]'],
+    ["v2", "the env method for another variable", '[{"type":"key"},{"type":"env","names":["OPENAI_API_KEY"]}]'],
+    [
+      "v2",
+      "an env method that also names the chat key",
+      '[{"type":"key"},{"type":"env","names":["OC_MULTI_IMAGEGEN_OPENAI_API_KEY","OPENAI_API_KEY"]}]',
+    ],
   ])("fails for %s when openai-images has %s as its methods", async (host, _name, methods) => {
     const result = await backendProbeRunner()([host, "openai-api"], { FAKE_REGISTERED: "1", FAKE_METHODS: methods })
 

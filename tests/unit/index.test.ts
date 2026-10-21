@@ -6,6 +6,9 @@ import path from "node:path"
 import { pathToFileURL } from "node:url"
 import plugin from "../../src/index"
 import { SKILL_NAME } from "../../src/skill"
+import { isolateEnvironment } from "./fixtures"
+
+isolateEnvironment()
 
 const REPO_DIR = path.resolve(import.meta.dir, "../..")
 

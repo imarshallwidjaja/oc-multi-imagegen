@@ -3,7 +3,7 @@ import { selectBackend } from "./backend"
 import { describeImagegen, generateImage, IMAGEGEN_TOOL } from "./imagegen"
 import { resultSchema } from "./schema"
 import { loadPackagedSkill } from "./skill"
-import type { CredentialSpec, ImageCredential } from "./types"
+import { type CredentialSpec, emptyEnvironmentError, environmentOverride, type ImageCredential } from "./types"
 
 // The OpenAI integration methods whose OAuth credential the Codex images endpoint accepts.
 const CHATGPT_METHOD_IDS = new Set(["chatgpt-browser", "chatgpt-headless"])
@@ -16,7 +16,10 @@ type Integration = Plugin.Context["integration"]
 // plugin. Resolution failures propagate unchanged, and no other credential source is consulted.
 async function resolveActiveCredential(integration: Integration, spec: CredentialSpec) {
   const name = spec.type === "oauth" ? "OpenAI" : spec.label
-  const hint = spec.type === "oauth" ? SIGN_IN_HINT : `Add an API key to the ${spec.provider} integration.`
+  const hint =
+    spec.type === "oauth"
+      ? SIGN_IN_HINT
+      : `Set ${spec.environmentVariable} in the environment of the OpenCode process, or add an API key to the ${spec.provider} integration.`
   const connection = await integration.connection.active(spec.provider)
   if (!connection) {
     throw new Error(`No ${name} connection is active. ${hint}`)
@@ -49,8 +52,19 @@ async function resolveChatGptAuth(integration: Integration, spec: CredentialSpec
   }
 }
 
+// The host lists a saved credential before an environment connection, so `active` would return the saved key even
+// when the variable is set. A present variable is therefore resolved directly as an environment connection, which
+// makes the host read the value; the plugin only checks that the variable exists. Without it, the saved key applies.
+// A present but empty variable resolves to nothing and fails without consulting the saved key.
 async function resolveApiKey(integration: Integration, spec: CredentialSpec): Promise<ImageCredential> {
-  const credential = await resolveActiveCredential(integration, spec)
+  const name = environmentOverride(spec)
+  let credential: Awaited<ReturnType<Integration["connection"]["resolve"]>>
+  if (name === undefined) {
+    credential = await resolveActiveCredential(integration, spec)
+  } else {
+    credential = await integration.connection.resolve({ type: "env", name })
+    if (!credential) throw emptyEnvironmentError(spec, name)
+  }
   if (credential.type !== "key") {
     throw new Error(
       `The active ${spec.label} connection is not an API key. Add an API key to the ${spec.provider} integration.`,
@@ -81,13 +95,15 @@ export const setup: Plugin.Plugin["setup"] = async (ctx) => {
       content: skill.content,
     } as Parameters<SkillEditor["add"]>[0])
   })
-  // A key credential is a key-only integration owned by this plugin. The OpenAI integration is the host's.
+  // A key credential is an integration owned by this plugin, with a key method for saving one and an env method
+  // for the variable that overrides it. The OpenAI integration is the host's.
   if (spec.type === "key") {
     await ctx.integration.transform((editor) => {
       editor.update(spec.provider, (integration) => {
         integration.name = spec.label
       })
       editor.method.update({ integrationID: spec.provider, method: { type: "key" } })
+      editor.method.update({ integrationID: spec.provider, method: { type: "env", names: [spec.environmentVariable] } })
     })
   }
   await ctx.tool.transform((editor) => {

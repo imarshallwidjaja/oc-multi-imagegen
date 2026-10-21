@@ -3,8 +3,9 @@ import { existsSync } from "node:fs"
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { PNG_BASE64, PNG_BUFFER } from "./fixtures"
+import { isolateEnvironment, PNG_BASE64, PNG_BUFFER } from "./fixtures"
 import {
+  ENVIRONMENT_KEY,
   FLAVOURS,
   type Flavour,
   SHARED_SIZE,
@@ -16,8 +17,7 @@ import {
 
 // The imagegen flow is shared by both host adapters and both backends, so each test runs against OpenCode 1 and
 // OpenCode 2 with each backend selected. Wire-level request details live in codex.test.ts and openai-api.test.ts.
-// Capture so this file's env edits don't leak into other test files sharing the bun test process.
-const ORIGINAL_AUTH_CONTENT = process.env.OPENCODE_AUTH_CONTENT
+isolateEnvironment()
 const originalFetch = globalThis.fetch
 let dir: string
 
@@ -27,11 +27,6 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
-  if (ORIGINAL_AUTH_CONTENT === undefined) {
-    delete process.env.OPENCODE_AUTH_CONTENT
-  } else {
-    process.env.OPENCODE_AUTH_CONTENT = ORIGINAL_AUTH_CONTENT
-  }
   globalThis.fetch = originalFetch
   await rm(dir, { recursive: true, force: true })
 })
@@ -164,8 +159,9 @@ describe.each(matrix)("imagegen through %s with the %s backend", (_host, _backen
   })
 
   test("a denied permission stops before credentials, reference images or the backend are touched", async () => {
-    // Reaching the credential store would fail with a different error than the denial.
+    // Reaching the credential store or the key variable would fail with a different error than the denial.
     process.env.OPENCODE_AUTH_CONTENT = "{}"
+    process.env.OC_MULTI_IMAGEGEN_OPENAI_API_KEY = ""
     const fetchMock = stubFetch()
     const harness = await createHarness(dir)
     harness.denyPermission(new Error("denied by the host"))
@@ -277,4 +273,78 @@ describe.each(matrix)("imagegen through %s with the %s backend", (_host, _backen
       expect(await readdir(dir)).toEqual([])
     },
   )
+})
+
+const apiFlavour = FLAVOURS.find((flavour) => flavour.backend === "openai-api") as Flavour
+const codexFlavour = FLAVOURS.find((flavour) => flavour.backend === "codex") as Flavour
+
+// The saved key in each host's own store is `sk-images` (STORED_CREDENTIALS, and the OpenCode 2 fake connection store).
+// OpenCode lists a saved credential before an environment variable, so these tests also show the plugin does not take
+// the saved key when the variable is present.
+describe.each(hosts)("image API key source through %s", (_host, create) => {
+  const authorizations = (fetchMock: ReturnType<typeof stubFetch>) =>
+    fetchMock.mock.calls.map(([, init]) => (init.headers as Record<string, string>).Authorization)
+
+  test("uses OC_MULTI_IMAGEGEN_OPENAI_API_KEY ahead of the saved key, and the next call after it changes", async () => {
+    const fetchMock = stubFetch()
+    const harness = await create(dir, apiFlavour)
+
+    process.env.OC_MULTI_IMAGEGEN_OPENAI_API_KEY = ENVIRONMENT_KEY
+    await harness.execute(args)
+    process.env.OC_MULTI_IMAGEGEN_OPENAI_API_KEY = "sk-rotated"
+    await harness.execute({ ...args, out: "second.png" })
+    delete process.env.OC_MULTI_IMAGEGEN_OPENAI_API_KEY
+    await harness.execute({ ...args, out: "third.png" })
+
+    expect(authorizations(fetchMock)).toEqual([`Bearer ${ENVIRONMENT_KEY}`, "Bearer sk-rotated", "Bearer sk-images"])
+  })
+
+  test.each([
+    ["is empty", "", "is set but empty"],
+    ["cannot be an HTTP header value", "sk bad\nkey", "contains characters that cannot be sent in an HTTP header"],
+  ])("fails when the variable %s, without using the saved key or sending a request", async (_name, value, message) => {
+    const fetchMock = stubFetch()
+    const harness = await create(dir, apiFlavour)
+    process.env.OC_MULTI_IMAGEGEN_OPENAI_API_KEY = value
+
+    const error = await harness.execute(args).catch((caught: Error) => caught)
+
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toContain(message)
+    expect((error as Error).message).not.toContain("sk bad")
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  test("a rejected request is reported once, without a second request with the saved key", async () => {
+    const fetchMock = stubFetch(() => new Response("denied", { status: 401 }))
+    const harness = await create(dir, apiFlavour)
+    process.env.OC_MULTI_IMAGEGEN_OPENAI_API_KEY = ENVIRONMENT_KEY
+
+    await expect(harness.execute(args)).rejects.toThrow("openai-api images request failed: 401 denied")
+
+    expect(authorizations(fetchMock)).toEqual([`Bearer ${ENVIRONMENT_KEY}`])
+  })
+
+  test("the Codex backend ignores the variable and keeps its ChatGPT sign-in", async () => {
+    const fetchMock = stubFetch()
+    const harness = await create(dir, codexFlavour)
+    process.env.OC_MULTI_IMAGEGEN_OPENAI_API_KEY = ENVIRONMENT_KEY
+
+    await harness.execute(args)
+
+    expect(fetchMock.mock.calls[0][0]).toBe(codexFlavour.generationsUrl)
+    expect(authorizations(fetchMock)).toEqual([codexFlavour.authorization])
+  })
+})
+
+describe.each(matrix)("backend choice through %s with the %s backend", (_host, _backend, create, flavour) => {
+  test("stays the backend the plugin loaded with when the variable changes later", async () => {
+    const fetchMock = stubFetch()
+    const harness = await create(dir, flavour)
+    process.env.OC_MULTI_IMAGEGEN_BACKEND = flavour.backend === "codex" ? "openai-api" : "codex"
+
+    await harness.execute(args)
+
+    expect(fetchMock.mock.calls[0][0]).toBe(flavour.generationsUrl)
+  })
 })

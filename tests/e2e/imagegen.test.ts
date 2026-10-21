@@ -44,7 +44,8 @@ async function runOpencode(prompt: string): Promise<void> {
     if (process.env.OPENCODE_MODEL) args.push("--model", process.env.OPENCODE_MODEL)
     const proc = spawn("opencode", args, {
       stdio: "inherit",
-      env: { ...process.env, XDG_CONFIG_HOME },
+      // The sizes below are the Codex presets, whatever backend the caller's own environment selects.
+      env: { ...process.env, XDG_CONFIG_HOME, OC_MULTI_IMAGEGEN_BACKEND: "codex" },
     })
     const timer = setTimeout(() => {
       proc.kill("SIGTERM")

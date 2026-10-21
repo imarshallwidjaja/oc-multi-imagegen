@@ -1,26 +1,43 @@
-import { z } from "zod"
 import { codexBackend } from "./codex"
 import { openaiApiBackend } from "./openai-api"
 import type { Backend } from "./types"
 
-// Every backend the plugin can run. The `backend` plugin option selects one when the plugin loads, so each load
-// exposes the arguments, defaults and limits of that backend only. Adding a backend means adding it here.
+// Every backend the plugin can run. The OC_MULTI_IMAGEGEN_BACKEND variable selects one when the plugin loads, so each
+// load exposes the arguments, defaults and limits of that backend only. Adding a backend means adding it here.
 const BACKENDS: readonly Backend[] = [codexBackend, openaiApiBackend]
 
 const DEFAULT_BACKEND = codexBackend
 
-const optionsSchema = z
-  .object({
-    backend: z.enum(BACKENDS.map((backend) => backend.id) as [string, ...string[]]).optional(),
-  })
-  .strict()
+const BACKEND_VARIABLE = "OC_MULTI_IMAGEGEN_BACKEND"
 
-// Reads the plugin options both hosts hand to the plugin and returns the backend they select. An absent option
-// selects Codex; an unknown option fails the load instead of silently falling back.
-export function selectBackend(options: unknown): Backend {
-  const parsed = optionsSchema.safeParse(options ?? {})
-  if (!parsed.success) {
-    throw new Error(`Invalid oc-multi-imagegen options. ${z.prettifyError(parsed.error)}`)
+// The plugin takes no options: its settings come from the environment of the OpenCode process. An option left over
+// from the earlier `backend` setting fails the load with the variable to use instead of being ignored.
+function rejectPluginOptions(options: unknown): void {
+  if (options == null) return
+  const names = typeof options === "object" && !Array.isArray(options) ? Object.keys(options) : ["(not an object)"]
+  if (names.length === 0) return
+  if (names.includes("backend")) {
+    throw new Error(
+      `The oc-multi-imagegen "backend" plugin option is no longer supported. Remove it from the plugin entry and set ${BACKEND_VARIABLE}=${BACKENDS.map((backend) => backend.id).join("|")} in the environment of the OpenCode process.`,
+    )
   }
-  return BACKENDS.find((backend) => backend.id === parsed.data.backend) ?? DEFAULT_BACKEND
+  throw new Error(
+    `oc-multi-imagegen takes no plugin options (found ${names.join(", ")}). Remove them from the plugin entry; ${BACKEND_VARIABLE} selects the backend.`,
+  )
+}
+
+// Returns the backend that OC_MULTI_IMAGEGEN_BACKEND selects. The variable is read once, when the plugin loads. An unset variable
+// selects Codex; a variable that is set but empty or unknown fails the load instead of silently falling back, and
+// the error does not repeat the value.
+export function selectBackend(options: unknown): Backend {
+  rejectPluginOptions(options)
+  const value = process.env[BACKEND_VARIABLE]
+  if (value === undefined) return DEFAULT_BACKEND
+  const backend = BACKENDS.find((candidate) => candidate.id === value)
+  if (!backend) {
+    throw new Error(
+      `${BACKEND_VARIABLE} is ${value === "" ? "empty" : "not a known backend"}. Use ${BACKENDS.map((candidate) => candidate.id).join(" or ")}, or unset it to use ${DEFAULT_BACKEND.id}.`,
+    )
+  }
+  return backend
 }

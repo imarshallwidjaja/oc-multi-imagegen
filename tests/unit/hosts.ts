@@ -8,10 +8,10 @@ import type { ArgsShape, resultSchema } from "../../src/schema"
 // OpenCode 2's plugin Context; the adapters under test never import either SDK at runtime.
 
 // The two backends and what is specific to each in these tests. Shared host behavior runs against both.
+export type Backend = "codex" | "openai-api"
+
 export type Flavour = {
-  backend: "codex" | "openai-api"
-  // The plugin options that select it; Codex is the default and takes none.
-  options: Record<string, unknown> | undefined
+  backend: Backend
   generationsUrl: string
   editsUrl: string
   authorization: string
@@ -24,7 +24,6 @@ export type Flavour = {
 export const FLAVOURS: Flavour[] = [
   {
     backend: "codex",
-    options: undefined,
     generationsUrl: "https://chatgpt.com/backend-api/codex/images/generations",
     editsUrl: "https://chatgpt.com/backend-api/codex/images/edits",
     authorization: "Bearer tok",
@@ -33,7 +32,6 @@ export const FLAVOURS: Flavour[] = [
   },
   {
     backend: "openai-api",
-    options: { backend: "openai-api" },
     generationsUrl: "https://api.openai.com/v1/images/generations",
     editsUrl: "https://api.openai.com/v1/images/edits",
     authorization: "Bearer sk-images",
@@ -41,6 +39,17 @@ export const FLAVOURS: Flavour[] = [
     provider: "openai-images",
   },
 ]
+
+// Selects the backend the way a deployment does, through the environment of the process that loads the plugin.
+// Codex is the default, so it is the variable's absence.
+export function selectBackendVariable(backend: Backend | undefined): void {
+  if (backend === undefined || backend === "codex") delete process.env.OC_MULTI_IMAGEGEN_BACKEND
+  else process.env.OC_MULTI_IMAGEGEN_BACKEND = backend
+}
+
+// The image API key as the environment variable carries it, distinct from the saved key in STORED_CREDENTIALS and
+// IMAGES_KEY_CREDENTIAL so a test can tell which source a request used.
+export const ENVIRONMENT_KEY = "sk-from-environment"
 
 // OpenCode 1's stored credentials for both backends: the chat provider's ChatGPT sign-in and the image key.
 export const STORED_CREDENTIALS = {
@@ -89,7 +98,9 @@ export type V2Options = {
   // Directory returned for any session; override per call with sessionDirectories.
   directory?: string
   sessionDirectories?: Record<string, string>
-  // Plugin options as the host passes them; none selects Codex.
+  // The backend variable of the process; none selects Codex.
+  backend?: Backend
+  // Plugin options as the host passes them. The plugin takes none.
   pluginOptions?: Record<string, unknown>
   // The OpenAI integration's connection and credential. Another integration is only present when `integrations`
   // names it.
@@ -135,7 +146,7 @@ export function createV2Context(options: V2Options = {}) {
     ...options.integrations,
   }
   const integrations = new Map<string, { name: string }>()
-  const integrationMethods: unknown[] = []
+  const integrationMethods: Array<{ integrationID: string; method: { type: string; names?: string[] } }> = []
   const registered: RegisteredTool[] = []
   const skills = new Map<string, Record<string, unknown>>(Object.entries(options.existingSkills ?? {}) as never)
   const skillCallbacks: Array<(editor: SkillEditor) => void> = []
@@ -191,11 +202,13 @@ export function createV2Context(options: V2Options = {}) {
             update(integration)
             integrations.set(id, integration)
           },
-          method: { update: (input) => integrationMethods.push(input) },
+          method: { update: (input) => integrationMethods.push(input as (typeof integrationMethods)[number]) },
         })
         return { dispose: async () => {} }
       },
       connection: {
+        // Answers with the saved connection only. The plugin resolves an environment key by name and never discovers it
+        // here, because the host lists a saved credential before an environment connection.
         active: async (integrationID: string) => {
           calls.active.push(integrationID)
           if (options.activeError) throw options.activeError
@@ -204,7 +217,13 @@ export function createV2Context(options: V2Options = {}) {
         resolve: async (connection: unknown) => {
           calls.resolve.push(connection)
           if (options.resolveError) throw options.resolveError
+          // A connection a test placed in the store answers with the credential it was given.
           const entry = Object.values(store).find((candidate) => candidate.connection === connection)
+          const environment = connection as { type?: string; name?: string }
+          if (!entry && environment.type === "env") {
+            const key = process.env[environment.name ?? ""]
+            return key ? { type: "key", key } : undefined
+          }
           if (!entry) throw new Error("the fake host does not know this connection")
           return entry.credential
         },
@@ -233,6 +252,7 @@ export function v2ToolContext(signal: AbortSignal, sessionID = SESSION_ID) {
 }
 
 export async function loadV2Tool(options: V2Options = {}) {
+  if (options.backend) selectBackendVariable(options.backend)
   const fake = createV2Context(options)
   await plugin.setup(fake.context)
   const tool = fake.registered[0]
@@ -249,7 +269,8 @@ export function v1ToolContext(directory: string, signal: AbortSignal, ask: ToolC
 }
 
 export async function v1Harness(directory: string, flavour?: Flavour): Promise<ToolHarness> {
-  const hooks = await plugin.server({} as never, flavour?.options)
+  if (flavour) selectBackendVariable(flavour.backend)
+  const hooks = await plugin.server({} as never)
   const tool = hooks.tool?.imagegen
   if (!tool) throw new Error("imagegen is not registered")
   const permissionRequests: unknown[] = []
@@ -274,7 +295,7 @@ export async function v1Harness(directory: string, flavour?: Flavour): Promise<T
 }
 
 export async function v2Harness(directory: string, flavour?: Flavour): Promise<ToolHarness> {
-  const loaded = await loadV2Tool({ directory, pluginOptions: flavour?.options })
+  const loaded = await loadV2Tool({ directory, backend: flavour?.backend })
   return {
     permissionRequests: loaded.calls.assert,
     denyPermission: loaded.denyPermission,

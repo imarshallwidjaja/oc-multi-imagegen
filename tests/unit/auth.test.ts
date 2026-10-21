@@ -1,34 +1,28 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test"
+import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { isolateEnvironment } from "./fixtures"
 
 const XDG = mkdtempSync(path.join(os.tmpdir(), "auth-xdg-"))
 const AUTH_FILE = path.join(XDG, "opencode", "auth.json")
 mkdirSync(path.dirname(AUTH_FILE), { recursive: true })
 
-// Capture so this file's env edits don't leak into other test files sharing the bun test process.
-const ORIGINAL_AUTH_CONTENT = process.env.OPENCODE_AUTH_CONTENT
+isolateEnvironment()
 let loadStoredCredential: typeof import("../../src/auth").loadStoredCredential
-
-function restoreEnv(key: string, value: string | undefined): void {
-  if (value === undefined) {
-    delete process.env[key]
-  } else {
-    process.env[key] = value
-  }
-}
+let loadCredential: typeof import("../../src/auth").loadCredential
 
 beforeAll(async () => {
   // xdg-basedir reads XDG_DATA_HOME only once, when it is first imported, and another test file
   // may import it before this one. mock.module also replaces the module for files that already
   // imported it, so auth.json is read from the temp dir regardless of the test file order.
   mock.module("xdg-basedir", () => ({ xdgData: XDG }))
-  loadStoredCredential = (await import("../../src/auth")).loadStoredCredential
+  const auth = await import("../../src/auth")
+  loadStoredCredential = auth.loadStoredCredential
+  loadCredential = auth.loadCredential
 })
 
 afterAll(() => {
-  restoreEnv("OPENCODE_AUTH_CONTENT", ORIGINAL_AUTH_CONTENT)
   rmSync(XDG, { recursive: true, force: true })
 })
 
@@ -37,17 +31,17 @@ function writeAuthFile(content: string): void {
 }
 
 beforeEach(() => {
-  delete process.env.OPENCODE_AUTH_CONTENT
   // Start each test from a no-credentials baseline; tests opt in to a file.
   writeAuthFile("{}")
 })
 
-afterEach(() => {
-  delete process.env.OPENCODE_AUTH_CONTENT
-})
-
 const OAUTH = { type: "oauth", provider: "openai", label: "OpenAI ChatGPT OAuth" } as const
-const KEY = { type: "key", provider: "openai-images", label: "OpenAI Images API" } as const
+const KEY = {
+  type: "key",
+  provider: "openai-images",
+  label: "OpenAI Images API",
+  environmentVariable: "OC_MULTI_IMAGEGEN_OPENAI_API_KEY",
+} as const
 
 describe("loadStoredCredential", () => {
   test("reads a valid oauth entry from OPENCODE_AUTH_CONTENT", async () => {
@@ -117,5 +111,38 @@ describe("loadStoredCredential", () => {
   test("returns undefined when the auth.json file is missing", async () => {
     rmSync(AUTH_FILE, { force: true })
     expect(await loadStoredCredential(OAUTH)).toBeUndefined()
+  })
+})
+
+describe("loadCredential", () => {
+  const SAVED = { "openai-images": { type: "api", key: "sk-saved" } }
+
+  test("uses the variable a key credential names ahead of the saved entry, read on every call", async () => {
+    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify(SAVED)
+
+    process.env.OC_MULTI_IMAGEGEN_OPENAI_API_KEY = "sk-env-1"
+    expect(await loadCredential(KEY)).toEqual({ type: "key", key: "sk-env-1" })
+    process.env.OC_MULTI_IMAGEGEN_OPENAI_API_KEY = "sk-env-2"
+    expect(await loadCredential(KEY)).toEqual({ type: "key", key: "sk-env-2" })
+  })
+
+  test("uses the saved entry when the variable is absent", async () => {
+    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify(SAVED)
+
+    expect(await loadCredential(KEY)).toEqual({ type: "key", key: "sk-saved" })
+  })
+
+  test("fails for a variable that is set but empty, without falling back to the saved entry", async () => {
+    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify(SAVED)
+    process.env.OC_MULTI_IMAGEGEN_OPENAI_API_KEY = ""
+
+    await expect(loadCredential(KEY)).rejects.toThrow("OC_MULTI_IMAGEGEN_OPENAI_API_KEY is set but empty.")
+  })
+
+  test("never applies the image key variable to an oauth credential", async () => {
+    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({ openai: { type: "oauth", access: "tok" } })
+    process.env.OC_MULTI_IMAGEGEN_OPENAI_API_KEY = "sk-env"
+
+    expect(await loadCredential(OAUTH)).toEqual({ type: "oauth", access: "tok" })
   })
 })

@@ -65,7 +65,7 @@ async function generate(
 ): Promise<string> {
   const { key } = expectCredential(credential, "key")
   if (!HEADER_SAFE_KEY.test(key)) {
-    throw new Error("The stored OpenAI Images API key contains characters that cannot be sent in an HTTP header.")
+    throw new Error("The OpenAI Images API key contains characters that cannot be sent in an HTTP header.")
   }
   const isEdit = referenceDataUrls.length > 0
   return postImagesRequest({
@@ -90,11 +90,16 @@ async function generate(
 
 export const openaiApiBackend = {
   id: "openai-api",
-  credential: { type: "key", provider: "openai-images", label: "OpenAI Images API" },
+  credential: {
+    type: "key",
+    provider: "openai-images",
+    label: "OpenAI Images API",
+    environmentVariable: "OC_MULTI_IMAGEGEN_OPENAI_API_KEY",
+  },
   description: {
     subject: "the OpenAI Images API",
     requires:
-      "Requires an OpenAI Images API key saved in OpenCode as the openai-images credential. The prompt and any reference images are sent to OpenAI.",
+      "Requires an OpenAI Images API key: the OC_MULTI_IMAGEGEN_OPENAI_API_KEY environment variable of the OpenCode process, or else the openai-images credential saved in OpenCode. The prompt and any reference images are sent to OpenAI.",
     controls: `Size is a native WIDTHxHEIGHT sent to the API unchanged. Optional model (default ${DEFAULT_MODEL}) and quality (default ${DEFAULT_QUALITY}) are passed to the API unchanged. There are no image-count or output-format controls, and other arguments are not sent to the provider.`,
   },
   argsSchema: z.object(argsShape),

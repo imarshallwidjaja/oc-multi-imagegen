@@ -6,7 +6,10 @@ import path from "node:path"
 import { selectBackend } from "../../src/backend"
 import { describeImagegen } from "../../src/imagegen"
 import { loadPackagedSkill, SKILL_FILE, SKILL_NAME, SKILLS_DIRECTORY } from "../../src/skill"
+import { isolateEnvironment } from "./fixtures"
+import { selectBackendVariable } from "./hosts"
 
+isolateEnvironment()
 let dir: string
 
 beforeEach(async () => {
@@ -42,12 +45,11 @@ describe("packaged skill", () => {
     expect(Bun.YAML.parse(yaml)).toEqual({ name: skill.name, description: skill.description })
   })
 
-  test.each([undefined, { backend: "openai-api" }])(
-    "the tool description points to the skill by name for %p",
-    (options) => {
-      expect(describeImagegen(selectBackend(options))).toContain(SKILL_NAME)
-    },
-  )
+  test.each(["codex", "openai-api"] as const)("the tool description points to the skill by name for %p", (backend) => {
+    selectBackendVariable(backend)
+
+    expect(describeImagegen(selectBackend(undefined))).toContain(SKILL_NAME)
+  })
 
   test.each([
     ["has no frontmatter", "# Body\n", "no frontmatter"],

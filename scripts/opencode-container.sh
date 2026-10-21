@@ -5,9 +5,11 @@
 #
 #   export OC_SANDBOX=$(scripts/opencode-container.sh init)     one new private sandbox per attempt
 #   scripts/opencode-container.sh pack                          build, npm pack, extract, install runtime deps
-#   scripts/opencode-container.sh prepare <host> [allow|tool-only|ask] [codex|openai-api]  openai-api sets the plugin option
+#   scripts/opencode-container.sh prepare <host> [allow|tool-only|ask] [codex|openai-api]  the backend the container's
+#                                                               OC_MULTI_IMAGEGEN_BACKEND selects (codex: not set)
 #   scripts/opencode-container.sh seed <host> [min-hours]       credential seed (v1, v2); v1-floor needs none
-#                                                               OC_IMAGE_KEY_ENV_FILE=<dotenv file> adds its OPENAI_API_KEY
+#                                                               OC_IMAGE_KEY_ENV_FILE=<dotenv file> makes its OPENAI_API_KEY the
+#                                                               container's OC_MULTI_IMAGEGEN_OPENAI_API_KEY (run, cases)
 #   scripts/opencode-container.sh run <host> <name> -- <opencode args>
 #   scripts/opencode-container.sh tools <host>                  tool ids (v1 and v1-floor only; no model)
 #   scripts/opencode-container.sh skills <host>                 skills the host registered (no model)
@@ -151,9 +153,22 @@ base_args() {
     # does not read OPENCODE_AUTH_CONTENT, the OpenCode 1 source; the generation calls still succeed.
     ARGS+=(-e 'OPENCODE_AUTH_CONTENT={"openai":{"type":"oauth","access":"NONSECRET-DECOY","refresh":"NONSECRET-DECOY","expires":4102444800000}}')
   fi
+  # The one setting `prepare` records for the host: the backend, which the plugin reads from its own environment.
+  # Nothing else of the caller's environment is forwarded.
+  if [ -f "$sandbox/$host/backend" ]; then
+    backend_id=$(<"$sandbox/$host/backend")
+    case $backend_id in *[!A-Za-z0-9_-]*) die "$sandbox/$host/backend holds an unusable backend id" ;; esac
+    ARGS+=(-e "OC_MULTI_IMAGEGEN_BACKEND=$backend_id")
+  fi
   ARGS+=(-v "$sandbox/$host/home:/home/oc" -v "$sandbox/$host/config:/xdg/config" -v "$sandbox/$host/data:/xdg/data"
     -v "$sandbox/$host/state:/xdg/state" -v "$sandbox/$host/cache:/xdg/cache" -v "$sandbox/$host/work:/work"
     -v "$sandbox/pkg/package:/pluginpkg:ro" -w /work)
+}
+
+# Hands the Docker env file that `seed` wrote (OC_MULTI_IMAGEGEN_OPENAI_API_KEY) to a container that may generate
+# images. Docker reads the private file on the host, so the key is never a command-line argument.
+forward_image_key() {
+  [ ! -f "$sandbox/$1/image-key.env" ] || ARGS+=(--env-file "$sandbox/$1/image-key.env")
 }
 
 # Generic requests: they name neither the tool nor the skill, so a run shows whether the agent finds both itself.
@@ -209,18 +224,15 @@ case $cmd in
     # allow: imagegen, the plugin's skill and reading PNG files (to look at results) are permitted.
     # tool-only: imagegen alone, so the skill is denied. ask: imagegen asks and nothing else is permitted.
     # Everything else is denied, so the agent has no shell and cannot read the credential.
-    # The optional backend is the plugin's `backend` option: codex (the default, no option written) or openai-api.
+    # The optional backend is recorded for the host and reaches its containers as OC_MULTI_IMAGEGEN_BACKEND (base_args):
+    # codex, the plugin's default, sets nothing; openai-api selects the official API. The plugin entries stay plain.
     host=${1:?host}; perm=${2:-allow}; backend=${3:-codex}
     image_of "$host" >/dev/null
     case $perm in allow | tool-only | ask) ;; *) die "Permission must be allow, tool-only or ask" ;; esac
     case $backend in codex | openai-api) ;; *) die "Backend must be codex or openai-api" ;; esac
     use_sandbox
-    v1_plugin='"file:///pluginpkg"' v2_plugin='"/pluginpkg"'
-    if [ "$backend" != codex ]; then
-      v1_plugin='["file:///pluginpkg", { "backend": "'$backend'" }]'
-      v2_plugin='{ "package": "/pluginpkg", "options": { "backend": "'$backend'" } }'
-    fi
     mkdir -p "$sandbox/$host"/{home,config/opencode,data/opencode,state,cache,work}
+    if [ "$backend" = codex ]; then rm -f "$sandbox/$host/backend"; else echo "$backend" >"$sandbox/$host/backend"; fi
     tool_effect=$perm
     [ "$perm" != tool-only ] || tool_effect=allow
     extra=''
@@ -234,7 +246,7 @@ case $cmd in
       cat >"$sandbox/$host/config/opencode/opencode.json" <<EOF
 {
   "\$schema": "https://opencode.ai/config.json",
-  "plugins": [$v2_plugin],
+  "plugins": ["/pluginpkg"],
   "permissions": [
     { "action": "*", "resource": "*", "effect": "deny" },
     { "action": "imagegen", "resource": "*", "effect": "$tool_effect" }$extra
@@ -250,7 +262,7 @@ EOF
       cat >"$sandbox/$host/config/opencode/opencode.json" <<EOF
 {
   "\$schema": "https://opencode.ai/config.json",
-  "plugin": [$v1_plugin],
+  "plugin": ["file:///pluginpkg"],
   "permission": { "*": "deny", "imagegen": "$tool_effect"$extra },
   "autoupdate": false,
   "share": "disabled"
@@ -265,10 +277,11 @@ EOF
     use_sandbox
     hours=()
     [ -z "${2:-}" ] || hours=(--min-hours "$2")
-    # OC_IMAGE_KEY_ENV_FILE names a dotenv file whose OPENAI_API_KEY is added as the openai-images credential. Only
-    # the path travels through this script; the seed script reads the key and writes it to the host's own store.
+    # OC_IMAGE_KEY_ENV_FILE names a dotenv file whose OPENAI_API_KEY becomes OC_MULTI_IMAGEGEN_OPENAI_API_KEY in the
+    # host's containers, through a private Docker env file in the sandbox that `clean` removes. Only the path travels
+    # through this script; the seed script reads the key. The host's own store gets a synthetic saved key instead.
     imagekey=()
-    [ -z "${OC_IMAGE_KEY_ENV_FILE:-}" ] || imagekey=(--image-key-env-file "$OC_IMAGE_KEY_ENV_FILE")
+    [ -z "${OC_IMAGE_KEY_ENV_FILE:-}" ] || imagekey=(--image-key-env-file "$OC_IMAGE_KEY_ENV_FILE" --image-key-env-out "$sandbox/$host/image-key.env")
     if [ "$host" = v2 ]; then
       # A new private directory per invocation, so cleanup() removes only what this run made. It exists only
       # while the import runs; cleanup() removes it however this command ends, unless the container may still read it.
@@ -293,6 +306,7 @@ EOF
     [ "${1:-}" != -- ] || shift
     use_sandbox
     base_args "$host" "$name"
+    forward_image_key "$host"
     ARGS+=("$(image_of "$host")" "$@")
     container_run
     ;;
@@ -377,6 +391,7 @@ EOF
     for c in $case_ids; do
       echo "Case $c on $host" >&2
       base_args "$host" "case-$c"
+      forward_image_key "$host"
       ARGS+=("$(image_of "$host")" "${opts[@]}" "$(case_prompt "$c")")
       rc=0
       container_run >"$sandbox/logs/$host-case-$c.out" 2>"$sandbox/logs/$host-case-$c.err" || rc=$?
@@ -392,7 +407,7 @@ EOF
     use_sandbox
     running=$(docker ps -q --filter "label=ocimg.sandbox=$sandbox") || die "Could not list this sandbox's containers; nothing was removed"
     [ -z "$running" ] || die "A container from this sandbox is still running ($running); stop it with 'docker stop' first"
-    rm -rf "$sandbox"/{v1,v1-floor,v2}/{data,state,home,cache} "$sandbox/seed" "$sandbox"/seed.*
+    rm -rf "$sandbox"/{v1,v1-floor,v2}/{data,state,home,cache,image-key.env,image-key.env.*.tmp} "$sandbox/seed" "$sandbox"/seed.*
     ;;
 
   *)

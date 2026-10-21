@@ -4,12 +4,15 @@
 # and grep but no jq or Node, so this is POSIX sh.
 #
 #   container-backend-probe.sh v1 <codex|openai-api>   OpenCode 1: the sign-in method, any provider entry, the tool
-#   container-backend-probe.sh v2 <codex|openai-api>   OpenCode 2: the integration and its methods
+#   container-backend-probe.sh v2 <codex|openai-api>   OpenCode 2: the integration, its methods and its connections
 #
-# openai-api must register the openai-images sign-in under that id with exactly one method, the key-only one (type
-# "api" on OpenCode 1, "key" on OpenCode 2), and register no provider entry; codex must register no openai-images
-# entry at all, whatever its methods, because its sign-in belongs to the host. Exit 0 means every printed fact matched; a
-# fact that does not match, or a request that fails, prints the server log to stderr and exits 1.
+# The container's OC_MULTI_IMAGEGEN_BACKEND selects the backend, so the arguments here are what the run expects it to
+# have selected. openai-api must register the openai-images sign-in under that id and register no provider entry: on
+# OpenCode 1 exactly one method, of type api; on OpenCode 2 exactly two, the key method and the env method for
+# OC_MULTI_IMAGEGEN_OPENAI_API_KEY, and a connection for that variable once it is set (the probe sets a placeholder that is
+# not a credential, and the plugin never reads it). codex must register no openai-images entry at all, whatever its
+# methods, because its sign-in belongs to the host. Exit 0 means every printed fact matched; a fact that does not match,
+# or a request that fails, prints the server log to stderr and exits 1.
 # PROBE_TMP names the container's scratch directory; the unit tests point it at a temporary directory.
 
 host=${1:-}
@@ -20,6 +23,8 @@ case $backend in codex | openai-api) ;; *) echo "usage: container-backend-probe.
 tmp=${PROBE_TMP:-/tmp}
 auth="Authorization: Basic $(printf opencode:probe | base64)"
 url=http://127.0.0.1:4096
+
+[ "$host$backend" != v2openai-api ] || export OC_MULTI_IMAGEGEN_OPENAI_API_KEY=NONSECRET-PROBE-PLACEHOLDER
 
 opencode serve --port 4096 --hostname 127.0.0.1 >"$tmp/serve.log" 2>&1 &
 server=$!
@@ -77,7 +82,11 @@ if [ "$host" = v1 ]; then
 else
   reply=$(get /api/integration) || fail "GET /api/integration failed"
   found=$(printf '%s' "$reply" | sed 's/{"id":"/\n&/g' | grep '^{"id":"openai-images"')
-  # Exactly one method, of type key: an empty list, another type or an extra method does not match.
-  [ $wanted = absent ] || found=$(printf '%s' "$found" | grep '^{"id":"openai-images".*"methods":\[{"type":"key"[^{}]*}\]')
-  expect "integration" "$(printf '%s' "$found" | cut -c1-200)" $wanted
+  # Exactly the key method and the env method: an empty list, another type or an extra method does not match.
+  [ $wanted = absent ] || found=$(printf '%s' "$found" | grep '^{"id":"openai-images".*"methods":\[{"type":"key"[^{}]*},{"type":"env","names":\["OC_MULTI_IMAGEGEN_OPENAI_API_KEY"\]}\]')
+  expect "integration" "$(printf '%s' "$found" | cut -c1-300)" $wanted
+  # The host lists the variable as a connection of the integration once it is set.
+  connections=
+  [ $wanted = absent ] || connections=$(printf '%s' "$found" | sed -n 's/.*"connections":\(\[{"type":"env","name":"OC_MULTI_IMAGEGEN_OPENAI_API_KEY"[^]]*\]\).*/\1/p')
+  expect "connections" "$connections" $wanted
 fi

@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import { xdgData } from "xdg-basedir"
-import type { CredentialSpec, ImageCredential } from "./types"
+import { type CredentialSpec, emptyEnvironmentError, environmentOverride, type ImageCredential } from "./types"
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -45,4 +45,15 @@ export async function loadStoredCredential(spec: CredentialSpec): Promise<ImageC
     return { type: "key", key: entry.key }
   }
   return undefined
+}
+
+// OpenCode 1 has no public resolver for environment credentials, so this reads the variable a key credential names
+// directly, on every call and only after the permission. A variable that is present wins over the saved entry, and a
+// present but empty one fails instead of falling back to it. Without the variable the saved entry is used.
+export async function loadCredential(spec: CredentialSpec): Promise<ImageCredential | undefined> {
+  const name = environmentOverride(spec)
+  if (name === undefined) return loadStoredCredential(spec)
+  const key = process.env[name]
+  if (!key) throw emptyEnvironmentError(spec, name)
+  return { type: "key", key }
 }

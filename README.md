@@ -1,17 +1,17 @@
 # oc-multi-imagegen
 
-Image generation and editing for OpenCode agents, exposed through the `imagegen` tool. One package loads in OpenCode 1 and OpenCode 2. It targets OpenCode 1.18.29 and newer and OpenCode 2.0.32 and newer; those versions are the support floors. Container runs with real agents have covered OpenCode 1.19.3 and 2.0.32 with the Codex backend (skill loaded, images generated; run before the `backend` option existed) and with the OpenAI Images API backend (one generation and one reference edit). OpenCode 1.18.29 was checked for plugin load, skill registration and, for the OpenAI Images API backend, sign-in registration only, and versions between the floors and those runs, or newer, are untested.
+Image generation and editing for OpenCode agents, exposed through the `imagegen` tool. One package loads in OpenCode 1 and OpenCode 2. It targets OpenCode 1.18.29 and newer and OpenCode 2.0.32 and newer; those versions are the support floors. Container runs with real agents have covered OpenCode 1.19.3 and 2.0.32 with the Codex backend (skill loaded, images generated; run before backend selection existed) and with the OpenAI Images API backend (one generation and one reference edit per host, with the key from `OC_MULTI_IMAGEGEN_OPENAI_API_KEY` and, in an earlier run, with a key saved in OpenCode). OpenCode 1.18.29 was checked for plugin load, skill registration and, for the OpenAI Images API backend, sign-in registration only, and versions between the floors and those runs, or newer, are untested.
 
 The package also ships one skill, `oc-multi-imagegen`, with the technique for image work: choosing raster or code, labelling reference images, correcting a result, keeping related images consistent, transparency, and checking what came back. The `imagegen` description tells agents to load it before image work when it is available and permitted, and the tool works without it.
 
-The plugin runs one image backend per load, chosen with the `backend` plugin option:
+The plugin runs one image backend per load, chosen with the `OC_MULTI_IMAGEGEN_BACKEND` environment variable:
 
-| `backend` | Calls | Credential |
+| `OC_MULTI_IMAGEGEN_BACKEND` | Calls | Credential |
 | --- | --- | --- |
-| `codex` (default) | the ChatGPT Codex image backend | OpenCode's ChatGPT sign-in for the `openai` provider |
-| `openai-api` | the official OpenAI Images API | an OpenAI Images API key saved in OpenCode as the `openai-images` credential |
+| unset or `codex` | the ChatGPT Codex image backend | OpenCode's ChatGPT sign-in for the `openai` provider |
+| `openai-api` | the official OpenAI Images API | the `OC_MULTI_IMAGEGEN_OPENAI_API_KEY` variable, or else an OpenAI Images API key saved in OpenCode as the `openai-images` credential |
 
-The active backend decides the tool's arguments, defaults, limits and description, so an agent sees only the backend that will run. Changing the option and restarting OpenCode switches the tool; there is no per-call backend argument and no fallback from one backend to the other.
+The active backend decides the tool's arguments, defaults, limits and description, so an agent sees only the backend that will run. Changing the variable and restarting OpenCode switches the tool; there is no per-call backend argument and no fallback from one backend to the other.
 
 ## Local setup
 
@@ -44,31 +44,35 @@ Replace the example path with your checkout path. Rebuild after changing source 
 
 Both hosts find the skill without skills configuration. OpenCode 1's `config` hook adds the package's absolute `skills/` directory to `skills.paths` once, and keeps your own `paths` and `urls`. OpenCode 2 registers the skill from the plugin and leaves an existing skill with the same id alone. Neither host gets a copy in a user directory. If a skill named `oc-multi-imagegen` also comes from elsewhere, OpenCode 1 keeps one of the two without a defined order. A package whose `skills/` file is missing or malformed fails when the plugin loads, with a message that names the file.
 
-## Choosing a backend
+## Configuration
 
-Pass the `backend` option in the plugin entry. The default is `codex`; `openai-api` selects the official API. An unknown value or unknown option makes the plugin fail to load: the host logs `failed to load plugin` with a message that names the problem, and the `imagegen` tool is not registered.
+The plugin has two settings, and both are environment variables of the process that loads the plugin. The plugin entry in the OpenCode configuration stays a plain package entry (see "Local setup"): the plugin takes no options, and it does not read a `.env` file or any other configuration file.
 
-OpenCode 1 takes plugin options as the second element of a `plugin` entry:
+| Variable | Effect |
+| --- | --- |
+| `OC_MULTI_IMAGEGEN_BACKEND` | Selects the backend: `codex` (also the result when the variable is unset) or `openai-api`. It is read once, when the plugin loads, so changing it takes a restart. A value that is empty or unknown makes the plugin fail to load: the host logs `failed to load plugin` with a message that names the variable, and the `imagegen` tool is not registered. |
+| `OC_MULTI_IMAGEGEN_OPENAI_API_KEY` | The OpenAI Images API key, for the `openai-api` backend only. When the variable is present it is the key, ahead of any key saved in OpenCode. It is read on every call, so a changed value applies to the next call. See "OpenAI Images API backend". |
 
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugin": [["file:///absolute/path/to/oc-multi-imagegen", { "backend": "openai-api" }]]
-}
+Earlier builds took the backend as a plugin option. A `backend` option left in a plugin entry now makes the plugin fail to load with a message that names `OC_MULTI_IMAGEGEN_BACKEND`, and any other option fails it too, so remove the option from the entry.
+
+The plugin reads the environment of the process that loads it, which is the OpenCode server (for example `opencode serve`). A variable exported in the shell where you start a client that attaches to a running server is not in the server's environment, so it has no effect. For a server run by systemd, put the variables in the unit; the values below are placeholders:
+
+```ini
+[Service]
+Environment=OC_MULTI_IMAGEGEN_BACKEND=openai-api
+EnvironmentFile=/etc/opencode/oc-multi-imagegen.env
 ```
 
-OpenCode 2 takes them in the object form of a `plugins` entry:
-
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugins": [{ "package": "file:///absolute/path/to/oc-multi-imagegen", "options": { "backend": "openai-api" } }]
-}
+```sh
+# /etc/opencode/oc-multi-imagegen.env (mode 600)
+OC_MULTI_IMAGEGEN_OPENAI_API_KEY=<OpenAI Images API key>
 ```
+
+After editing a unit or its environment file, reload systemd and restart the service. For a system unit named `opencode.service`, that is `systemctl daemon-reload` and `systemctl restart opencode.service`. A user unit (`~/.config/systemd/user/opencode.service`) takes the same two settings, with an `EnvironmentFile` that you own and the service can read, such as `%h/.config/opencode/oc-multi-imagegen.env` (mode 600), and uses `systemctl --user daemon-reload` and `systemctl --user restart opencode.service`. Keep the key in a file with restricted permissions rather than in the unit, because unit files are generally readable by every local user.
 
 ## Authentication
 
-Credentials stay in OpenCode's own store, outside this repository. The plugin reads only the entry of the active backend, on every call, and never writes, refreshes or activates a credential.
+Credentials stay outside this repository: in OpenCode's own store, or for the image API key, in the environment of the OpenCode process. The plugin reads only the credential of the active backend, on every call and only after the `imagegen` permission, and never writes, refreshes or activates one.
 
 ### Codex backend
 
@@ -84,14 +88,21 @@ OpenCode 2 asks the host for the active `openai` connection on every call, so a 
 
 ### OpenAI Images API backend
 
-This backend uses its own credential, `openai-images`, separate from the `openai` chat provider. A key saved under `openai` would also be the chat provider's key, so a separate credential lets you create a key at OpenAI that is limited to image generation. Whatever permissions the key has are yours to set; the plugin does not inspect them and sends the key only to `https://api.openai.com/v1/images/generations` and `https://api.openai.com/v1/images/edits`, when an image is requested. Loading the plugin makes no network request and checks no key.
+This backend uses its own credential, separate from the `openai` chat provider. A key saved under `openai` would also be the chat provider's key, so a separate credential lets you create a key at OpenAI that is limited to image generation. Whatever permissions the key has are yours to set; the plugin does not inspect them and sends the key only to `https://api.openai.com/v1/images/generations` and `https://api.openai.com/v1/images/edits`, when an image is requested. Loading the plugin makes no network request and checks no key.
 
-With `backend` set to `openai-api`, the plugin registers a sign-in method for `openai-images`, so OpenCode stores the key itself:
+Each call takes the key from the first of these that applies:
 
-- OpenCode 1: run `opencode auth login --provider openai-images` and enter the key, or choose **Other** in the provider list and enter the id `openai-images`. OpenCode saves it as an `api` entry in `auth.json`. The plugin reads that entry from `OPENCODE_AUTH_CONTENT` when set (content that does not parse falls through to `auth.json`, as in OpenCode), otherwise from `auth.json`. It registers no provider or model, so chat model selection is unchanged.
-- OpenCode 2: run `opencode auth login openai-images`, or connect the **OpenAI Images API** integration in the host, and enter the key. The plugin asks the host for the active `openai-images` connection and resolves it on every call. It does not read `OPENCODE_AUTH_CONTENT`, `auth.json`, environment variables or `.env` files.
+1. The `OC_MULTI_IMAGEGEN_OPENAI_API_KEY` variable, when it is present. It is the key, and the saved key is not consulted. A value that is empty, or has characters that cannot be sent in an HTTP header (a space or a newline, for example), fails the call without a request and without trying the saved key. A key that OpenAI rejects (401 or 403) is reported as the API's error, once, also without trying the saved key.
+2. The key saved in OpenCode as the `openai-images` credential, when the variable is absent.
 
-A missing or non-key credential fails the call with the sign-in command to run. The OpenAI chat sign-in is never used as an image key, and the image key is never used for chat. An error from the API is reported with its status and body, with the key removed from the text.
+The plugin does not read `OPENAI_API_KEY`, which can be your chat key, and it does not load `.env` files. Put the variable into the server's environment as described in "Configuration".
+
+With `OC_MULTI_IMAGEGEN_BACKEND` set to `openai-api`, the plugin also registers a sign-in method for `openai-images`, so OpenCode stores a saved key itself:
+
+- OpenCode 1: run `opencode auth login --provider openai-images` and enter the key, or choose **Other** in the provider list and enter the id `openai-images`. OpenCode saves it as an `api` entry in `auth.json`. OpenCode 1 has no public resolver for environment credentials, so the plugin reads the variable itself on each call, after the permission. Without the variable it reads the saved entry from `OPENCODE_AUTH_CONTENT` when set (content that does not parse falls through to `auth.json`, as in OpenCode), otherwise from `auth.json`. It registers no provider or model, so chat model selection is unchanged.
+- OpenCode 2: run `opencode auth login openai-images`, or connect the **OpenAI Images API** integration in the host, and enter the key. The plugin declares the variable to the host as an environment method of that integration, so the host lists it as a connection, and asks the host to resolve it; the plugin only checks that the variable exists and does not read the value itself. The host lists a saved key ahead of an environment connection, so its own listings can show the saved key first, but the plugin uses the variable first. Without the variable the plugin asks the host for the active `openai-images` connection and resolves it on every call. It does not read `OPENCODE_AUTH_CONTENT`, `auth.json` or `.env` files.
+
+A missing credential fails the call with the variable and the sign-in command to use, and a non-key saved credential fails it with the sign-in command. The OpenAI chat sign-in is never used as an image key, and the image key is never used for chat. An error from the API is reported with its status and body, with the key removed from the text.
 
 ## Permissions
 

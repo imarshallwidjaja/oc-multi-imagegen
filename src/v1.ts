@@ -1,5 +1,5 @@
 import type { Hooks, Plugin, ToolContext, ToolDefinition, ToolResult } from "@opencode-ai/plugin"
-import { loadStoredCredential } from "./auth"
+import { loadCredential } from "./auth"
 import { selectBackend } from "./backend"
 import { describeImagegen, generateImage, IMAGEGEN_TOOL } from "./imagegen"
 import { loadPackagedSkill, SKILLS_DIRECTORY } from "./skill"
@@ -20,13 +20,16 @@ function createImagegenTool(backend: Backend) {
           ctx.ask({ permission: IMAGEGEN_TOOL, patterns: [backend.id], always: [backend.id], metadata: { ...args } }),
         resolveDirectory: async () => ctx.directory,
         resolveCredential: async () => {
-          const stored = await loadStoredCredential(credential)
-          if (!stored) {
-            throw new Error(
-              `${credential.label} credentials not configured. Run \`opencode auth login --provider ${credential.provider}\`.`,
-            )
+          const loaded = await loadCredential(credential)
+          if (!loaded) {
+            const login = `opencode auth login --provider ${credential.provider}`
+            const action =
+              credential.type === "key"
+                ? `Set ${credential.environmentVariable} in the environment of the OpenCode process, or run \`${login}\`.`
+                : `Run \`${login}\`.`
+            throw new Error(`${credential.label} credentials not configured. ${action}`)
           }
-          return stored
+          return loaded
         },
       })
       return { output: saved.message, metadata: { out: saved.savedPath, versioned: saved.versioned } }
@@ -48,7 +51,8 @@ function registerSkillsDirectory(config: SkillConfig): void {
 // OpenCode 1 entry point. The SDK types its own pinned Zod copy, which TypeScript treats as a different
 // type from this package's Zod; the schemas are structurally the same and OpenCode 1 composes them at runtime.
 // A key credential gets a native `auth` hook without a loader, so OpenCode can store the key under the backend's
-// provider id; no provider or model is registered, which leaves chat model selection alone.
+// provider id; no provider or model is registered, which leaves chat model selection alone. The backend comes from
+// the OpenCode process environment (see selectBackend), so the plugin entry takes no options.
 export const server: Plugin = async (_input, options): Promise<Hooks> => {
   const backend = selectBackend(options)
   // The host would skip an unreadable skill silently, so check the shipped file when the plugin loads.
