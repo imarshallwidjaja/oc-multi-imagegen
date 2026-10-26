@@ -1259,20 +1259,26 @@ describe("container-skill-probe.sh", () => {
       seen: "saw entries=1 marker=1, wanted entries=0 marker=0",
     },
   ]
-  test.each(failures)("fails on $label, with the last reply and the server log", async (failure) => {
-    const p = skillProbe()
-    if (failure.noPlugin) writeFileSync(p.config, p.configText.replace('["/pluginpkg"]', "[]"))
+  // Each case runs the probe through its full 30-poll failure path in subprocesses before the assertions, which can
+  // outlast Bun's default 5 s deadline under load and kill the test before it reaches them.
+  test.each(failures)(
+    "fails on $label, with the last reply and the server log",
+    async (failure) => {
+      const p = skillProbe()
+      if (failure.noPlugin) writeFileSync(p.config, p.configText.replace('["/pluginpkg"]', "[]"))
 
-    const result = await p.run(failure.mode, { FAKE_SKILLS: failure.skills })
+      const result = await p.run(failure.mode, { FAKE_SKILLS: failure.skills })
 
-    expect(result.code).toBe(1)
-    expect(result.stdout).toBe(failure.reported)
-    expect(result.stderr).toContain("Probe failed: timed out waiting for")
-    expect(result.stderr).toContain(failure.seen)
-    expect(result.stderr).toContain("Last reply")
-    expect(result.stderr).toContain("fake opencode serve started")
-    await until(p.serverStopped)
-  })
+      expect(result.code).toBe(1)
+      expect(result.stdout).toBe(failure.reported)
+      expect(result.stderr).toContain("Probe failed: timed out waiting for")
+      expect(result.stderr).toContain(failure.seen)
+      expect(result.stderr).toContain("Last reply")
+      expect(result.stderr).toContain("fake opencode serve started")
+      await until(p.serverStopped)
+    },
+    15_000,
+  )
 })
 
 // scripts/container-backend-probe.sh runs `opencode serve` and `wget` inside a container. Here `wget` answers from
