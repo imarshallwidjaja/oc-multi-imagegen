@@ -1,7 +1,8 @@
 import { z } from "zod"
+import { defineImageTool, describeImagegen, IMAGEGEN_TOOL } from "./imagegen"
 import { postImagesRequest } from "./images-request"
 import { createArgsShape, type GenerateArgs } from "./schema"
-import { type Backend, expectCredential, type ImageCredential } from "./types"
+import { type Backend, type CredentialSpec, expectHeaderSafeKey, type ImageCredential } from "./types"
 
 // Official OpenAI Images API. The documented JSON body for edits takes references as images[].image_url data URLs.
 // https://developers.openai.com/api/reference/resources/images/methods/generate
@@ -53,9 +54,12 @@ const argsShape = createArgsShape({
   quality: `Optional quality value, sent to the API unchanged. Defaults to ${DEFAULT_QUALITY}.`,
 })
 
-// Header values cannot hold whitespace or control characters; fetch would otherwise reject the value in an error
-// message that quotes it.
-const HEADER_SAFE_KEY = /^[\x21-\x7e]+$/
+const openaiApiCredential = {
+  type: "key",
+  provider: "openai-images",
+  label: "OpenAI Images API",
+  environmentVariable: "OC_MULTI_IMAGEGEN_OPENAI_API_KEY",
+} as const satisfies CredentialSpec
 
 async function generate(
   credential: ImageCredential,
@@ -63,10 +67,7 @@ async function generate(
   referenceDataUrls: string[],
   signal: AbortSignal,
 ): Promise<string> {
-  const { key } = expectCredential(credential, "key")
-  if (!HEADER_SAFE_KEY.test(key)) {
-    throw new Error("The OpenAI Images API key contains characters that cannot be sent in an HTTP header.")
-  }
+  const key = expectHeaderSafeKey(credential, openaiApiCredential.label)
   const isEdit = referenceDataUrls.length > 0
   return postImagesRequest({
     label: "openai-api",
@@ -88,21 +89,23 @@ async function generate(
   })
 }
 
+export const openaiApiImagegen = {
+  name: IMAGEGEN_TOOL,
+  description: describeImagegen({
+    subject: "the OpenAI Images API",
+    requires: `Requires an OpenAI Images API key: the ${openaiApiCredential.environmentVariable} environment variable of the OpenCode process, or else the ${openaiApiCredential.provider} credential saved in OpenCode. The prompt and any reference images are sent to OpenAI.`,
+    controls: `Size is a native WIDTHxHEIGHT sent to the API unchanged. Optional model (default ${DEFAULT_MODEL}) and quality (default ${DEFAULT_QUALITY}) are passed to the API unchanged. There are no image-count or output-format controls, and other arguments are not sent to the provider.`,
+  }),
+  schema: z.object(argsShape),
+  references: (args: GenerateArgs) => ({
+    paths: args.images,
+    rules: { mimeTypes: REFERENCE_MIME_TYPES, maxDataUrlLength: MAX_DATA_URL_LENGTH },
+  }),
+  generate,
+}
+
 export const openaiApiBackend = {
   id: "openai-api",
-  credential: {
-    type: "key",
-    provider: "openai-images",
-    label: "OpenAI Images API",
-    environmentVariable: "OC_MULTI_IMAGEGEN_OPENAI_API_KEY",
-  },
-  description: {
-    subject: "the OpenAI Images API",
-    requires:
-      "Requires an OpenAI Images API key: the OC_MULTI_IMAGEGEN_OPENAI_API_KEY environment variable of the OpenCode process, or else the openai-images credential saved in OpenCode. The prompt and any reference images are sent to OpenAI.",
-    controls: `Size is a native WIDTHxHEIGHT sent to the API unchanged. Optional model (default ${DEFAULT_MODEL}) and quality (default ${DEFAULT_QUALITY}) are passed to the API unchanged. There are no image-count or output-format controls, and other arguments are not sent to the provider.`,
-  },
-  argsSchema: z.object(argsShape),
-  references: { mimeTypes: REFERENCE_MIME_TYPES, maxDataUrlLength: MAX_DATA_URL_LENGTH },
-  generate,
+  credential: openaiApiCredential,
+  tools: [defineImageTool(openaiApiImagegen)],
 } satisfies Backend

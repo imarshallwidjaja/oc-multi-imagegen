@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test"
 import { selectBackend } from "../../src/backend"
-import { describeImagegen } from "../../src/imagegen"
 import plugin from "../../src/index"
 import { isolateEnvironment } from "./fixtures"
 import { loadV2Tool } from "./hosts"
@@ -17,6 +16,8 @@ describe("selectBackend", () => {
     expect(selectBackend(undefined).id).toBe("codex")
     process.env.OC_MULTI_IMAGEGEN_BACKEND = "openai-api"
     expect(selectBackend(undefined).id).toBe("openai-api")
+    process.env.OC_MULTI_IMAGEGEN_BACKEND = "nano-gpt"
+    expect(selectBackend(undefined).id).toBe("nano-gpt")
   })
 
   test("gives each backend its own credential, so a credential for one is never read for the other", () => {
@@ -27,12 +28,30 @@ describe("selectBackend", () => {
       provider: "openai-images",
       environmentVariable: "OC_MULTI_IMAGEGEN_OPENAI_API_KEY",
     })
+    process.env.OC_MULTI_IMAGEGEN_BACKEND = "nano-gpt"
+    expect(selectBackend(undefined).credential).toMatchObject({
+      type: "key",
+      provider: "nano-gpt-images",
+      environmentVariable: "OC_MULTI_IMAGEGEN_NANOGPT_API_KEY",
+    })
+  })
+
+  test("registers the tools each backend declares, and only those", () => {
+    const names = (backend: string) => {
+      process.env.OC_MULTI_IMAGEGEN_BACKEND = backend
+      return selectBackend(undefined).tools.map((tool) => tool.name)
+    }
+
+    expect(names("codex")).toEqual(["imagegen"])
+    expect(names("openai-api")).toEqual(["imagegen"])
+    expect(names("nano-gpt")).toEqual(["imagegen", "imageedit", "imagegen_models"])
   })
 
   test.each([
     ["", "is empty"],
     ["dall-e", "is not a known backend"],
     ["OPENAI-API", "is not a known backend"],
+    ["nano-gpt ", "is not a known backend"],
     [" openai-api", "is not a known backend"],
   ])("fails for the value %j instead of falling back to Codex, and does not repeat it", (value, reason) => {
     process.env.OC_MULTI_IMAGEGEN_BACKEND = value
@@ -46,7 +65,7 @@ describe("selectBackend", () => {
     })()
 
     expect(error).toBeInstanceOf(Error)
-    expect((error as Error).message).toContain(`OC_MULTI_IMAGEGEN_BACKEND ${reason}. Use codex or openai-api`)
+    expect((error as Error).message).toContain(`OC_MULTI_IMAGEGEN_BACKEND ${reason}. Use codex, openai-api or nano-gpt`)
     if (value === "dall-e") expect((error as Error).message).not.toContain(value)
   })
 
@@ -56,7 +75,7 @@ describe("selectBackend", () => {
       expect(() => selectBackend(options)).toThrow(
         'The oc-multi-imagegen "backend" plugin option is no longer supported.',
       )
-      expect(() => selectBackend(options)).toThrow("OC_MULTI_IMAGEGEN_BACKEND=codex|openai-api")
+      expect(() => selectBackend(options)).toThrow("OC_MULTI_IMAGEGEN_BACKEND=codex|openai-api|nano-gpt")
     },
   )
 
@@ -79,11 +98,12 @@ const hosts: Array<[string, (options?: Record<string, unknown>) => Promise<{ des
   ],
   ["OpenCode 2", async (options) => ({ description: (await loadV2Tool({ pluginOptions: options })).tool.description })],
 ]
+const codexDescription = () => selectBackend(undefined).tools[0].description
 
 describe.each(hosts)("%s backend selection", (_host, load) => {
   test("loads Codex without a variable, whether or not the host passes empty options", async () => {
-    expect((await load()).description).toBe(describeImagegen(selectBackend(undefined)))
-    expect((await load({})).description).toBe(describeImagegen(selectBackend(undefined)))
+    expect((await load()).description).toBe(codexDescription())
+    expect((await load({})).description).toBe(codexDescription())
   })
 
   test("loads the backend the variable selects", async () => {

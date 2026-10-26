@@ -1,7 +1,7 @@
 {
   "name": "oc-multi-imagegen",
   "version": "0.1.0",
-  "description": "Image generation and editing tools for OpenCode 1 and OpenCode 2 agents. Uses ChatGPT OAuth through the Codex image backend by default, or an OpenAI Images API key through the official API.",
+  "description": "Image generation and editing tools for OpenCode 1 and OpenCode 2 agents. Uses ChatGPT OAuth through the Codex image backend by default, an OpenAI Images API key through the official API, or a NanoGPT API key with separate generation and editing tools and a model chosen per call.",
   "type": "module",
   "main": "./dist/index.js",
   "exports": {

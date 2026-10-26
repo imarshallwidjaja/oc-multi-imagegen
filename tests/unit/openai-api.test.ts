@@ -4,7 +4,7 @@ import os from "node:os"
 import path from "node:path"
 import { z } from "zod"
 import { readReferenceImages } from "../../src/input-image"
-import { openaiApiBackend } from "../../src/openai-api"
+import { openaiApiImagegen } from "../../src/openai-api"
 import type { GenerateArgs } from "../../src/schema"
 import type { ImageCredential } from "../../src/types"
 import { PNG_BUFFER } from "./fixtures"
@@ -21,7 +21,7 @@ const signal = new AbortController().signal
 const key: ImageCredential = { type: "key", key: "sk-images" }
 
 function callApi(args: GenerateArgs, dataUrls: string[] = [], credential: ImageCredential = key) {
-  return openaiApiBackend.generate(credential, args, dataUrls, signal)
+  return openaiApiImagegen.generate(credential, args, dataUrls, signal)
 }
 
 const originalFetch = globalThis.fetch
@@ -144,7 +144,7 @@ describe("OpenAI Images API backend request", () => {
 
 describe("OpenAI Images API backend arguments", () => {
   const parse = (value: Record<string, unknown>) =>
-    openaiApiBackend.argsSchema.safeParse({ prompt: "p", out: "o.png", ...value })
+    openaiApiImagegen.schema.safeParse({ prompt: "p", out: "o.png", ...value })
 
   test.each(["1536x864", "1024x1024", "16x48", "48x16", "3840x2160", "1280x720"])(
     "accepts the native size %s",
@@ -188,10 +188,10 @@ describe("OpenAI Images API backend arguments", () => {
   })
 
   test("documents its defaults and limits without Codex caveats", () => {
-    const schema = z.toJSONSchema(openaiApiBackend.argsSchema, { io: "input" }) as {
+    const schema = z.toJSONSchema(openaiApiImagegen.schema, { io: "input" }) as {
       properties: Record<string, { description: string }>
     }
-    const text = JSON.stringify(schema) + Object.values(openaiApiBackend.description).join(" ")
+    const text = JSON.stringify(schema) + openaiApiImagegen.description
 
     expect(schema.properties.model.description).toContain("gpt-image-2.5-sunburst")
     expect(schema.properties.quality.description).toContain("auto")
@@ -201,7 +201,7 @@ describe("OpenAI Images API backend arguments", () => {
   })
 
   test("adds no note to the result text", () => {
-    expect(openaiApiBackend).not.toHaveProperty("resultNote")
+    expect(openaiApiImagegen).not.toHaveProperty("resultNote")
   })
 })
 
@@ -225,7 +225,7 @@ describe("OpenAI Images API reference images", () => {
   ])("accepts %s", async (_name, mime, bytes) => {
     const where = await reference("ref", bytes)
 
-    expect(await readReferenceImages(["ref"], where, openaiApiBackend.references)).toEqual([
+    expect(await readReferenceImages(["ref"], where, openaiApiImagegen.references(generateArgs()).rules)).toEqual([
       `data:${mime};base64,${bytes.toString("base64")}`,
     ])
   })
@@ -233,7 +233,9 @@ describe("OpenAI Images API reference images", () => {
   test("rejects a GIF, which the API does not take", async () => {
     const where = await reference("ref.gif", Buffer.from("GIF89a"))
 
-    await expect(readReferenceImages(["ref.gif"], where, openaiApiBackend.references)).rejects.toThrow(
+    await expect(
+      readReferenceImages(["ref.gif"], where, openaiApiImagegen.references(generateArgs()).rules),
+    ).rejects.toThrow(
       `unsupported reference image type image/gif: ${path.join(where, "ref.gif")}. Use image/png, image/jpeg, image/webp.`,
     )
   })
@@ -242,15 +244,15 @@ describe("OpenAI Images API reference images", () => {
     // 15,728,640 bytes encode to 20,971,520 base64 characters; the data URL prefix pushes it over the limit.
     const where = await reference("big.png", Buffer.concat([PNG_BUFFER, Buffer.alloc(15_728_640 - PNG_BUFFER.length)]))
 
-    await expect(readReferenceImages(["big.png"], where, openaiApiBackend.references)).rejects.toThrow(
-      "reference image is too large",
-    )
+    await expect(
+      readReferenceImages(["big.png"], where, openaiApiImagegen.references(generateArgs()).rules),
+    ).rejects.toThrow("reference image is too large")
   })
 
   test("accepts a reference whose data URL is just under the documented length", async () => {
     const where = await reference("max.png", Buffer.concat([PNG_BUFFER, Buffer.alloc(15_728_610 - PNG_BUFFER.length)]))
 
-    const [dataUrl] = await readReferenceImages(["max.png"], where, openaiApiBackend.references)
+    const [dataUrl] = await readReferenceImages(["max.png"], where, openaiApiImagegen.references(generateArgs()).rules)
 
     expect(dataUrl.length).toBeLessThanOrEqual(20_971_520)
     expect(dataUrl.length).toBeGreaterThan(20_971_480)

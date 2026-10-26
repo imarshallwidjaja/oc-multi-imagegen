@@ -13,7 +13,12 @@ export function pngDataUrl(buf: Buffer): string {
 // Every environment variable the plugin or its OpenCode 1 credential lookup reads. Test files share one Bun process,
 // so each file that loads the plugin or resolves a credential isolates them. Inherited values are never printed or
 // exposed to a test: they are set aside, removed for each test and put back afterwards.
-const PLUGIN_ENVIRONMENT = ["OPENCODE_AUTH_CONTENT", "OC_MULTI_IMAGEGEN_BACKEND", "OC_MULTI_IMAGEGEN_OPENAI_API_KEY"]
+const PLUGIN_ENVIRONMENT = [
+  "OPENCODE_AUTH_CONTENT",
+  "OC_MULTI_IMAGEGEN_BACKEND",
+  "OC_MULTI_IMAGEGEN_OPENAI_API_KEY",
+  "OC_MULTI_IMAGEGEN_NANOGPT_API_KEY",
+]
 
 export function isolateEnvironment(): void {
   const inherited = new Map<string, string | undefined>()

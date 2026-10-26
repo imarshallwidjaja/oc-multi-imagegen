@@ -1,11 +1,11 @@
 ---
 name: "oc-multi-imagegen"
-description: "Use before any image generation or image edit with the imagegen tool: choosing raster or code, labelling reference images, writing the prompt, correcting a result, keeping related images consistent, transparent backgrounds, and checking what came back."
+description: "Use before any image generation or image edit with the imagegen or imageedit tool: choosing raster or code, labelling reference images, writing the prompt, correcting a result, keeping related images consistent, transparent backgrounds, and checking what came back."
 ---
 
 # Image generation with imagegen
 
-The imagegen tool follows reference pixels better than prose. Each call has three parts: references that carry look and geometry, a prompt that carries structure and facts, and a check of the file that came back. The tool description lists its arguments and limits.
+The image tools follow reference pixels better than prose. Each call has three parts: references that carry look and geometry, a prompt that carries structure and facts, and a check of the file that came back. The tool descriptions list their arguments and limits. Where a backend registers separate tools for creating from text and for editing existing images, create with `imagegen` and edit with `imageedit`, and use the model information tool it offers (`imagegen_models`) to choose a model instead of guessing one.
 
 ## Pick the medium
 
@@ -17,7 +17,7 @@ Icons, logos, charts, diagrams, and anything that must scale, be recoloured or b
 - Pass geometry as a picture (a rendered layout, a crop, a sketch). Dimensions written in words come out approximate.
 - Order the prompt: medium and framing, the role of each reference, content in reading order with every visible string in quotes, then hard constraints. For an app screen, state "flat screen capture, no device frame".
 - Assign colour by role and name where colour must not appear; otherwise labels and states get colour-coded on their own.
-- Pick the size whose aspect ratio fits the use.
+- Pick the size or aspect ratio that fits the use.
 
 ## Correct
 

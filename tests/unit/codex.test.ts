@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, mock, test } from "bun:test"
 import { z } from "zod"
-import { codexBackend } from "../../src/codex"
+import { codexImagegen } from "../../src/codex"
 import type { GenerateArgs } from "../../src/schema"
 import type { ImageCredential } from "../../src/types"
 
@@ -16,7 +16,7 @@ const signal = new AbortController().signal
 const auth: ImageCredential = { type: "oauth", access: "tok" }
 
 function callCodex(args: GenerateArgs, dataUrls: string[] = [], credential: ImageCredential = auth) {
-  return codexBackend.generate(credential, args, dataUrls, signal)
+  return codexImagegen.generate(credential, args, dataUrls, signal)
 }
 
 describe("Codex backend request", () => {
@@ -141,7 +141,7 @@ describe("Codex backend request", () => {
 })
 
 describe("Codex backend arguments", () => {
-  const parse = (value: Record<string, unknown>) => codexBackend.argsSchema.safeParse(value)
+  const parse = (value: Record<string, unknown>) => codexImagegen.schema.safeParse(value)
 
   test("accepts the size presets and nothing else", () => {
     expect(parse({ prompt: "p", out: "o.png", size: "1672x941" }).success).toBe(true)
@@ -158,7 +158,7 @@ describe("Codex backend arguments", () => {
   })
 
   test("describes model and quality as unverified requests, not as unsupported", () => {
-    const schema = z.toJSONSchema(codexBackend.argsSchema, { io: "input" }) as {
+    const schema = z.toJSONSchema(codexImagegen.schema, { io: "input" }) as {
       properties: Record<string, { description: string }>
     }
 
@@ -169,11 +169,13 @@ describe("Codex backend arguments", () => {
   })
 
   test("separates requested settings from verified ones in the result text only when they were given", () => {
-    expect(codexBackend.resultNote(generateArgs())).toBeUndefined()
-    expect(codexBackend.resultNote(generateArgs({ model: null, quality: null }))).toBeUndefined()
-    expect(codexBackend.resultNote(generateArgs({ model: "m1" }))).toBe(
+    expect(codexImagegen.resultNote(generateArgs())).toBeUndefined()
+    expect(codexImagegen.resultNote(generateArgs({ model: null, quality: null }))).toBeUndefined()
+    expect(codexImagegen.resultNote(generateArgs({ model: "m1" }))).toBe(
       "Requested model m1; the Codex response does not report which settings it applied, so they are unverified.",
     )
-    expect(codexBackend.resultNote(generateArgs({ model: "m1", quality: "low" }))).toContain("model m1 and quality low")
+    expect(codexImagegen.resultNote(generateArgs({ model: "m1", quality: "low" }))).toContain(
+      "model m1 and quality low",
+    )
   })
 })

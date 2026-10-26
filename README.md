@@ -1,8 +1,8 @@
 # oc-multi-imagegen
 
-Image generation and editing for OpenCode agents, exposed through the `imagegen` tool. One package loads in OpenCode 1 and OpenCode 2. It targets OpenCode 1.18.29 and newer and OpenCode 2.0.32 and newer; those versions are the support floors. Container runs with real agents have covered OpenCode 1.19.3 and 2.0.32 with the Codex backend (skill loaded, images generated; run before backend selection existed) and with the OpenAI Images API backend (one generation and one reference edit per host, with the key from `OC_MULTI_IMAGEGEN_OPENAI_API_KEY` and, in an earlier run, with a key saved in OpenCode). OpenCode 1.18.29 was checked for plugin load, skill registration and, for the OpenAI Images API backend, sign-in registration only, and versions between the floors and those runs, or newer, are untested.
+Image generation and editing for OpenCode agents, exposed through the `imagegen` tool and, on the NanoGPT backend, also `imageedit` and `imagegen_models`. One package loads in OpenCode 1 and OpenCode 2. It targets OpenCode 1.18.29 and newer and OpenCode 2.0.32 and newer; those versions are the support floors. Container runs with real agents have covered OpenCode 1.19.3 and 2.0.32 with the Codex backend (skill loaded, images generated; run before backend selection existed) and with the OpenAI Images API backend (one generation and one reference edit per host, with the key from `OC_MULTI_IMAGEGEN_OPENAI_API_KEY` and, in an earlier run, with a key saved in OpenCode). OpenCode 1.18.29 was checked for plugin load, skill registration and, for the OpenAI Images API backend, sign-in registration only, and versions between the floors and those runs, or newer, are untested. The NanoGPT backend has only been exercised by the mocked unit suite: no live NanoGPT call and no container run has been made, so its model table (see "NanoGPT backend") follows provider documentation and public model metadata and is not validated against the live service.
 
-The package also ships one skill, `oc-multi-imagegen`, with the technique for image work: choosing raster or code, labelling reference images, correcting a result, keeping related images consistent, transparency, and checking what came back. The `imagegen` description tells agents to load it before image work when it is available and permitted, and the tool works without it.
+The package also ships one skill, `oc-multi-imagegen`, with the technique for image work: choosing raster or code, labelling reference images, correcting a result, keeping related images consistent, transparency, and checking what came back. The image tool descriptions tell agents to load it before image work when it is available and permitted, and the tools work without it.
 
 The plugin runs one image backend per load, chosen with the `OC_MULTI_IMAGEGEN_BACKEND` environment variable:
 
@@ -10,8 +10,9 @@ The plugin runs one image backend per load, chosen with the `OC_MULTI_IMAGEGEN_B
 | --- | --- | --- |
 | unset or `codex` | the ChatGPT Codex image backend | OpenCode's ChatGPT sign-in for the `openai` provider |
 | `openai-api` | the official OpenAI Images API | the `OC_MULTI_IMAGEGEN_OPENAI_API_KEY` variable, or else an OpenAI Images API key saved in OpenCode as the `openai-images` credential |
+| `nano-gpt` | NanoGPT's image API, with a model chosen per call | the `OC_MULTI_IMAGEGEN_NANOGPT_API_KEY` variable, or else a NanoGPT API key saved in OpenCode as the `nano-gpt-images` credential |
 
-The active backend decides the tool's arguments, defaults, limits and description, so an agent sees only the backend that will run. Changing the variable and restarting OpenCode switches the tool; there is no per-call backend argument and no fallback from one backend to the other.
+The active backend decides which tools are registered and their arguments, defaults, limits and descriptions, so an agent sees only the backend that will run. Codex and the OpenAI Images API register the single `imagegen` tool. NanoGPT registers `imagegen` (new image from text), `imageedit` (edit or combine existing images) and `imagegen_models` (the supported models, answered locally). Changing the variable and restarting OpenCode switches the tool; there is no per-call backend argument and no fallback from one backend to the other.
 
 ## Local setup
 
@@ -46,12 +47,13 @@ Both hosts find the skill without skills configuration. OpenCode 1's `config` ho
 
 ## Configuration
 
-The plugin has two settings, and both are environment variables of the process that loads the plugin. The plugin entry in the OpenCode configuration stays a plain package entry (see "Local setup"): the plugin takes no options, and it does not read a `.env` file or any other configuration file.
+The plugin has three settings, all of them environment variables of the process that loads the plugin. The plugin entry in the OpenCode configuration stays a plain package entry (see "Local setup"): the plugin takes no options, and it does not read a `.env` file or any other configuration file.
 
 | Variable | Effect |
 | --- | --- |
-| `OC_MULTI_IMAGEGEN_BACKEND` | Selects the backend: `codex` (also the result when the variable is unset) or `openai-api`. It is read once, when the plugin loads, so changing it takes a restart. A value that is empty or unknown makes the plugin fail to load: the host logs `failed to load plugin` with a message that names the variable, and the `imagegen` tool is not registered. |
+| `OC_MULTI_IMAGEGEN_BACKEND` | Selects the backend: `codex` (also the result when the variable is unset), `openai-api` or `nano-gpt`. It is read once, when the plugin loads, so changing it takes a restart. A value that is empty or unknown makes the plugin fail to load: the host logs `failed to load plugin` with a message that names the variable, and no image tool is registered. |
 | `OC_MULTI_IMAGEGEN_OPENAI_API_KEY` | The OpenAI Images API key, for the `openai-api` backend only. When the variable is present it is the key, ahead of any key saved in OpenCode. It is read on every call, so a changed value applies to the next call. See "OpenAI Images API backend". |
+| `OC_MULTI_IMAGEGEN_NANOGPT_API_KEY` | The NanoGPT API key, for the `nano-gpt` backend only, with the same precedence and per-call reading as the OpenAI key. See "NanoGPT backend". |
 
 Earlier builds took the backend as a plugin option. A `backend` option left in a plugin entry now makes the plugin fail to load with a message that names `OC_MULTI_IMAGEGEN_BACKEND`, and any other option fails it too, so remove the option from the entry.
 
@@ -72,7 +74,7 @@ After editing a unit or its environment file, reload systemd and restart the ser
 
 ## Authentication
 
-Credentials stay outside this repository: in OpenCode's own store, or for the image API key, in the environment of the OpenCode process. The plugin reads only the credential of the active backend, on every call and only after the `imagegen` permission, and never writes, refreshes or activates one.
+Credentials stay outside this repository: in OpenCode's own store, or for an image API key, in the environment of the OpenCode process. The plugin reads only the credential of the active backend, on every call and only after the permission of the invoked image tool, and never writes, refreshes or activates one.
 
 ### Codex backend
 
@@ -104,9 +106,20 @@ With `OC_MULTI_IMAGEGEN_BACKEND` set to `openai-api`, the plugin also registers 
 
 A missing credential fails the call with the variable and the sign-in command to use, and a non-key saved credential fails it with the sign-in command. The OpenAI chat sign-in is never used as an image key, and the image key is never used for chat. An error from the API is reported with its status and body, with the key removed from the text.
 
+### NanoGPT backend
+
+This backend uses its own credential, separate from the other two. The plugin sends the key only to `https://api.nano-gpt.com/api/v1/images`, when an image is requested, and downloads a result that NanoGPT returns as a URL without any credential. Loading the plugin makes no network request and checks no key. `imagegen_models` needs no key.
+
+Each call takes the key from the first of these that applies, exactly as for the OpenAI Images API backend:
+
+1. The `OC_MULTI_IMAGEGEN_NANOGPT_API_KEY` variable, when it is present. A value that is empty, or has characters that cannot be sent in an HTTP header, fails the call without a request and without trying the saved key. A key NanoGPT rejects is reported once, also without trying the saved key.
+2. The key saved in OpenCode as the `nano-gpt-images` credential, when the variable is absent.
+
+With `OC_MULTI_IMAGEGEN_BACKEND` set to `nano-gpt`, the plugin registers a sign-in method for `nano-gpt-images` the same way: OpenCode 1 with `opencode auth login --provider nano-gpt-images`, OpenCode 2 with `opencode auth login nano-gpt-images` or by connecting the **NanoGPT API** integration. The key is not read from the other backends' variables or credentials, from `NANOGPT_API_KEY`, or from a `.env` file.
+
 ## Permissions
 
-Both hosts ask for the `imagegen` permission once per call, before the plugin reads credentials or reference images or contacts the provider, so a deny rule stops the call without spending quota. A rule set that denies everything and allows this tool and the skill runs without prompts. In OpenCode 1:
+Both hosts ask for the permission of the invoked image tool once per call, before the plugin reads credentials or reference images or contacts the provider, so a deny rule stops the call without spending quota. The tool is `imagegen` on Codex and the OpenAI Images API, and `imagegen` or `imageedit` on NanoGPT. A rule set that denies everything and allows `imagegen` and the skill runs without prompts on Codex and the OpenAI Images API; the NanoGPT additions follow the examples. In OpenCode 1:
 
 ```json
 {
@@ -132,11 +145,13 @@ In OpenCode 2, the same rules go in `permissions`, with the broad rule first and
 
 The `skill` rule is optional. The skill is guidance, and the plugin never asks for the `skill` permission: with `imagegen` allowed and `skill` denied, the agent still generates images, using only the guidance in the tool description. An allowed `skill` rule with `imagegen` denied lets the agent load the guidance but not generate.
 
-The permission resource is the active backend's id, `codex` or `openai-api`, so a grant saved for one backend (for example "always allow" in a prompt) does not cover the other. The `*` rules above match both. To allow only the official API, write the rule on that resource: in OpenCode 1 `"imagegen": { "*": "deny", "openai-api": "allow" }`, in OpenCode 2 `{ "action": "imagegen", "resource": "openai-api", "effect": "allow" }`. A call that uses billed API credit asks nothing beyond this permission.
+The permission resource is the active backend's id, `codex`, `openai-api` or `nano-gpt`, so a grant saved for one backend (for example "always allow" in a prompt) does not cover the others. The `*` rules above match every backend. To allow only the official API, write the rule on that resource: in OpenCode 1 `"imagegen": { "*": "deny", "openai-api": "allow" }`, in OpenCode 2 `{ "action": "imagegen", "resource": "openai-api", "effect": "allow" }`. A call that uses billed API credit asks nothing beyond this permission.
 
 The permission covers the whole operation. It does not contain file access: `out` and `images` accept absolute paths, including paths outside the project directory. An agent that should look at the result needs a `read` rule too; scope it to the files you mean (for example `*.png`), because `read` opens whatever its rule matches.
 
-In OpenCode 2, `imagegen` is a direct tool, so allowing it does not require allowing the `execute` tool.
+The permission action is the tool's name, and `imageedit` is a separate action from `imagegen`. With the NanoGPT backend, add `imageedit` to the rules above, or the agent can create images but not edit them: `"imageedit": "allow"` in OpenCode 1, `{ "action": "imageedit", "resource": "*", "effect": "allow" }` in OpenCode 2. `imagegen_models` answers from a table inside the plugin and asks for no permission; a rule set that denies everything by default should allow it too (`"imagegen_models": "allow"`, or an `imagegen_models` action rule), so that the host lists it (not checked against a host).
+
+In OpenCode 2, these are direct tools, so allowing them does not require allowing the `execute` tool.
 
 ## Use
 
@@ -148,7 +163,7 @@ To edit or combine existing images, name the files in the request:
 
 > Add a wooden pier on the left of images/lake.png and save the result as images/lake-pier.png.
 
-The agent chooses any size you leave out and passes existing files as `images`. The tool accepts:
+The agent passes existing files as `images`. On Codex and the OpenAI Images API it chooses any size you leave out, and `imagegen` accepts the arguments below. The NanoGPT tools, with `imageedit` for edits and a model named on every call, are described under "NanoGPT tools".
 
 - `prompt`: description of the image to generate, or of the edit to make when `images` is set.
 - `out`: destination path. Relative paths resolve against the OpenCode project directory; absolute paths are accepted.
@@ -158,6 +173,29 @@ The agent chooses any size you leave out and passes existing files as `images`. 
 - `model` and `quality`: optional strings, sent to the backend unchanged. Without them the backend's defaults apply (see "Model and quality").
 
 Each call sends one request and saves one image. The sections below describe what the plugin does with each argument. Statements marked as recorded come from runs against the Codex backend (recorded OpenCode container runs with real agents, and a direct-request study on one ChatGPT Pro account on 2026-10-20); that backend can change without notice.
+
+### NanoGPT tools
+
+With `OC_MULTI_IMAGEGEN_BACKEND=nano-gpt`, creating and editing are separate tools, and every call names its model. NanoGPT publishes a generation model and an edit model for each family, so `imagegen` accepts only generation models and `imageedit` only edit models; a model from the wrong list is rejected with a message that names the right tool.
+
+| Family | `imagegen` model | `imageedit` model | Controls | Edit references |
+| --- | --- | --- | --- | --- |
+| GPT Image 2.5 Flare | `openai/gpt-image-2.5/flare/text-to-image` | `openai/gpt-image-2.5/flare/edit` | `resolution`, `aspect_ratio`, `quality`, `background` | up to 16 |
+| Nano Banana Pro | `nano-banana-pro` | `nano-banana-pro-edit` | `resolution`, `aspect_ratio` | up to 10 |
+| FLUX.3 Image | `black-forest-labs/flux-3/text-to-image` | `black-forest-labs/flux-3/edit` | `resolution`, `aspect_ratio` | up to 10 |
+| Seedream 5.0 Pro | `bytedance/seedream-v5.0-pro` | `bytedance/seedream-v5.0-pro/edit` | `resolution` (also takes aspect-ratio values such as `16:9`) | up to 10, each at most 10 MB |
+| Qwen Image 2.1 | `qwen-image-2.1/text-to-image` | `qwen-image-2.1/edit` | `resolution`, `aspect_ratio`, `seed` | up to 10 |
+
+- `imagegen` takes `model`, `prompt`, `out` and the optional controls its model lists. `imageedit` takes the same plus `images`, a required list of local PNG, JPEG or WebP paths resolved like `out`. Neither takes `size`.
+- `imagegen_models` lists these models from a table inside the plugin, filtered by `operation` (`generate` or `edit`), `family` or `query` words, or describes one exact `model` with its control values, limits and argument schema. It needs no key, permission, file or network access and costs nothing.
+- A control is sent only when the call sets it, so NanoGPT applies its own default for everything left out. A control the chosen model does not list, an unlisted value, too many references, a prompt over a documented length limit, an unknown argument and a model that is not in the table are all rejected before any permission request or provider call. The plugin does not drop an unsupported control; the error says what to change.
+- Each call asks for one image, and asks for PNG output where the model documents an output format. NanoGPT bills the key's account.
+- The model is never chosen for the agent and never replaced after an error. The tool descriptions tell the agent to use the model you named when the tool supports it, otherwise to pick a supported model and give a short reason, to ask you only when required input is missing or your request conflicts with a model, capability, cost or requirement, and to read a provider error, correct only an input that is demonstrably wrong, and not repeat an unchanged call or retry authentication, balance or rate-limit errors. A model choice needs no approval of its own.
+- A response with one inline `b64_json` image or one `url` is accepted. A URL must be `https` with a hostname (not an IP address, `localhost` or a `.localhost` name, each with or without a trailing dot) and without credentials; whether a public name resolves to a private address is not checked. It is downloaded without any key, without following redirects, with the call's cancellation signal and up to 64 MiB. A download whose size differs from the `Content-Length` of an uncompressed response is refused. A response with no image, several images, a pending job, both fields or a body that is not JSON is refused, nothing is saved, and the error says the account may already have been charged. The plugin does not poll jobs, convert, resize or save more than one file. Data that is not a PNG, including SVG, is refused before anything is written.
+- Provider errors are reported with the tool, model, HTTP status, NanoGPT's error code and message, cut to a bounded length and with the key removed. An HTTP 5xx adds that the account may have been charged.
+- A network failure while sending the request, reading the response or downloading the image is reported with the tool, model and stage, without the runtime's own message, code or name and without the download URL or its host. Nothing is saved, the error says the account may have been charged and that the call should not be repeated unchanged, and the call is not retried. A cancelled call keeps its cancellation reason.
+
+The table follows NanoGPT's documentation and public model metadata at the time of writing. It has not been checked with live calls; the metadata is incomplete and inconsistent between sources, so a control missing from a model's row means this plugin does not send it, not that NanoGPT lacks it. The plugin never fetches NanoGPT's model list, so models and controls NanoGPT adds later stay unavailable until the table changes.
 
 ### Size
 
@@ -181,7 +219,7 @@ The OpenAI Images API backend sends the references as base64 data URLs in the do
 
 ### Background
 
-`background` is passed to the backend as requested, with `opaque` as the default. The plugin does not check or modify the alpha channel of the result.
+On Codex and the OpenAI Images API, `background` is passed to the backend as requested, with `opaque` as the default. On NanoGPT only GPT Image 2.5 Flare takes `background` (`auto`, `opaque` or `transparent`); the plugin injects no default there, so the control is sent only when the call sets it. The plugin does not check or modify the alpha channel of the result.
 
 Recorded on Codex: opaque requests returned RGB PNGs and transparent requests returned RGBA PNGs with real transparency. The alpha was soft rather than a hard mask, and in the direct-request study most subject pixels sat at alpha 252 to 253 instead of fully opaque. Post-process the alpha channel when a hard cut-out or a fully opaque subject is needed.
 
@@ -195,7 +233,7 @@ The result carries the saved path and whether it was versioned as `out` and `ver
 
 ### Controls the tool does not expose
 
-There are no image-count or output-format arguments. The OpenAI Images API request always asks for one PNG image without streaming, and no backend receives other arguments: the plugin's validation removes unknown arguments such as `n`, so they never reach the provider. A host can also drop or reject them before the call.
+There are no image-count or output-format arguments. The OpenAI Images API request always asks for one PNG image without streaming, and each NanoGPT request asks for one image; no backend receives other arguments. On Codex and the OpenAI Images API, the plugin's validation removes unknown arguments such as `n`, so they never reach the provider. The NanoGPT tools reject unknown arguments instead, including `n`, `provider`, `stream` and output formats. A host can also drop or reject arguments before the call.
 
 ### Validation, cancellation and failures
 
@@ -203,11 +241,11 @@ Arguments are validated before any permission request or provider call. Stopping
 
 ## Current limits
 
-The Codex backend relies on the ChatGPT Codex backend and its availability, account permissions, and usage limits. The OpenAI Images API backend relies on the official API: its calls bill the key's account, and model access, rate limits and size limits are the API's. The plugin does not probe the key's scope or a model's availability; those show up as the API's error on the call that needs them.
+The Codex backend relies on the ChatGPT Codex backend and its availability, account permissions, and usage limits. The OpenAI Images API backend relies on the official API: its calls bill the key's account, and model access, rate limits and size limits are the API's. The NanoGPT backend relies on NanoGPT's normalized image API and its availability, balance, rate limits and model catalogue; its calls bill the key's account. The plugin does not probe the key's scope or a model's availability; those show up as the API's error on the call that needs them.
 
 In OpenCode 2, relative `out` and `images` paths resolve against the directory of the session that made the call, which can differ from the directory the plugin loaded in.
 
-Generation sends prompts and reference images to OpenAI and may consume account quota or API credit. This is an unofficial integration, not an OpenAI or OpenCode product. The MIT software license does not grant access to a provider service or replace that service's terms.
+Generation sends prompts and reference images to the active backend's provider (OpenAI, or NanoGPT) and may consume account quota or API credit. This is an unofficial integration, not an OpenAI or OpenCode product. The MIT software license does not grant access to a provider service or replace that service's terms.
 
 ## Development checks
 
@@ -223,7 +261,7 @@ npm pack --dry-run
 
 The optional `bun run test:e2e` suite launches OpenCode and makes real authenticated image-generation calls. Run it only when you intend to use account quota. Set `OPENCODE_MODEL` to select the agent model, or leave it unset to use OpenCode's default. Live generation is separate from unit checks and CI.
 
-To try the plugin with real agents in OpenCode 1 and OpenCode 2 containers, follow `docs/container-testing.md` in a source checkout of this repository. The runbook and its `scripts/` helpers are not part of the npm package. It is an ad-hoc procedure that also uses account quota, not an automated check.
+To try the plugin with real agents in OpenCode 1 and OpenCode 2 containers, follow `docs/container-testing.md` in a source checkout of this repository. The runbook and its `scripts/` helpers are not part of the npm package. It is an ad-hoc procedure that also uses account quota, not an automated check. It covers the Codex and OpenAI Images API backends; the NanoGPT backend has no container or live runbook.
 
 ## License
 

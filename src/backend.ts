@@ -1,12 +1,19 @@
 import { codexBackend } from "./codex"
+import { nanoGptBackend } from "./nano-gpt"
 import { openaiApiBackend } from "./openai-api"
 import type { Backend } from "./types"
 
 // Every backend the plugin can run. The OC_MULTI_IMAGEGEN_BACKEND variable selects one when the plugin loads, so each
 // load exposes the arguments, defaults and limits of that backend only. Adding a backend means adding it here.
-const BACKENDS: readonly Backend[] = [codexBackend, openaiApiBackend]
+const BACKENDS: readonly Backend[] = [codexBackend, openaiApiBackend, nanoGptBackend]
 
 const DEFAULT_BACKEND = codexBackend
+
+// "codex, openai-api or nano-gpt"
+function listIds(backends: readonly Backend[]): string {
+  const ids = backends.map((backend) => backend.id)
+  return ids.length < 2 ? ids.join("") : `${ids.slice(0, -1).join(", ")} or ${ids[ids.length - 1]}`
+}
 
 const BACKEND_VARIABLE = "OC_MULTI_IMAGEGEN_BACKEND"
 
@@ -36,7 +43,7 @@ export function selectBackend(options: unknown): Backend {
   const backend = BACKENDS.find((candidate) => candidate.id === value)
   if (!backend) {
     throw new Error(
-      `${BACKEND_VARIABLE} is ${value === "" ? "empty" : "not a known backend"}. Use ${BACKENDS.map((candidate) => candidate.id).join(" or ")}, or unset it to use ${DEFAULT_BACKEND.id}.`,
+      `${BACKEND_VARIABLE} is ${value === "" ? "empty" : "not a known backend"}. Use ${listIds(BACKENDS)}, or unset it to use ${DEFAULT_BACKEND.id}.`,
     )
   }
   return backend

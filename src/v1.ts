@@ -1,23 +1,25 @@
 import type { Hooks, Plugin, ToolContext, ToolDefinition, ToolResult } from "@opencode-ai/plugin"
 import { loadCredential } from "./auth"
 import { selectBackend } from "./backend"
-import { describeImagegen, generateImage, IMAGEGEN_TOOL } from "./imagegen"
 import { loadPackagedSkill, SKILLS_DIRECTORY } from "./skill"
-import type { Backend } from "./types"
+import type { Backend, BackendTool } from "./types"
 
 // A plain tool definition, so the module needs no runtime import from the OpenCode 1 SDK.
-function createImagegenTool(backend: Backend) {
+function createTool(backend: Backend, tool: BackendTool) {
   const { credential } = backend
+  const definition = { description: tool.description, args: tool.schema.shape }
+  if (tool.kind === "info") {
+    return { ...definition, execute: async (rawArgs: unknown): Promise<ToolResult> => ({ output: tool.run(rawArgs) }) }
+  }
   return {
-    description: describeImagegen(backend),
-    args: backend.argsSchema.shape,
+    ...definition,
     async execute(rawArgs: unknown, ctx: ToolContext): Promise<ToolResult> {
-      const saved = await generateImage(rawArgs, backend, {
+      const saved = await tool.run(rawArgs, {
         signal: ctx.abort,
-        // The host binds the session, agent and tool call to this request. The resource is the backend id, so a
-        // grant saved for one backend does not cover another.
-        authorize: (args) =>
-          ctx.ask({ permission: IMAGEGEN_TOOL, patterns: [backend.id], always: [backend.id], metadata: { ...args } }),
+        // The host binds the session, agent and tool call to this request. The action is the tool's name and the
+        // resource is the backend id, so a grant saved for one backend does not cover another.
+        authorize: (action, args) =>
+          ctx.ask({ permission: action, patterns: [backend.id], always: [backend.id], metadata: args }),
         resolveDirectory: async () => ctx.directory,
         resolveCredential: async () => {
           const loaded = await loadCredential(credential)
@@ -60,7 +62,9 @@ export const server: Plugin = async (_input, options): Promise<Hooks> => {
   const { credential } = backend
   return {
     config: async (config) => registerSkillsDirectory(config as SkillConfig),
-    tool: { [IMAGEGEN_TOOL]: createImagegenTool(backend) as unknown as ToolDefinition },
+    tool: Object.fromEntries(
+      backend.tools.map((tool) => [tool.name, createTool(backend, tool) as unknown as ToolDefinition]),
+    ),
     ...(credential.type === "key"
       ? { auth: { provider: credential.provider, methods: [{ type: "api" as const, label: credential.label }] } }
       : {}),

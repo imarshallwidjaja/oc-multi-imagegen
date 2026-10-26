@@ -1,4 +1,5 @@
 import { z } from "zod"
+import { defineImageTool, describeImagegen, IMAGEGEN_TOOL } from "./imagegen"
 import { postImagesRequest } from "./images-request"
 import { createArgsShape, type GenerateArgs } from "./schema"
 import { appendSizeToPrompt, IMAGE_SIZES, type ImageSize, SIZE_CHOICES } from "./size"
@@ -65,22 +66,27 @@ async function generate(
   })
 }
 
-export const codexBackend = {
-  id: "codex",
-  credential: { type: "oauth", provider: "openai", label: "OpenAI ChatGPT OAuth" },
-  description: {
+export const codexImagegen = {
+  name: IMAGEGEN_TOOL,
+  description: describeImagegen({
     subject: "the ChatGPT Codex image backend",
     requires:
       "Requires OpenCode ChatGPT OAuth authentication. The prompt and any reference images are sent to the provider.",
     controls:
       "Optional model and quality are sent unchanged, but whether this backend applies them is unverified and can change; when you set either, the result text separates what was requested from what is verified. There are no image-count or output-format controls, and other arguments are not sent to the provider.",
-  },
-  argsSchema: z.object(argsShape),
-  references: {},
+  }),
+  schema: z.object(argsShape),
+  references: (args: GenerateArgs) => ({ paths: args.images, rules: {} }),
   generate,
-  resultNote(args) {
+  resultNote(args: GenerateArgs) {
     const requested = [args.model && `model ${args.model}`, args.quality && `quality ${args.quality}`].filter(Boolean)
     if (requested.length === 0) return undefined
     return `Requested ${requested.join(" and ")}; the Codex response does not report which settings it applied, so they are unverified.`
   },
+}
+
+export const codexBackend = {
+  id: "codex",
+  credential: { type: "oauth", provider: "openai", label: "OpenAI ChatGPT OAuth" },
+  tools: [defineImageTool(codexImagegen)],
 } satisfies Backend

@@ -1,6 +1,5 @@
 import type { Plugin } from "@opencode/plugin"
 import { selectBackend } from "./backend"
-import { describeImagegen, generateImage, IMAGEGEN_TOOL } from "./imagegen"
 import { resultSchema } from "./schema"
 import { loadPackagedSkill } from "./skill"
 import { type CredentialSpec, emptyEnvironmentError, environmentOverride, type ImageCredential } from "./types"
@@ -75,8 +74,8 @@ async function resolveApiKey(integration: Integration, spec: CredentialSpec): Pr
 
 type SkillEditor = Parameters<Parameters<Plugin.Context["skill"]["transform"]>[0]>[0]
 
-// OpenCode 2 entry point. The tool is called directly (not through Code Mode, no namespace), so it is
-// available to agents that allow imagegen without also allowing the execute tool.
+// OpenCode 2 entry point. Each tool is called directly (not through Code Mode, no namespace), so it is available to
+// agents that allow it without also allowing the execute tool.
 export const setup: Plugin.Plugin["setup"] = async (ctx) => {
   const backend = selectBackend(ctx.options)
   const { credential: spec } = backend
@@ -107,34 +106,49 @@ export const setup: Plugin.Plugin["setup"] = async (ctx) => {
     })
   }
   await ctx.tool.transform((editor) => {
-    editor.add({
-      name: IMAGEGEN_TOOL,
-      description: describeImagegen(backend),
-      input: backend.argsSchema,
-      output: resultSchema,
-      options: { codemode: false },
-      async execute(input, context) {
-        const saved = await generateImage(input, backend, {
-          signal: context.signal,
-          // The resource is the backend id, so a grant saved for one backend does not cover another.
-          authorize: (args) =>
-            ctx.permission.assert({
-              sessionID: context.sessionID,
-              agent: context.agent,
-              action: IMAGEGEN_TOOL,
-              resources: [backend.id],
-              save: [backend.id],
-              metadata: { ...args },
-              source: { type: "tool", messageID: context.messageID, id: context.id },
-            }),
-          // A session can run in a different directory than the one that loaded the plugin.
-          resolveDirectory: async () => (await ctx.session.get({ sessionID: context.sessionID })).location.directory,
-          resolveCredential: () =>
-            spec.type === "oauth" ? resolveChatGptAuth(ctx.integration, spec) : resolveApiKey(ctx.integration, spec),
+    for (const tool of backend.tools) {
+      if (tool.kind === "info") {
+        editor.add({
+          name: tool.name,
+          description: tool.description,
+          input: tool.schema,
+          options: { codemode: false },
+          async execute(input) {
+            return { content: tool.run(input) }
+          },
         })
-        const result = { out: saved.savedPath, versioned: saved.versioned }
-        return { output: result, content: saved.message, metadata: result }
-      },
-    })
+        continue
+      }
+      editor.add({
+        name: tool.name,
+        description: tool.description,
+        input: tool.schema,
+        output: resultSchema,
+        options: { codemode: false },
+        async execute(input, context) {
+          const saved = await tool.run(input, {
+            signal: context.signal,
+            // The action is the tool's name and the resource is the backend id, so a grant saved for one backend
+            // does not cover another.
+            authorize: (action, args) =>
+              ctx.permission.assert({
+                sessionID: context.sessionID,
+                agent: context.agent,
+                action,
+                resources: [backend.id],
+                save: [backend.id],
+                metadata: args,
+                source: { type: "tool", messageID: context.messageID, id: context.id },
+              }),
+            // A session can run in a different directory than the one that loaded the plugin.
+            resolveDirectory: async () => (await ctx.session.get({ sessionID: context.sessionID })).location.directory,
+            resolveCredential: () =>
+              spec.type === "oauth" ? resolveChatGptAuth(ctx.integration, spec) : resolveApiKey(ctx.integration, spec),
+          })
+          const result = { out: saved.savedPath, versioned: saved.versioned }
+          return { output: result, content: saved.message, metadata: result }
+        },
+      })
+    }
   })
 }

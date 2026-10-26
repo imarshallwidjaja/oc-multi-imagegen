@@ -10,7 +10,7 @@ export type ArgsSpec = {
   quality: string
 }
 
-// The single definition of the imagegen arguments, shared by every backend. OpenCode 1 takes the raw shape, OpenCode 2
+// The imagegen arguments of the Codex and OpenAI Images API backends. OpenCode 1 takes the raw shape, OpenCode 2
 // takes the object schema, and execution parses raw input with the same schema.
 export function createArgsShape(spec: ArgsSpec) {
   return {
@@ -59,8 +59,8 @@ export const resultSchema = z.object({
   versioned: z.boolean().describe("True when the requested path existed and a -vN suffix was used."),
 })
 
-// Hosts can call execute without validating arguments first, so execution parses them again.
-export function parseArgs(schema: z.ZodObject<ArgsShape>, raw: unknown): GenerateArgs {
+// Hosts can call execute without validating arguments first, so execution parses them again with the complete schema.
+export function parseArgs<S extends z.ZodType>(schema: S, raw: unknown): z.output<S> {
   const parsed = schema.safeParse(raw)
   if (!parsed.success) {
     throw new Error(z.prettifyError(parsed.error))

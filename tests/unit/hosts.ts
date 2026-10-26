@@ -1,42 +1,175 @@
 import type { Plugin } from "@opencode/plugin"
 import type { ToolContext } from "@opencode-ai/plugin"
-import type { z } from "zod"
 import plugin from "../../src/index"
-import type { ArgsShape, resultSchema } from "../../src/schema"
+import { CONTROL_NAMES } from "../../src/nano-gpt-models"
+import type { resultSchema } from "../../src/schema"
+import type { ToolSchema } from "../../src/types"
 
 // Test doubles for the two host contracts. They stand in for OpenCode 1's ToolContext and
 // OpenCode 2's plugin Context; the adapters under test never import either SDK at runtime.
 
-// The two backends and what is specific to each in these tests. Shared host behavior runs against both.
-export type Backend = "codex" | "openai-api"
+// The backends and what is specific to each in these tests. Shared host behavior runs against all of them.
+export type Backend = "codex" | "openai-api" | "nano-gpt"
+
+// One tool call the shared tests make against a backend.
+export type Operation = {
+  tool: string
+  // The provider endpoint the call posts to.
+  url: string
+  // Valid arguments. A call that edits names `ref.png`, which the shared tests create in the project directory.
+  args: Record<string, unknown>
+  // Arguments the tool rejects, each with a part of the error message.
+  invalid: Array<[string, Record<string, unknown>, string]>
+  // Optional arguments a model may fill with null, which must behave like omitted ones.
+  nulls: Record<string, null>
+  // What the request body holds, and which fields it must not hold, when the optional arguments are null.
+  nullBody: Record<string, unknown>
+  absentWhenNull: string[]
+  // The provider failure message for an HTTP 500 answering "upstream boom".
+  failure: string
+  // The message for a provider answer that holds no usable image.
+  unusableResponse: string
+}
 
 export type Flavour = {
   backend: Backend
-  generationsUrl: string
-  editsUrl: string
   authorization: string
   // The permission resource the host is asked for.
   resource: string
   // The credential provider id it reads from the OpenCode credential store.
   provider: string
+  // The tools the shared tests call.
+  operations: Operation[]
+  // The call that edits the given reference images in the shared flow, and the endpoint it posts to.
+  editTool: string
+  editArgs: (images: string[]) => Record<string, unknown>
+  editsUrl: string
+  // The reference data URLs of an editing request body, in order.
+  editReferences: (body: Record<string, unknown>) => string[]
+  // Whether an argument the tool does not define is dropped (true) or rejected (false).
+  dropsUnknownArguments: boolean
+  // For a key credential: the variable that overrides the saved key, and the saved key itself.
+  key?: { variable: string; saved: string; label: string }
+}
+
+const legacyReferences = (body: Record<string, unknown>) =>
+  (body.images as Array<{ image_url: string }> | undefined)?.map((image) => image.image_url) ?? []
+
+// A size both Codex and the OpenAI Images API accept.
+export const SHARED_SIZE = "1536x1024"
+const LEGACY_ARGS = { prompt: "a cat", out: "cat.png", size: SHARED_SIZE }
+const LEGACY_INVALID: Operation["invalid"] = [
+  ["an unsupported background", { ...LEGACY_ARGS, background: "auto" }, "at background"],
+  ["a missing prompt", { out: "cat.png", size: SHARED_SIZE }, "at prompt"],
+  ["an empty model", { ...LEGACY_ARGS, model: "" }, "at model"],
+  ["a non-string quality", { ...LEGACY_ARGS, quality: 3 }, "at quality"],
+  ["a missing size", { prompt: "a cat", out: "cat.png" }, "Missing size"],
+]
+
+function legacyOperation(url: string, label: string): Operation {
+  return {
+    tool: "imagegen",
+    url,
+    args: LEGACY_ARGS,
+    invalid: LEGACY_INVALID,
+    nulls: { images: null, background: null, model: null, quality: null } as Record<string, null>,
+    nullBody: { background: "opaque" },
+    absentWhenNull: [],
+    failure: `${label} images request failed: 500 upstream boom`,
+    unusableResponse: `no image returned by ${label} images endpoint`,
+  }
+}
+
+const NANO_URL = "https://api.nano-gpt.com/api/v1/images"
+const NANO_ABSENT = [...CONTROL_NAMES]
+const NANO_NULLS = Object.fromEntries(CONTROL_NAMES.map((name) => [name, null]))
+const NANO_UNUSABLE = "returned a response this plugin cannot use"
+const nanoReferences = (body: Record<string, unknown>) => (body.input_references as string[] | undefined) ?? []
+
+export const NANO_GENERATE_ARGS = { model: "nano-banana-pro", prompt: "a cat", out: "cat.png" }
+export const NANO_EDIT_ARGS = {
+  model: "nano-banana-pro-edit",
+  prompt: "make the cat orange",
+  out: "cat.png",
+  images: ["ref.png"],
 }
 
 export const FLAVOURS: Flavour[] = [
   {
     backend: "codex",
-    generationsUrl: "https://chatgpt.com/backend-api/codex/images/generations",
-    editsUrl: "https://chatgpt.com/backend-api/codex/images/edits",
     authorization: "Bearer tok",
     resource: "codex",
     provider: "openai",
+    operations: [legacyOperation("https://chatgpt.com/backend-api/codex/images/generations", "codex")],
+    editTool: "imagegen",
+    editArgs: (images) => ({ ...LEGACY_ARGS, images }),
+    editsUrl: "https://chatgpt.com/backend-api/codex/images/edits",
+    editReferences: legacyReferences,
+    dropsUnknownArguments: true,
   },
   {
     backend: "openai-api",
-    generationsUrl: "https://api.openai.com/v1/images/generations",
-    editsUrl: "https://api.openai.com/v1/images/edits",
     authorization: "Bearer sk-images",
     resource: "openai-api",
     provider: "openai-images",
+    operations: [legacyOperation("https://api.openai.com/v1/images/generations", "openai-api")],
+    editTool: "imagegen",
+    editArgs: (images) => ({ ...LEGACY_ARGS, images }),
+    editsUrl: "https://api.openai.com/v1/images/edits",
+    editReferences: legacyReferences,
+    dropsUnknownArguments: true,
+    key: { variable: "OC_MULTI_IMAGEGEN_OPENAI_API_KEY", saved: "sk-images", label: "OpenAI Images API" },
+  },
+  {
+    backend: "nano-gpt",
+    authorization: "Bearer sk-nano",
+    resource: "nano-gpt",
+    provider: "nano-gpt-images",
+    operations: [
+      {
+        tool: "imagegen",
+        url: NANO_URL,
+        args: NANO_GENERATE_ARGS,
+        invalid: [
+          ["a control the model does not take", { ...NANO_GENERATE_ARGS, quality: "high" }, "at quality"],
+          ["an unknown model", { ...NANO_GENERATE_ARGS, model: "nano-banana" }, "at model"],
+          ["an edit model", { ...NANO_GENERATE_ARGS, model: "nano-banana-pro-edit" }, "is for imageedit, not imagegen"],
+          ["a missing model", { prompt: "a cat", out: "cat.png" }, "Missing model"],
+          ["a missing prompt", { model: "nano-banana-pro", out: "cat.png" }, "at prompt"],
+          ["reference images", { ...NANO_GENERATE_ARGS, images: ["ref.png"] }, "use imageedit"],
+          ["an unknown argument", { ...NANO_GENERATE_ARGS, n: 4 }, "Unsupported argument: n"],
+        ],
+        nulls: NANO_NULLS,
+        nullBody: { model: "nano-banana-pro", n: 1 },
+        absentWhenNull: NANO_ABSENT,
+        failure: "NanoGPT imagegen (nano-banana-pro) request failed: HTTP 500: upstream boom.",
+        unusableResponse: NANO_UNUSABLE,
+      },
+      {
+        tool: "imageedit",
+        url: NANO_URL,
+        args: NANO_EDIT_ARGS,
+        invalid: [
+          ["no reference image", { ...NANO_EDIT_ARGS, images: [] }, "needs at least one reference image"],
+          ["a missing reference list", { model: "nano-banana-pro-edit", prompt: "p", out: "cat.png" }, "at images"],
+          ["a generation model", { ...NANO_EDIT_ARGS, model: "nano-banana-pro" }, "is for imagegen, not imageedit"],
+          ["too many references for the model", { ...NANO_EDIT_ARGS, images: Array(11).fill("ref.png") }, "at most 10"],
+          ["a control the model does not take", { ...NANO_EDIT_ARGS, seed: 1 }, "at seed"],
+          ["an unknown argument", { ...NANO_EDIT_ARGS, n: 4 }, "Unsupported argument: n"],
+        ],
+        nulls: NANO_NULLS,
+        nullBody: { model: "nano-banana-pro-edit", n: 1 },
+        absentWhenNull: NANO_ABSENT,
+        failure: "NanoGPT imageedit (nano-banana-pro-edit) request failed: HTTP 500: upstream boom.",
+        unusableResponse: NANO_UNUSABLE,
+      },
+    ],
+    editTool: "imageedit",
+    editArgs: (images) => ({ ...NANO_EDIT_ARGS, images }),
+    editsUrl: NANO_URL,
+    editReferences: nanoReferences,
+    dropsUnknownArguments: false,
+    key: { variable: "OC_MULTI_IMAGEGEN_NANOGPT_API_KEY", saved: "sk-nano", label: "NanoGPT API" },
   },
 ]
 
@@ -51,16 +184,15 @@ export function selectBackendVariable(backend: Backend | undefined): void {
 // IMAGES_KEY_CREDENTIAL so a test can tell which source a request used.
 export const ENVIRONMENT_KEY = "sk-from-environment"
 
-// OpenCode 1's stored credentials for both backends: the chat provider's ChatGPT sign-in and the image key.
+// OpenCode 1's stored credentials for every backend: the chat provider's ChatGPT sign-in and the image keys.
 export const STORED_CREDENTIALS = {
   openai: { type: "oauth", access: "tok", refresh: "refresh", expires: 4102444800000 },
   "openai-images": { type: "api", key: "sk-images" },
+  "nano-gpt-images": { type: "api", key: "sk-nano" },
 }
 
-// A size both backends accept.
-export const SHARED_SIZE = "1536x1024"
-
-export type NormalizedResult = { message: string; out: string; versioned: boolean }
+// An information tool saves nothing, so `out` and `versioned` are absent for it.
+export type NormalizedResult = { message: string; out?: string; versioned?: boolean }
 
 export type ToolHarness = {
   // Every permission request the adapter made, in the host's own request shape.
@@ -77,7 +209,7 @@ export type RegisteredTool = {
   name: string
   description: string
   options: Record<string, unknown>
-  input: z.ZodObject<ArgsShape>
+  input: ToolSchema
   output: typeof resultSchema
   execute: (
     input: unknown,
@@ -125,6 +257,7 @@ export const CHATGPT_BROWSER_CREDENTIAL = {
 }
 
 export const IMAGES_KEY_CREDENTIAL = { type: "key", key: "sk-images" }
+export const NANO_KEY_CREDENTIAL = { type: "key", key: "sk-nano" }
 
 export function createV2Context(options: V2Options = {}) {
   const calls = {
@@ -142,6 +275,10 @@ export function createV2Context(options: V2Options = {}) {
     "openai-images": {
       connection: { type: "credential", id: "cred_2", method: "key" },
       credential: IMAGES_KEY_CREDENTIAL,
+    },
+    "nano-gpt-images": {
+      connection: { type: "credential", id: "cred_3", method: "key" },
+      credential: NANO_KEY_CREDENTIAL,
     },
     ...options.integrations,
   }
@@ -256,11 +393,17 @@ export async function loadV2Tool(options: V2Options = {}) {
   const fake = createV2Context(options)
   await plugin.setup(fake.context)
   const tool = fake.registered[0]
+  const toolNamed = (name: string) => {
+    const found = fake.registered.find((candidate) => candidate.name === name)
+    if (!found) throw new Error(`${name} is not registered`)
+    return found
+  }
   return {
     ...fake,
     tool,
-    run: (rawArgs: unknown, signal = new AbortController().signal, sessionID?: string) =>
-      tool.execute(rawArgs, v2ToolContext(signal, sessionID)),
+    toolNamed,
+    run: (rawArgs: unknown, signal = new AbortController().signal, sessionID?: string, name = tool.name) =>
+      toolNamed(name).execute(rawArgs, v2ToolContext(signal, sessionID)),
   }
 }
 
@@ -268,11 +411,11 @@ export function v1ToolContext(directory: string, signal: AbortSignal, ask: ToolC
   return { directory, abort: signal, ask } as unknown as ToolContext
 }
 
-export async function v1Harness(directory: string, flavour?: Flavour): Promise<ToolHarness> {
+export async function v1Harness(directory: string, flavour?: Flavour, toolName = "imagegen"): Promise<ToolHarness> {
   if (flavour) selectBackendVariable(flavour.backend)
   const hooks = await plugin.server({} as never)
-  const tool = hooks.tool?.imagegen
-  if (!tool) throw new Error("imagegen is not registered")
+  const tool = hooks.tool?.[toolName]
+  if (!tool) throw new Error(`${toolName} is not registered`)
   const permissionRequests: unknown[] = []
   let denial: Error | undefined
   const ask: ToolContext["ask"] = async (input) => {
@@ -287,21 +430,21 @@ export async function v1Harness(directory: string, flavour?: Flavour): Promise<T
     async execute(rawArgs, signal = new AbortController().signal) {
       const result = (await tool.execute(rawArgs as never, v1ToolContext(directory, signal, ask))) as {
         output: string
-        metadata: { out: string; versioned: boolean }
+        metadata?: { out: string; versioned: boolean }
       }
-      return { message: result.output, out: result.metadata.out, versioned: result.metadata.versioned }
+      return { message: result.output, out: result.metadata?.out, versioned: result.metadata?.versioned }
     },
   }
 }
 
-export async function v2Harness(directory: string, flavour?: Flavour): Promise<ToolHarness> {
+export async function v2Harness(directory: string, flavour?: Flavour, toolName = "imagegen"): Promise<ToolHarness> {
   const loaded = await loadV2Tool({ directory, backend: flavour?.backend })
   return {
     permissionRequests: loaded.calls.assert,
     denyPermission: loaded.denyPermission,
     async execute(rawArgs, signal) {
-      const result = await loaded.run(rawArgs, signal)
-      return { message: result.content, out: result.output.out, versioned: result.output.versioned }
+      const result = await loaded.run(rawArgs, signal, undefined, toolName)
+      return { message: result.content, out: result.output?.out, versioned: result.output?.versioned }
     },
   }
 }

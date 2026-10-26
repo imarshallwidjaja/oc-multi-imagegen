@@ -8,15 +8,15 @@ import {
   ENVIRONMENT_KEY,
   FLAVOURS,
   type Flavour,
-  SHARED_SIZE,
   STORED_CREDENTIALS,
   type ToolHarness,
   v1Harness,
   v2Harness,
 } from "./hosts"
 
-// The imagegen flow is shared by both host adapters and both backends, so each test runs against OpenCode 1 and
-// OpenCode 2 with each backend selected. Wire-level request details live in codex.test.ts and openai-api.test.ts.
+// The image flow is shared by both host adapters and every backend, so each test runs against OpenCode 1 and
+// OpenCode 2 with each backend selected, once for each tool the backend registers that calls the provider.
+// Wire-level request details live in codex.test.ts, openai-api.test.ts and nano-gpt.test.ts.
 isolateEnvironment()
 const originalFetch = globalThis.fetch
 let dir: string
@@ -24,6 +24,8 @@ let dir: string
 beforeEach(async () => {
   process.env.OPENCODE_AUTH_CONTENT = JSON.stringify(STORED_CREDENTIALS)
   dir = await mkdtemp(path.join(os.tmpdir(), "imagegen-"))
+  // The reference image of the calls that edit.
+  await Bun.write(path.join(dir, "ref.png"), PNG_BUFFER)
 })
 
 afterEach(async () => {
@@ -43,18 +45,23 @@ function stubFetch(
   return fetchMock
 }
 
-const hosts: Array<[string, (directory: string, flavour: Flavour) => Promise<ToolHarness>]> = [
+type CreateHarness = (directory: string, flavour: Flavour, tool?: string) => Promise<ToolHarness>
+const hosts: Array<[string, CreateHarness]> = [
   ["OpenCode 1", v1Harness],
   ["OpenCode 2", v2Harness],
 ]
 const matrix = hosts.flatMap(([host, create]) =>
-  FLAVOURS.map((flavour) => [host, flavour.backend, create, flavour] as const),
+  FLAVOURS.flatMap((flavour) =>
+    flavour.operations.map((operation) => [host, flavour.backend, operation.tool, create, flavour, operation] as const),
+  ),
 )
 
-const args = { prompt: "a cat", out: "cat.png", size: SHARED_SIZE }
+// The files the tests did not put there themselves.
+const listed = async () => (await readdir(dir)).filter((name) => name !== "ref.png")
 
-describe.each(matrix)("imagegen through %s with the %s backend", (_host, _backend, create, flavour) => {
-  const createHarness = (directory: string) => create(directory, flavour)
+describe.each(matrix)("%s with the %s backend calling %s", (_host, _backend, _tool, create, flavour, operation) => {
+  const args = operation.args
+  const createHarness = (directory: string) => create(directory, flavour, operation.tool)
 
   test("saves the generated image under the host directory and reports it", async () => {
     const fetchMock = stubFetch()
@@ -71,7 +78,7 @@ describe.each(matrix)("imagegen through %s with the %s backend", (_host, _backen
       versioned: false,
     })
     const [url, init] = fetchMock.mock.calls[0]
-    expect(url).toBe(flavour.generationsUrl)
+    expect(url).toBe(operation.url)
     expect((init.headers as Record<string, string>).Authorization).toBe(flavour.authorization)
   })
 
@@ -87,52 +94,33 @@ describe.each(matrix)("imagegen through %s with the %s backend", (_host, _backen
     expect(second.message).toContain("the requested path")
   })
 
-  test("drops arguments it does not define", async () => {
-    const fetchMock = stubFetch()
-    const harness = await createHarness(dir)
+  // Codex and the OpenAI Images API keep their original contract: an argument they do not define is dropped.
+  if (flavour.dropsUnknownArguments) {
+    test("drops arguments it does not define", async () => {
+      const fetchMock = stubFetch()
+      const harness = await createHarness(dir)
 
-    await harness.execute({ ...args, output_format: "jpeg", n: 4 })
+      await harness.execute({ ...args, output_format: "jpeg", n: 4 })
 
-    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
-    expect(body.n).not.toBe(4)
-    expect(body.output_format).not.toBe("jpeg")
-  })
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
+      expect(body.n).not.toBe(4)
+      expect(body.output_format).not.toBe("jpeg")
+    })
+  }
 
-  test("generates without reference images when optional arguments are null", async () => {
+  test("treats optional arguments that are null as omitted", async () => {
     const fetchMock = stubFetch()
     const harness = await createHarness(dir)
     // Some models fill unused optional arguments with null.
-    await harness.execute({ ...args, images: null, background: null, model: null, quality: null })
+    await harness.execute({ ...args, ...operation.nulls })
 
-    expect(fetchMock.mock.calls[0][0]).toBe(flavour.generationsUrl)
-    expect(JSON.parse(fetchMock.mock.calls[0][1].body as string).background).toBe("opaque")
+    expect(fetchMock.mock.calls[0][0]).toBe(operation.url)
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
+    expect(body).toMatchObject(operation.nullBody)
+    for (const field of operation.absentWhenNull) expect(body).not.toHaveProperty(field)
   })
 
-  test("sends reference images to the edits endpoint in the order given", async () => {
-    const fetchMock = stubFetch()
-    await Bun.write(path.join(dir, "first.png"), PNG_BUFFER)
-    await Bun.write(path.join(dir, "second.png"), Buffer.concat([PNG_BUFFER, Buffer.from("trailer")]))
-    const harness = await createHarness(dir)
-
-    await harness.execute({ ...args, images: ["first.png", "second.png"] })
-
-    expect(fetchMock.mock.calls[0][0]).toBe(flavour.editsUrl)
-    const { images } = JSON.parse(fetchMock.mock.calls[0][1].body as string)
-    expect(images).toHaveLength(2)
-    expect(images[0].image_url).toBe(`data:image/png;base64,${PNG_BASE64}`)
-    expect(images[1].image_url).toBe(
-      `data:image/png;base64,${Buffer.concat([PNG_BUFFER, Buffer.from("trailer")]).toString("base64")}`,
-    )
-  })
-
-  const invalidArguments: Array<[string, Record<string, unknown>, string]> = [
-    ["an unsupported background", { ...args, background: "auto" }, "at background"],
-    ["a missing prompt", { out: "cat.png", size: SHARED_SIZE }, "at prompt"],
-    ["an empty model", { ...args, model: "" }, "at model"],
-    ["a non-string quality", { ...args, quality: 3 }, "at quality"],
-    ["a missing size", { prompt: "a cat", out: "cat.png" }, "Missing size"],
-  ]
-  test.each(invalidArguments)(
+  test.each(operation.invalid)(
     "rejects %s before asking permission or calling the backend",
     async (_name, invalid, message) => {
       const fetchMock = stubFetch()
@@ -166,8 +154,9 @@ describe.each(matrix)("imagegen through %s with the %s backend", (_host, _backen
     const harness = await createHarness(dir)
     harness.denyPermission(new Error("denied by the host"))
 
-    // The reference image does not exist: reading it first would fail with a different error.
-    const act = harness.execute({ ...args, images: ["missing.png"] })
+    // The reference image does not exist: reading it first would fail with a different error. A tool that takes no
+    // references has none to read.
+    const act = harness.execute(operation.tool === flavour.editTool ? { ...args, images: ["missing.png"] } : args)
 
     await expect(act).rejects.toThrow("denied by the host")
     expect(fetchMock).not.toHaveBeenCalled()
@@ -212,7 +201,7 @@ describe.each(matrix)("imagegen through %s with the %s backend", (_host, _backen
 
     await expect(act).rejects.toThrow("stopped during request")
     expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect(await readdir(dir)).toEqual([])
+    expect(await listed()).toEqual([])
   })
 
   test("does not save an image whose request finished after cancellation", async () => {
@@ -227,7 +216,7 @@ describe.each(matrix)("imagegen through %s with the %s backend", (_host, _backen
 
     await expect(act).rejects.toThrow("stopped after response")
     expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect(await readdir(dir)).toEqual([])
+    expect(await listed()).toEqual([])
   })
 
   test("propagates a provider failure once, without saving or trying another backend", async () => {
@@ -236,9 +225,9 @@ describe.each(matrix)("imagegen through %s with the %s backend", (_host, _backen
 
     const act = harness.execute(args)
 
-    await expect(act).rejects.toThrow(`${flavour.backend} images request failed: 500 upstream boom`)
+    await expect(act).rejects.toThrow(operation.failure)
     expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect(await readdir(dir)).toEqual([])
+    expect(await listed()).toEqual([])
   })
 
   test("saves nothing, not even the output directory, when the backend returns data that is not a PNG", async () => {
@@ -248,7 +237,7 @@ describe.each(matrix)("imagegen through %s with the %s backend", (_host, _backen
     const act = harness.execute({ ...args, out: "nested/cat.png" })
 
     await expect(act).rejects.toThrow("not a PNG")
-    expect(await readdir(dir)).toEqual([])
+    expect(await listed()).toEqual([])
   })
 
   // Buffer.from decodes an array or a serialized Buffer, so the PNG bytes below would pass the PNG check if the
@@ -268,35 +257,64 @@ describe.each(matrix)("imagegen through %s with the %s backend", (_host, _backen
 
       const act = harness.execute({ ...args, out: "nested/cat.png" })
 
-      await expect(act).rejects.toThrow(`no image returned by ${flavour.backend} images endpoint`)
+      await expect(act).rejects.toThrow(operation.unusableResponse)
       expect(fetchMock).toHaveBeenCalledTimes(1)
-      expect(await readdir(dir)).toEqual([])
+      expect(await listed()).toEqual([])
     },
   )
 })
 
-const apiFlavour = FLAVOURS.find((flavour) => flavour.backend === "openai-api") as Flavour
+// The reference images of a call that edits, as the host adapters read them from the project directory.
+const flavourRows = hosts.flatMap(([host, create]) =>
+  FLAVOURS.map((flavour) => [host, flavour.backend, create, flavour] as const),
+)
+
+describe.each(flavourRows)("reference images through %s with the %s backend", (_host, _backend, create, flavour) => {
+  test("are sent to the editing endpoint in the order given", async () => {
+    const fetchMock = stubFetch()
+    const second = Buffer.concat([PNG_BUFFER, Buffer.from("trailer")])
+    await Bun.write(path.join(dir, "first.png"), PNG_BUFFER)
+    await Bun.write(path.join(dir, "second.png"), second)
+    const harness = await create(dir, flavour, flavour.editTool)
+
+    await harness.execute(flavour.editArgs(["first.png", "second.png"]))
+
+    expect(fetchMock.mock.calls[0][0]).toBe(flavour.editsUrl)
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
+    expect(flavour.editReferences(body)).toEqual([
+      `data:image/png;base64,${PNG_BASE64}`,
+      `data:image/png;base64,${second.toString("base64")}`,
+    ])
+  })
+})
+
+const keyFlavours = FLAVOURS.filter((flavour) => flavour.key)
+const keyRows = hosts.flatMap(([host, create]) =>
+  keyFlavours.map((flavour) => [host, flavour.backend, create, flavour] as const),
+)
 const codexFlavour = FLAVOURS.find((flavour) => flavour.backend === "codex") as Flavour
 
-// The saved key in each host's own store is `sk-images` (STORED_CREDENTIALS, and the OpenCode 2 fake connection store).
-// OpenCode lists a saved credential before an environment variable, so these tests also show the plugin does not take
-// the saved key when the variable is present.
-describe.each(hosts)("image API key source through %s", (_host, create) => {
+// The saved key of each backend is in each host's own store (STORED_CREDENTIALS, and the OpenCode 2 fake connection
+// store). OpenCode lists a saved credential before an environment variable, so these tests also show the plugin does
+// not take the saved key when the variable is present.
+describe.each(keyRows)("API key source through %s with the %s backend", (_host, _backend, create, flavour) => {
+  const { variable, saved } = flavour.key as NonNullable<Flavour["key"]>
+  const args = flavour.operations[0].args
   const authorizations = (fetchMock: ReturnType<typeof stubFetch>) =>
     fetchMock.mock.calls.map(([, init]) => (init.headers as Record<string, string>).Authorization)
 
-  test("uses OC_MULTI_IMAGEGEN_OPENAI_API_KEY ahead of the saved key, and the next call after it changes", async () => {
+  test(`uses ${variable} ahead of the saved key, and the next call after it changes`, async () => {
     const fetchMock = stubFetch()
-    const harness = await create(dir, apiFlavour)
+    const harness = await create(dir, flavour)
 
-    process.env.OC_MULTI_IMAGEGEN_OPENAI_API_KEY = ENVIRONMENT_KEY
+    process.env[variable] = ENVIRONMENT_KEY
     await harness.execute(args)
-    process.env.OC_MULTI_IMAGEGEN_OPENAI_API_KEY = "sk-rotated"
+    process.env[variable] = "sk-rotated"
     await harness.execute({ ...args, out: "second.png" })
-    delete process.env.OC_MULTI_IMAGEGEN_OPENAI_API_KEY
+    delete process.env[variable]
     await harness.execute({ ...args, out: "third.png" })
 
-    expect(authorizations(fetchMock)).toEqual([`Bearer ${ENVIRONMENT_KEY}`, "Bearer sk-rotated", "Bearer sk-images"])
+    expect(authorizations(fetchMock)).toEqual([`Bearer ${ENVIRONMENT_KEY}`, "Bearer sk-rotated", `Bearer ${saved}`])
   })
 
   test.each([
@@ -304,8 +322,8 @@ describe.each(hosts)("image API key source through %s", (_host, create) => {
     ["cannot be an HTTP header value", "sk bad\nkey", "contains characters that cannot be sent in an HTTP header"],
   ])("fails when the variable %s, without using the saved key or sending a request", async (_name, value, message) => {
     const fetchMock = stubFetch()
-    const harness = await create(dir, apiFlavour)
-    process.env.OC_MULTI_IMAGEGEN_OPENAI_API_KEY = value
+    const harness = await create(dir, flavour)
+    process.env[variable] = value
 
     const error = await harness.execute(args).catch((caught: Error) => caught)
 
@@ -317,34 +335,51 @@ describe.each(hosts)("image API key source through %s", (_host, create) => {
 
   test("a rejected request is reported once, without a second request with the saved key", async () => {
     const fetchMock = stubFetch(() => new Response("denied", { status: 401 }))
-    const harness = await create(dir, apiFlavour)
-    process.env.OC_MULTI_IMAGEGEN_OPENAI_API_KEY = ENVIRONMENT_KEY
+    const harness = await create(dir, flavour)
+    process.env[variable] = ENVIRONMENT_KEY
 
-    await expect(harness.execute(args)).rejects.toThrow("openai-api images request failed: 401 denied")
+    await expect(harness.execute(args)).rejects.toThrow("401")
 
     expect(authorizations(fetchMock)).toEqual([`Bearer ${ENVIRONMENT_KEY}`])
   })
 
-  test("the Codex backend ignores the variable and keeps its ChatGPT sign-in", async () => {
+  test("ignores the variable of every other backend", async () => {
     const fetchMock = stubFetch()
-    const harness = await create(dir, codexFlavour)
-    process.env.OC_MULTI_IMAGEGEN_OPENAI_API_KEY = ENVIRONMENT_KEY
+    const harness = await create(dir, flavour)
+    for (const other of keyFlavours) {
+      if (other !== flavour) process.env[(other.key as NonNullable<Flavour["key"]>).variable] = ENVIRONMENT_KEY
+    }
 
     await harness.execute(args)
 
-    expect(fetchMock.mock.calls[0][0]).toBe(codexFlavour.generationsUrl)
-    expect(authorizations(fetchMock)).toEqual([codexFlavour.authorization])
+    expect(authorizations(fetchMock)).toEqual([`Bearer ${saved}`])
   })
 })
 
-describe.each(matrix)("backend choice through %s with the %s backend", (_host, _backend, create, flavour) => {
+describe.each(hosts)("the Codex backend through %s", (_host, create) => {
+  test("ignores every image API key variable and keeps its ChatGPT sign-in", async () => {
+    const fetchMock = stubFetch()
+    const harness = await create(dir, codexFlavour)
+    for (const flavour of keyFlavours)
+      process.env[(flavour.key as NonNullable<Flavour["key"]>).variable] = ENVIRONMENT_KEY
+
+    await harness.execute(codexFlavour.operations[0].args)
+
+    expect(fetchMock.mock.calls[0][0]).toBe(codexFlavour.operations[0].url)
+    expect(fetchMock.mock.calls.map(([, init]) => (init.headers as Record<string, string>).Authorization)).toEqual([
+      codexFlavour.authorization,
+    ])
+  })
+})
+
+describe.each(flavourRows)("backend choice through %s with the %s backend", (_host, _backend, create, flavour) => {
   test("stays the backend the plugin loaded with when the variable changes later", async () => {
     const fetchMock = stubFetch()
     const harness = await create(dir, flavour)
     process.env.OC_MULTI_IMAGEGEN_BACKEND = flavour.backend === "codex" ? "openai-api" : "codex"
 
-    await harness.execute(args)
+    await harness.execute(flavour.operations[0].args)
 
-    expect(fetchMock.mock.calls[0][0]).toBe(flavour.generationsUrl)
+    expect(fetchMock.mock.calls[0][0]).toBe(flavour.operations[0].url)
   })
 })
