@@ -4,22 +4,11 @@
 
 The quickest path is the default Codex backend, which uses your ChatGPT sign-in in OpenCode. You don't need a separate OpenAI Images API key for it.
 
-## Install from the repository
+## Install from npm
 
-Install Bun and OpenCode, then clone and build:
+Add `oc-multi-imagegen` to your OpenCode configuration, keeping any existing plugins. OpenCode downloads the package and its dependencies from npm when the server starts.
 
-```sh
-git clone https://github.com/imarshallwidjaja/oc-multi-imagegen.git
-cd oc-multi-imagegen
-bun install --frozen-lockfile
-bun run build
-```
-
-These instructions use a local checkout, not a published npm release. The support floors are OpenCode **1.18.29** and **2.0.32**; see [compatibility and recorded coverage](backends.md#compatibility-and-recorded-coverage) for what has actually been checked.
-
-## Connect the plugin
-
-Replace the example file URL with the absolute path of your checkout. Keep any other plugins already in your configuration.
+The support floors are OpenCode **1.18.29** and **2.0.32**; see [compatibility and recorded coverage](backends.md#compatibility-and-recorded-coverage) for what has actually been checked.
 
 ### OpenCode 1
 
@@ -28,7 +17,7 @@ Add the package to `plugin`:
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["file:///absolute/path/to/oc-multi-imagegen"]
+  "plugin": ["oc-multi-imagegen"]
 }
 ```
 
@@ -39,11 +28,15 @@ Add the package to `plugins`:
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugins": ["file:///absolute/path/to/oc-multi-imagegen"]
+  "plugins": ["oc-multi-imagegen"]
 }
 ```
 
-Restart the OpenCode server process that loads the plugin. If you attach a client to an existing server, restarting the client alone doesn't reload the plugin. Rebuild and restart that server after changing plugin source.
+Restart the OpenCode server process that loads the plugin. If you attach a client to an existing server, restarting the client alone doesn't reload the plugin.
+
+### Pin a version
+
+Use `oc-multi-imagegen@0.1.0` instead of the bare package name to select that exact release. The same package-and-version syntax works in either host's array. Without a version, OpenCode resolves the npm package's current release according to its plugin loader.
 
 ## Sign in for Codex
 
@@ -72,3 +65,16 @@ OpenCode may ask you to allow the image operation. For restricted agents or prom
 Use the [backend guide](backends.md) to configure the OpenAI Images API or NanoGPT. Settings belong in the environment of the **server that loads the plugin**, rather than in plugin options or a client shell attached to an already-running server.
 
 For systemd, credential precedence or a sign-in error, start with [configuration and authentication](backends.md#configuration).
+
+## Local development
+
+Use a checkout when you want to modify the plugin. With Bun installed:
+
+```sh
+git clone https://github.com/imarshallwidjaja/oc-multi-imagegen.git
+cd oc-multi-imagegen
+bun install --frozen-lockfile
+bun run build
+```
+
+Replace the npm entry with the checkout's absolute file URL: `"file:///absolute/path/to/oc-multi-imagegen"`. Use `plugin` on OpenCode 1 or `plugins` on OpenCode 2, as in the examples above. Rebuild and restart the loading server after changing source. [Development](development.md) lists the checks and packaging details.

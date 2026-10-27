@@ -1,5 +1,7 @@
 # oc-multi-imagegen
 
+[![npm version](https://img.shields.io/npm/v/oc-multi-imagegen)](https://www.npmjs.com/package/oc-multi-imagegen)
+
 Generate and edit images without leaving OpenCode. Describe what you need, give your agent a reference when you have one, and get an image saved in your project.
 
 Use your OpenCode ChatGPT sign-in with the default **Codex backend**, or connect an OpenAI Images API or NanoGPT key. The plugin works in OpenCode 1 and OpenCode 2 and includes a skill that guides agents through prompting, reference images and checking the result.
@@ -43,16 +45,25 @@ The agent supplies the reference and sets `background: "transparent"`. This PNG 
 
 ## Get started
 
-With Bun and OpenCode installed, clone and build the plugin:
+Add the npm package to your OpenCode configuration. OpenCode installs it when the server starts.
 
-```sh
-git clone https://github.com/imarshallwidjaja/oc-multi-imagegen.git
-cd oc-multi-imagegen
-bun install --frozen-lockfile
-bun run build
+**OpenCode 1** (`plugin`):
+
+```json
+{
+  "plugin": ["oc-multi-imagegen"]
+}
 ```
 
-Follow the [setup guide](docs/getting-started.md) to add the local package to your OpenCode configuration, sign in with ChatGPT and restart the server that loads the plugin. Codex is the default, so it needs no backend setting or separate image API key.
+**OpenCode 2** (`plugins`):
+
+```json
+{
+  "plugins": ["oc-multi-imagegen"]
+}
+```
+
+Sign in to OpenCode with ChatGPT and restart the server that loads the plugin. Codex is the default, so it needs no backend setting or separate image API key. The [setup guide](docs/getting-started.md) covers authentication, version pinning and local development.
 
 Then ask for an image. The [permissions guide](docs/permissions.md) covers agents with restricted tool access.
 

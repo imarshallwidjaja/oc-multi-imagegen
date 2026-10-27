@@ -46,3 +46,24 @@ Neither host gets a copied user-directory file. If OpenCode 1 finds the same ski
 For real-agent runs on both hosts, use the [container-testing runbook](https://github.com/imarshallwidjaja/oc-multi-imagegen/blob/main/docs/container-testing.md) from a source checkout. It covers Codex and the OpenAI Images API, not NanoGPT, and is an ad-hoc procedure rather than an automated CI check. It uses disposable credential seeds; never mount or print the host credential store.
 
 Recorded compatibility evidence lives in [Backends](backends.md#compatibility-and-recorded-coverage) and the runbook. Mocked coverage, a build or a successful example doesn't establish live parity across every host, model and backend.
+
+## Release to npm
+
+Run the normal checks above, including the build, before creating a release tarball. Confirm your npm account, then pack:
+
+```sh
+npm whoami
+npm pack
+```
+
+Inspect the file list and test the generated tarball in a separate directory with only production dependencies. Import both `oc-multi-imagegen` and `oc-multi-imagegen/server`, and check that the bundled skill loads without either OpenCode SDK installed.
+
+Publish the exact tarball you verified. For the first release:
+
+```sh
+npm publish ./oc-multi-imagegen-0.1.0.tgz --access public --browser=false
+```
+
+For later releases, update the package version and the tarball filename. npm versions are immutable: the same name and version can't be republished. Browser-based authentication or 2FA approval may still be required; `--browser=false` prints the URL rather than opening a browser on the publishing machine.
+
+After publishing, verify the registry version and install it by name in a fresh directory. Keep the source changes on GitHub consistent with the published package. This is a manual release procedure; the CI workflow checks the project but doesn't publish it.
