@@ -59,7 +59,10 @@ describe("published package", () => {
         return stdout
       }
       // The tarball is what a consumer gets. npm runs no lifecycle script here, so a missing dist/ is not rebuilt.
-      const [{ filename }] = JSON.parse(await run(["npm", "pack", "--json", "--pack-destination", work], REPO_DIR))
+      // npm 11 returns an array; npm 12 keys the same entries by package name.
+      const [{ filename }] = Object.values<{ filename: string }>(
+        JSON.parse(await run(["npm", "pack", "--json", "--pack-destination", work], REPO_DIR)),
+      )
       await run(["tar", "-xzf", path.join(work, filename), "-C", work], work)
       const packageDir = path.join(work, "package")
       expect(existsSync(path.join(packageDir, "skills", SKILL_NAME, "SKILL.md"))).toBe(true)
