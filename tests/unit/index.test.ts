@@ -45,7 +45,7 @@ describe("published package", () => {
   // in the tarball and that the module resolves it relative to itself. It does not test the exact published
   // dist/index.js or its dependencies; the container runbook loads that build from a packed copy that has only the
   // runtime dependencies installed.
-  test("an extracted package finds its own skill from a relocated entry point", async () => {
+  test("an extracted package finds its skill and linked documentation from a relocated entry point", async () => {
     const work = await mkdtemp(path.join(os.tmpdir(), "package-"))
     try {
       const run = async (cmd: string[], cwd: string) => {
@@ -63,6 +63,34 @@ describe("published package", () => {
       await run(["tar", "-xzf", path.join(work, filename), "-C", work], work)
       const packageDir = path.join(work, "package")
       expect(existsSync(path.join(packageDir, "skills", SKILL_NAME, "SKILL.md"))).toBe(true)
+
+      // Follow the published README's local links, including images and topical guides, in the extracted package.
+      const pending = [path.join(packageDir, "README.md")]
+      const visited = new Set<string>()
+      while (pending.length > 0) {
+        const file = pending.pop()
+        if (!file || visited.has(file)) continue
+        visited.add(file)
+        const content = readFileSync(file, "utf-8")
+        for (const match of content.matchAll(/\[[^\]]*\]\(([^)]+)\)|<img\b[^>]*\bsrc="([^"]+)"/g)) {
+          const href = match[1] ?? match[2]
+          if (!href || /^[a-z]+:/i.test(href)) continue
+          const [relative, anchor] = href.split("#")
+          const target = relative ? path.resolve(path.dirname(file), relative) : file
+          expect(existsSync(target), `${path.relative(packageDir, file)} links to ${href}`).toBe(true)
+          if (!target.endsWith(".md")) continue
+          pending.push(target)
+          if (anchor) {
+            const headings = [...readFileSync(target, "utf-8").matchAll(/^#{1,6} (.+)$/gm)].map((heading) =>
+              heading[1]
+                .toLowerCase()
+                .replace(/[^\w -]/g, "")
+                .replace(/ /g, "-"),
+            )
+            expect(headings, `${path.relative(packageDir, file)} links to ${href}`).toContain(anchor)
+          }
+        }
+      }
 
       // Build the entry point into the extracted package so the test does not depend on an earlier `bun run build`.
       const built = await Bun.build({

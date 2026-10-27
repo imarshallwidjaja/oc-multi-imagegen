@@ -16,6 +16,8 @@
     "dist",
     "server.js",
     "skills",
+    "docs",
+    "!docs/container-testing.md",
     "README.md",
     "LICENSE"
   ],
