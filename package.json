@@ -1,6 +1,6 @@
 {
   "name": "oc-multi-imagegen",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Image generation and editing for OpenCode 1 and 2, with Codex, OpenAI Images API and NanoGPT backends.",
   "homepage": "https://github.com/imarshallwidjaja/oc-multi-imagegen#readme",
   "repository": {

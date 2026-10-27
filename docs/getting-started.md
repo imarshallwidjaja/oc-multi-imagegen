@@ -36,7 +36,7 @@ Restart the OpenCode server process that loads the plugin. If you attach a clien
 
 ### Pin a version
 
-Use `oc-multi-imagegen@0.1.0` instead of the bare package name to select that exact release. The same package-and-version syntax works in either host's array. Without a version, OpenCode resolves the npm package's current release according to its plugin loader.
+Use `oc-multi-imagegen@1.0.0` instead of the bare package name to select that exact release. The same package-and-version syntax works in either host's array. Without a version, OpenCode resolves the npm package's current release according to its plugin loader.
 
 ## Sign in for Codex
 
