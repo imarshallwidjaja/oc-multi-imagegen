@@ -19,9 +19,8 @@ export const MODEL_SOURCES = [
   "https://api.nano-gpt.com/api/v1/images/models/<model ID>/endpoints",
 ]
 
-export type NanoModel = {
+type ModelMetadata = {
   id: string
-  operation: Operation
   family: string
   name: string
   purpose: string
@@ -34,42 +33,59 @@ export type NanoModel = {
   // True when NanoGPT documents output_format for the model, so the request asks for PNG.
   requestsPng?: boolean
   maxPromptCodePoints?: number
-  // Edit models only.
-  maxReferences?: number
-  referenceMaxBytes?: number
   notes?: string
 }
+
+export type NanoModel = ModelMetadata &
+  (
+    | { operation: "generate"; maxReferences?: never; referenceMaxBytes?: never }
+    | { operation: "edit"; maxReferences: number; referenceMaxBytes?: number }
+  )
 
 type FamilySpec = Omit<
   NanoModel,
   "id" | "operation" | "purpose" | "aspectRatios" | "maxReferences" | "referenceMaxBytes"
 > & {
   generateId: string
-  editId: string
+  editIds: readonly string[]
   purpose: string
   aspectRatios?: readonly string[]
   editAspectRatios?: readonly string[]
+  editResolutions?: readonly string[]
   // Appended to `notes` for the edit model only.
   editNotes?: string
   maxReferences: number
   referenceMaxBytes?: number
 }
 
-// Each family lists its generation model and its edit model, which NanoGPT publishes as separate model IDs.
+// Routes use exact published IDs. A family can use the same ID for both operations and retain explicit edit IDs.
 function family(spec: FamilySpec): NanoModel[] {
-  const { generateId, editId, editAspectRatios, editNotes, maxReferences, referenceMaxBytes, purpose, ...shared } = spec
+  const {
+    generateId,
+    editIds,
+    editAspectRatios,
+    editResolutions,
+    editNotes,
+    maxReferences,
+    referenceMaxBytes,
+    purpose,
+    ...shared
+  } = spec
   return [
     { ...shared, id: generateId, operation: "generate", purpose: `${purpose} Creates an image from text.` },
-    {
-      ...shared,
-      id: editId,
-      operation: "edit",
-      aspectRatios: editAspectRatios ?? shared.aspectRatios,
-      notes: [shared.notes, editNotes].filter(Boolean).join(" ") || undefined,
-      purpose: `${purpose} Edits or combines up to ${maxReferences} reference images.`,
-      maxReferences,
-      referenceMaxBytes,
-    },
+    ...editIds.map(
+      (id): NanoModel => ({
+        ...shared,
+        id,
+        operation: "edit",
+        resolutions: editResolutions ?? shared.resolutions,
+        aspectRatios: editAspectRatios ?? shared.aspectRatios,
+        notes: [shared.notes, editNotes].filter(Boolean).join(" ") || undefined,
+        purpose: `${purpose} Edits or combines up to ${maxReferences} reference images.`,
+        maxReferences,
+        referenceMaxBytes,
+      }),
+    ),
   ]
 }
 
@@ -80,7 +96,7 @@ export const MODELS: readonly NanoModel[] = [
     family: "gpt-image-flare",
     name: "GPT Image 2.5 Flare",
     generateId: "openai/gpt-image-2.5/flare/text-to-image",
-    editId: "openai/gpt-image-2.5/flare/edit",
+    editIds: ["openai/gpt-image-2.5/flare/edit"],
     purpose:
       "OpenAI GPT Image 2.5 Flare. The only supported family with quality tiers and a transparent-background option; choose it when either is needed.",
     resolutions: SIZE_TIERS,
@@ -112,7 +128,7 @@ export const MODELS: readonly NanoModel[] = [
     family: "nano-banana-pro",
     name: "Nano Banana Pro",
     generateId: "nano-banana-pro",
-    editId: "nano-banana-pro-edit",
+    editIds: ["nano-banana-pro-edit"],
     purpose:
       "Nano Banana Pro, which the provider describes as a high-resolution text and edit model for up to 4K output with flexible aspect ratios; its edits keep the lighting and composition of the references.",
     resolutions: SIZE_TIERS,
@@ -124,7 +140,7 @@ export const MODELS: readonly NanoModel[] = [
     family: "flux-3",
     name: "FLUX.3 Image",
     generateId: "black-forest-labs/flux-3/text-to-image",
-    editId: "black-forest-labs/flux-3/edit",
+    editIds: ["black-forest-labs/flux-3/edit"],
     purpose:
       "Black Forest Labs FLUX.3 Image, which the provider describes as detailed photographs, illustrations and designs with accurate typography, and edits that replace backgrounds, revise text or compose references.",
     resolutions: SIZE_TIERS,
@@ -155,7 +171,7 @@ export const MODELS: readonly NanoModel[] = [
     family: "seedream-5-pro",
     name: "Seedream 5.0 Pro",
     generateId: "bytedance/seedream-v5.0-pro",
-    editId: "bytedance/seedream-v5.0-pro/edit",
+    editIds: ["bytedance/seedream-v5.0-pro", "bytedance/seedream-v5.0-pro/edit"],
     purpose:
       "ByteDance Seedream 5.0 Pro, which the provider describes as high-quality text-to-image generation and editing.",
     resolutions: ["1:1", "16:9", "9:16", "3:2", "2:3", "4:3", "3:4", "1k", "2k"],
@@ -168,7 +184,7 @@ export const MODELS: readonly NanoModel[] = [
     family: "qwen-image-2.1",
     name: "Qwen Image 2.1",
     generateId: "qwen-image-2.1/text-to-image",
-    editId: "qwen-image-2.1/edit",
+    editIds: ["qwen-image-2.1/edit"],
     purpose:
       "Qwen Image 2.1, which the provider describes as strong prompt following, multilingual text rendering and native output up to 2K; its edit model keeps the subject of the references.",
     resolutions: ["1k", "1.5k", "2k"],
@@ -213,6 +229,60 @@ export const MODELS: readonly NanoModel[] = [
     notes:
       "A sampled prompt-only cut-out had real alpha but omitted a requested prop. Inspect alpha and content; this family has no background control.",
   }),
+  ...family({
+    family: "qwen-image-3-pro",
+    name: "Qwen Image 3 Pro",
+    generateId: "qwen-image-3-pro",
+    editIds: ["qwen-image-3-pro"],
+    purpose: "Qwen Image 3 Pro, for text-to-image generation and reference-guided editing.",
+    resolutions: ["1k", "2k"],
+    aspectRatios: [
+      "auto",
+      "1:1",
+      "1:2",
+      "2:1",
+      "1:3",
+      "3:1",
+      "2:3",
+      "3:2",
+      "3:4",
+      "4:3",
+      "4:5",
+      "5:4",
+      "9:16",
+      "16:9",
+      "9:21",
+      "21:9",
+    ],
+    maxPromptCodePoints: 800,
+    maxReferences: 3,
+    referenceMaxBytes: 10485760,
+    editNotes:
+      "The provider documents reference dimensions from 384 to 2048 pixels on each side. The plugin does not check pixel sizes.",
+  }),
+  ...family({
+    family: "wan-2.7-pro",
+    name: "WAN 2.7 Image Pro",
+    generateId: "wan2.7-image-pro",
+    editIds: ["wan2.7-image-pro"],
+    purpose: "WAN 2.7 Image Pro, for text-to-image generation and reference-guided editing.",
+    resolutions: ["1024*1024", "1280*720", "720*1280", "1536*1024", "1024*1536", "2k", "4k", "auto"],
+    editResolutions: ["1024*1024", "1280*720", "720*1280", "1536*1024", "1024*1536", "2k", "auto"],
+    maxReferences: 9,
+    editNotes:
+      "The plugin excludes 4k editing because the provider's model page states a 2K editing limit, although endpoint metadata lists 4k. There is no separate aspect_ratio argument.",
+  }),
+  ...family({
+    family: "muse-image",
+    name: "Muse Image",
+    generateId: "meta/muse-image/text-to-image",
+    editIds: ["meta/muse-image/text-to-image"],
+    purpose: "Meta Muse Image, for text-to-image generation and reference-guided editing with the same exact ID.",
+    resolutions: ["1:1", "21:9", "16:9", "4:3", "3:2", "2:3", "3:4", "9:16", "9:21"],
+    maxReferences: 10,
+    notes:
+      "Resolution carries the aspect ratio; there is no separate aspect_ratio argument. The provider's model page describes WebP as the default output; use the actual returned path.",
+  }),
 ]
 
 export const FAMILIES = [...new Set(MODELS.map((model) => model.family))]
@@ -239,7 +309,10 @@ export function findModel(operation: Operation, id: string): NanoModel | undefin
 
 // The model for the other operation in the same family, for pointing an agent at the right tool.
 function counterpart(model: NanoModel): NanoModel | undefined {
-  return MODELS.find((candidate) => candidate.family === model.family && candidate.operation !== model.operation)
+  return (
+    findModel(OTHER[model.operation], model.id) ??
+    MODELS.find((candidate) => candidate.family === model.family && candidate.operation !== model.operation)
+  )
 }
 
 export function referenceRules(model: NanoModel) {
@@ -459,10 +532,12 @@ function requestSchema(model: NanoModel) {
   }
 }
 
-function describeDetail(model: NanoModel): string {
+function describeDetail(model: NanoModel, includeSchema = true): string {
   const same = counterpart(model)
   const lines = [
-    `${model.id} (${model.name}, ${model.operation} model, used with ${TOOL_OF[model.operation]})`,
+    ...(includeSchema
+      ? [`${model.id} (${model.name}, ${model.operation} model, used with ${TOOL_OF[model.operation]})`]
+      : []),
     model.purpose,
     ...(same ? [`The ${same.operation} model of this family is ${same.id} (${TOOL_OF[same.operation]}).`] : []),
     ...controlsOf(model).map((control) =>
@@ -480,8 +555,7 @@ function describeDetail(model: NanoModel): string {
       : ["References: none. Use the edit model to change existing images."]),
     ...(model.notes ? [model.notes] : []),
     `Sources: ${MODEL_SOURCES.join(" and ")}. Sampled live workflow coverage and limits: https://github.com/imarshallwidjaja/oc-multi-imagegen/blob/main/docs/backends.md#nanogpt-live-workflow-coverage.`,
-    "Arguments (JSON Schema):",
-    JSON.stringify(requestSchema(model), null, 2),
+    ...(includeSchema ? ["Arguments (JSON Schema):", JSON.stringify(requestSchema(model), null, 2)] : []),
   ]
   return lines.join("\n")
 }
@@ -498,8 +572,9 @@ function describeList(models: readonly NanoModel[], total: number): string {
       )
   const generate = group("generate")
   const edit = group("edit")
+  const distinctIds = new Set(models.map((model) => model.id)).size
   return [
-    `NanoGPT models this plugin supports (${models.length} of ${total} shown). Controls come from provider documentation and public model metadata. Sampled live workflow coverage: https://github.com/imarshallwidjaja/oc-multi-imagegen/blob/main/docs/backends.md#nanogpt-live-workflow-coverage. Prices vary by model, resolution and quality; check NanoGPT's pricing when cost matters.`,
+    `NanoGPT operation entries this plugin supports (${models.length} of ${total} shown; ${distinctIds} distinct ID${distinctIds === 1 ? "" : "s"} shown). Controls come from provider documentation and public model metadata. Sampled live workflow coverage: https://github.com/imarshallwidjaja/oc-multi-imagegen/blob/main/docs/backends.md#nanogpt-live-workflow-coverage. Prices vary by model, resolution and quality; check NanoGPT's pricing when cost matters.`,
     ...(generate.length > 0 ? [`New images from text, with ${GENERATE_TOOL}:`, ...generate] : []),
     ...(edit.length > 0 ? [`Changing or combining existing images, with ${EDIT_TOOL}:`, ...edit] : []),
     ...(models.length === 0 ? [`No supported model matches. Families: ${FAMILIES.join(", ")}.`] : []),
@@ -538,8 +613,19 @@ const modelsSchema = z
 
 function answerModels(args: z.output<typeof modelsSchema>): string {
   if (args.model) {
-    const model = MODELS.find((candidate) => candidate.id === args.model)
-    if (model) return describeDetail(model)
+    const matches = MODELS.filter((candidate) => candidate.id === args.model)
+    if (matches.length === 1) return describeDetail(matches[0])
+    if (matches.length > 1)
+      return [
+        `${args.model} (${matches[0].name}; used with imagegen and imageedit)`,
+        ...matches.map((model) => `${TOOL_OF[model.operation]}:\n${describeDetail(model, false)}`),
+        "Arguments by tool (JSON Schema):",
+        JSON.stringify(
+          Object.fromEntries(matches.map((model) => [TOOL_OF[model.operation], requestSchema(model)])),
+          null,
+          2,
+        ),
+      ].join("\n")
   }
   const terms = (args.query ?? "").toLowerCase().split(/\s+/).filter(Boolean)
   const matches = MODELS.filter(

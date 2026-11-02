@@ -57,7 +57,7 @@ An edit generates a new image guided by the prompt and references. It doesn't gu
 | --- | --- |
 | Codex | Up to five local reference files. |
 | OpenAI API | Up to 16 PNG, JPEG or WebP files. Each encoded data URL must be at most 20,971,520 characters. |
-| NanoGPT | Local PNG, JPEG or WebP files. Counts depend on the model; the route limit is 31,457,280 bytes per file, with Seedream restricted to 10,485,760 bytes. |
+| NanoGPT | Local PNG, JPEG or WebP files. Counts depend on the model; the route limit is 31,457,280 bytes per file, with Seedream and Qwen Image 3 Pro restricted to 10,485,760 bytes. |
 
 FLUX's provider additionally documents references of at least 256 pixels per side and at most 16 megapixels, with downscaling above four megapixels. The plugin doesn't check those pixel constraints locally. OpenAI references are sent as `images[].image_url` data URLs; NanoGPT uses `input_references` and doesn't mix legacy image aliases.
 
@@ -85,7 +85,9 @@ Relative `out` and reference paths follow the calling session's directory. On Op
 
 - `imagegen`: required `model`, `prompt`, `out`; optional controls supported by that model.
 - `imageedit`: the same, with a required nonempty `images` list.
-- `imagegen_models`: list filters `operation`, `family`, `query`, or an exact `model` for detailed controls, limits and the model's input schema. An exact model can't be combined with list filters.
+- `imagegen_models`: list filters `operation`, `family`, `query`, or an exact `model` for detailed controls, limits and input schemas. An exact model can't be combined with list filters. Lists group operation entries by tool and distinguish entries from distinct IDs. For a same-ID generation/edit model, one JSON object keyed by `imagegen` and `imageedit` holds both full argument schemas; a single-operation ID keeps the single-schema shape.
+
+Qwen Image 3 Pro, Seedream's base ID, WAN 2.7 Image Pro and Muse use the same exact model ID for both tools. `imagegen` accepts text only; `imageedit` requires references even when its ID contains `text-to-image`. Seedream's additional `/edit` route is accepted only by `imageedit`. No suffix is synthesized or removed.
 
 The image tools accept a curated set of generation/edit IDs and reject unknown arguments, unsupported controls or values, wrong-operation models, excess references and documented prompt-length violations before contacting the provider. There are no count, format, streaming or generic provider-routing arguments. Omitted controls aren't sent.
 

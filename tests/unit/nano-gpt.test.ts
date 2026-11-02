@@ -86,15 +86,34 @@ const EXPECTED_IDS = [
   ["qwen-image-2.1/text-to-image", "qwen-image-2.1/edit"],
 ]
 
+const DUAL_IDS = [
+  "qwen-image-3-pro",
+  "bytedance/seedream-v5.0-pro",
+  "wan2.7-image-pro",
+  "meta/muse-image/text-to-image",
+]
+
 describe("NanoGPT model registry", () => {
   test("lists exactly the curated generation and edit pairs", () => {
-    expect(MODELS.filter((model) => model.operation === "generate").map((model) => model.id)).toEqual(
-      EXPECTED_IDS.map(([generateId]) => generateId),
-    )
-    expect(MODELS.filter((model) => model.operation === "edit").map((model) => model.id)).toEqual(
-      EXPECTED_IDS.map(([, editId]) => editId),
-    )
-    expect(new Set(MODELS.map((model) => model.id)).size).toBe(MODELS.length)
+    expect(MODELS.filter((model) => model.operation === "generate").map((model) => model.id)).toEqual([
+      ...EXPECTED_IDS.map(([generateId]) => generateId),
+      DUAL_IDS[0],
+      DUAL_IDS[2],
+      DUAL_IDS[3],
+    ])
+    expect(MODELS.filter((model) => model.operation === "edit").map((model) => model.id)).toEqual([
+      EXPECTED_IDS[0][1],
+      EXPECTED_IDS[1][1],
+      EXPECTED_IDS[2][1],
+      DUAL_IDS[1],
+      EXPECTED_IDS[3][1],
+      EXPECTED_IDS[4][1],
+      DUAL_IDS[0],
+      DUAL_IDS[2],
+      DUAL_IDS[3],
+    ])
+    expect(new Set(MODELS.map((model) => `${model.operation}:${model.id}`)).size).toBe(MODELS.length)
+    expect(new Set(MODELS.map((model) => model.id)).size).toBe(13)
   })
 
   // The schema and the registry are one source: each model accepts every value it lists and refuses the rest.
@@ -139,8 +158,12 @@ describe("NanoGPT model registry", () => {
       ["openai/gpt-image-2.5/flare/edit", 16],
       ["nano-banana-pro-edit", 10],
       ["black-forest-labs/flux-3/edit", 10],
+      ["bytedance/seedream-v5.0-pro", 10],
       ["bytedance/seedream-v5.0-pro/edit", 10],
       ["qwen-image-2.1/edit", 10],
+      ["qwen-image-3-pro", 3],
+      ["wan2.7-image-pro", 9],
+      ["meta/muse-image/text-to-image", 10],
     ])
     expect(referenceRules(findModel("edit", "bytedance/seedream-v5.0-pro/edit") as NanoModel).maxBytes).toBe(10485760)
     expect(referenceRules(findModel("edit", "nano-banana-pro-edit") as NanoModel).maxBytes).toBe(31457280)
@@ -939,7 +962,7 @@ describe.each([
       expect(text).toContain(`- ${generateId} (`)
       expect(text).toContain(`- ${editId} (`)
     }
-    expect(text).toContain("10 of 10 shown")
+    expect(text).toContain("17 of 17 shown; 13 distinct IDs shown")
     expect(text).toContain("Sampled live workflow coverage:")
     expect(touched).toEqual([])
     expect(fetchMock).not.toHaveBeenCalled()
@@ -947,10 +970,11 @@ describe.each([
 
   test("filters by operation, family and query words", async () => {
     const edit = (await ask({ operation: "edit" })).text
-    expect(edit).toContain("5 of 10 shown")
+    expect(edit).toContain("9 of 17 shown")
     expect(edit).not.toContain("- nano-banana-pro (")
-    expect((await ask({ family: "flux-3" })).text).toContain("2 of 10 shown")
+    expect((await ask({ family: "flux-3" })).text).toContain("2 of 17 shown")
     const transparent = (await ask({ query: "transparent" })).text
+    expect((await ask({ operation: "generate", query: "transparent" })).text).toContain("1 distinct ID shown")
     expect(transparent).toContain("openai/gpt-image-2.5/flare/text-to-image")
     expect(transparent).not.toContain("qwen-image")
     expect((await ask({ query: "no-such-word" })).text).toContain("No supported model matches")
@@ -982,6 +1006,22 @@ describe.each([
     expect(edit).toContain("256 pixels on each side")
     expect(generate).not.toContain("256 pixels")
     expect(generate).toContain("References: none.")
+  })
+
+  test.each(DUAL_IDS)("describes both operation schemas for %s", async (id) => {
+    const { text } = await ask({ model: id })
+    const schemas = JSON.parse(text.slice(text.indexOf("{")))
+    expect(Object.keys(schemas)).toEqual(["imagegen", "imageedit"])
+    expect(schemas.imagegen.required).toEqual(["model", "prompt", "out"])
+    expect(schemas.imageedit.required).toEqual(["model", "prompt", "out", "images"])
+    expect(schemas.imagegen.properties.model.const).toBe(id)
+    expect(schemas.imageedit.properties.model.const).toBe(id)
+    expect(text).toContain(`The edit model of this family is ${id} (imageedit).`)
+    if (id === "wan2.7-image-pro") {
+      expect(schemas.imagegen.properties.resolution.enum).toContain("4k")
+      expect(schemas.imageedit.properties.resolution.enum).not.toContain("4k")
+      expect(text).toContain("plugin excludes 4k editing")
+    }
   })
 
   test.each([
@@ -1041,6 +1081,41 @@ describe("NanoGPT tool guidance", () => {
 
 // The hosts register the same tools; this guards the entry point wiring for a NanoGPT load on both.
 describe("NanoGPT tools through both hosts", () => {
+  for (const [host, create] of [
+    ["OpenCode 1", v1Harness],
+    ["OpenCode 2", v2Harness],
+  ] as const) {
+    for (const id of [...DUAL_IDS, "bytedance/seedream-v5.0-pro/edit"]) {
+      for (const name of id.endsWith("/edit") ? ["imageedit"] : ["imagegen", "imageedit"]) {
+        test(`${host} ${name} transmits exact ${id} and ordered references`, async () => {
+          const fetchMock = stubFetch()
+          const second = Buffer.concat([PNG_BUFFER, Buffer.from("distinct second reference")])
+          await writeFile(path.join(dir, "second.png"), second)
+          const harness = await create(dir, { backend: "nano-gpt" } as never, name)
+          await harness.execute({
+            model: id,
+            prompt: "p",
+            out: "o.png",
+            ...(name === "imageedit" ? { images: ["ref.png", "second.png"] } : {}),
+          })
+          expect(bodyOf(fetchMock)).toEqual({
+            model: id,
+            prompt: "p",
+            n: 1,
+            ...(name === "imageedit"
+              ? {
+                  input_references: [
+                    `data:image/png;base64,${PNG_BASE64}`,
+                    `data:image/png;base64,${second.toString("base64")}`,
+                  ],
+                }
+              : {}),
+          })
+          expect(fetchMock).toHaveBeenCalledTimes(1)
+        })
+      }
+    }
+  }
   test.each([
     ["OpenCode 1", v1Harness],
     ["OpenCode 2", v2Harness],
@@ -1061,4 +1136,49 @@ describe("NanoGPT tools through both hosts", () => {
       expect(bodyOf(fetchMock, 0)).not.toHaveProperty("input_references")
     },
   )
+})
+
+describe("dual-operation literal limits", () => {
+  const profiles = [
+    ["qwen-image-3-pro", 3, 10485760],
+    ["bytedance/seedream-v5.0-pro", 10, 10485760],
+    ["bytedance/seedream-v5.0-pro/edit", 10, 10485760],
+    ["wan2.7-image-pro", 9, 31457280],
+    ["meta/muse-image/text-to-image", 10, 31457280],
+  ] as const
+  test.each(profiles)("%s enforces count and byte boundaries before fetch", async (id, count, bytes) => {
+    const fetchMock = stubFetch()
+    await edit({ images: Array(count).fill("ref.png") }, id)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    await expect(edit({ images: Array(count + 1).fill("ref.png") }, id)).rejects.toThrow(`at most ${count}`)
+    const atLimit = Buffer.alloc(bytes)
+    PNG_BUFFER.copy(atLimit)
+    await writeFile(path.join(dir, "limit.png"), atLimit)
+    await edit({ images: ["limit.png"] }, id)
+    await writeFile(path.join(dir, "limit.png"), Buffer.concat([atLimit, Buffer.from([0])]))
+    await expect(edit({ images: ["limit.png"] }, id)).rejects.toThrow("reference image is too large")
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+  test.each(["imagegen", "imageedit"])("%s enforces Qwen Unicode prompt boundary", async (name) => {
+    const fetchMock = stubFetch()
+    const base = { model: "qwen-image-3-pro", out: "o.png", ...(name === "imageedit" ? { images: ["ref.png"] } : {}) }
+    await run(name, { ...base, prompt: `  ${"𝔸".repeat(800)}  ` })
+    await expect(run(name, { ...base, prompt: "𝔸".repeat(801) })).rejects.toThrow("at most 800")
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+  test("rejects wrong operations, missing references, unsupported controls and unknown IDs without fetch", async () => {
+    const fetchMock = stubFetch()
+    for (const [name, extra] of [
+      ["imagegen", { model: "bytedance/seedream-v5.0-pro/edit" }],
+      ["imagegen", { model: "unknown" }],
+      ["imagegen", { model: "qwen-image-3-pro", seed: 1 }],
+      ["imagegen", { model: "meta/muse-image/text-to-image", output_format: "png" }],
+      ["imagegen", { model: "wan2.7-image-pro", aspect_ratio: "1:1" }],
+      ["imageedit", { model: "wan2.7-image-pro", images: ["ref.png"], resolution: "4k" }],
+      ...DUAL_IDS.map((model) => ["imageedit", { model }] as const),
+    ] as const) {
+      await expect(run(name, { prompt: "p", out: "o.png", ...extra })).rejects.toThrow()
+    }
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
 })

@@ -95,8 +95,15 @@ Every image call names an exact supported model ID. `imagegen` creates from text
 | GPT Image 2.5 Flare | `openai/gpt-image-2.5/flare/text-to-image` | `openai/gpt-image-2.5/flare/edit` | `resolution`, `aspect_ratio`, `quality`, `background` | Up to 16 |
 | Nano Banana Pro | `nano-banana-pro` | `nano-banana-pro-edit` | `resolution`, `aspect_ratio` | Up to 10 |
 | FLUX.3 Image | `black-forest-labs/flux-3/text-to-image` | `black-forest-labs/flux-3/edit` | `resolution`, `aspect_ratio` | Up to 10 |
-| Seedream 5.0 Pro | `bytedance/seedream-v5.0-pro` | `bytedance/seedream-v5.0-pro/edit` | `resolution`, including ratios such as `16:9` | Up to 10, each at most 10 MiB |
+| Seedream 5.0 Pro | `bytedance/seedream-v5.0-pro` | `bytedance/seedream-v5.0-pro` or `bytedance/seedream-v5.0-pro/edit` | `resolution`, including ratios such as `16:9` | Up to 10, each at most 10 MiB |
 | Qwen Image 2.1 | `qwen-image-2.1/text-to-image` | `qwen-image-2.1/edit` | `resolution`, `aspect_ratio`, `seed` | Up to 10 |
+| Qwen Image 3 Pro | `qwen-image-3-pro` | `qwen-image-3-pro` | `resolution` (`1k`, `2k`), `aspect_ratio` (including `auto`) | Up to 3, each at most 10 MiB |
+| WAN 2.7 Image Pro | `wan2.7-image-pro` | `wan2.7-image-pro` | `resolution`; generation includes `4k`, editing excludes it | Up to 9 |
+| Muse Image | `meta/muse-image/text-to-image` | `meta/muse-image/text-to-image` | `resolution` carries the aspect ratio | Up to 10 |
+
+The last three families and Seedream's base ID use the same exact ID with both tools. The tool and reference list select the operation; IDs are sent verbatim. Seedream's explicit `/edit` ID remains an additional edit route, not a generation route or a rewritten alias. The catalogue contains 17 operation entries for 13 distinct IDs. An exact-ID lookup describes every matching operation and returns separate argument schemas keyed by `imagegen` and `imageedit` when both apply.
+
+Qwen Image 3 Pro limits a trimmed prompt to 800 Unicode code points. Its provider documents reference dimensions of 384 to 2048 pixels per side; the plugin does not enforce those pixel sizes. Seedream, WAN and Muse have no established prompt-length limit in this table. WAN's model page states 4K generation and 2K editing, so the plugin conservatively excludes `4k` from editing despite the endpoint's combined value list. WAN and Muse have no separate `aspect_ratio`, seed or output-format control. Muse's page describes WebP as its default; native output handling saves the returned format.
 
 Controls left out of a call aren't sent, so NanoGPT applies its defaults. An unsupported control, value, model, operation or unknown argument is rejected before a provider request. No generic passthrough or runtime catalogue fetch is provided; new NanoGPT models need an update to the plugin's table.
 
@@ -118,6 +125,22 @@ On 2026-11-02, standalone OpenCode 1.19.0 with chat model `openai/gpt-6-astra` r
 An earlier, separately run GPT Image 2.5 Flare three-call chain produced a transparent PNG cut-out, confirmed by inspection of the retained file. That chain was not rerun on the candidate used for the four chains above. Flare is the only supported family exposing `background`; Qwen's result came from the prompt alone, not a background control.
 
 These are single-chain observations, not guarantees of transparency or reliability. They do not cover every parameter, resolution or native output format, or establish OpenCode 2 live parity. Actual image and chat charges were not measured. Inspect alpha and the visual result: a PNG, RGBA channel or checkerboard appearance alone does not prove transparency.
+
+#### Same-ID generation and editing sample
+
+Also on 2026-11-02, the direct-tool runner at `scripts/nanogpt-live.ts` exercised code commit `ba3223105b4737d89b0649f1e5aa42dc055a59a4` in a separate Bun process. It used the real backend's shared `tool.run` flow and existing credential resolver after its permission hook. All ten serial image requests returned HTTP 200 and one image, with no retries. Two deterministic 512x512 PNGs supplied the edits: a teal circular subject with white eyes, purple rectangular mouth and red torso, followed by a blue-and-yellow checker pattern. Those specific attributes were absent from the edit prompt, which assigned subject identity to Image 1 and the umbrella pattern to Image 2.
+
+| Exact ID | Generation controls and output | Edit controls and output | Visual observation |
+| --- | --- | --- | --- |
+| `qwen-image-3-pro` | `resolution: 1k`, `aspect_ratio: auto`; PNG 1024x1024 | `resolution: 1k`; PNG 1024x1024 | Copper robot, watering can and three sunflowers in the generation. Edit kept the reference face, colors and red torso, added a blue-and-yellow checker umbrella and rainy garden. |
+| `bytedance/seedream-v5.0-pro` | `resolution: 1k`; JPEG 1024x1024 | `resolution: 1k`; JPEG 864x1152 | Generation followed the robot/garden prompt. Edit kept the distinctive subject and pattern, added limbs and a rainy garden; composition changed to portrait. |
+| `wan2.7-image-pro` | `resolution: 4k`; PNG 4096x4096 | `resolution: 2k`; PNG 2048x2048 | Generation followed the robot/garden prompt. Edit kept the reference face, colors and red torso under the checker umbrella in rain. All three WAN results arrived as download URLs; signed URLs were omitted from evidence. |
+| `meta/muse-image/text-to-image` | `resolution: 1:1`; WebP 1600x1600 | `resolution: 1:1`; WebP 1600x1600 | Generation followed the robot/garden prompt. Edit kept the distinctive face and colors, interpreted the red torso as a coat, and applied the checker pattern to the umbrella in a rainy garden. |
+| `bytedance/seedream-v5.0-pro/edit` | Edit-only route | `resolution: 1k`; JPEG 1024x1024 | Kept the reference face, colors and red torso, added legs, checker umbrella and rainy garden. The exact `/edit` ID was transmitted. |
+
+An additional `wan2.7-image-pro` generation with `resolution: auto` returned PNG 2048x2048 and a readable robot/garden illustration. It included a crescent moon despite the sunrise prompt. The explicit probe establishes acceptance of `auto` for this sample, not a fixed output size or complete prompt adherence. All ten outputs were opened for visual inspection. Edits regenerated the scene and added details; none establishes pixel-identical preservation.
+
+Local evidence is retained at `/tmp/opencode/nanogpt-both-live-20261102/live/report.json`, with output files, input PNGs, safe request summaries and hashes, plus `visual-review.md` in its parent directory. A separate `preflight/report.json` retains the deliberately failed synthetic transport run. The live run used the source module directly, not either running host adapter or the generated bundle. Both adapters' exact requests are covered by mocked tests; this sample does not establish live host parity. Actual charges were not measured. No output format was forced on these routes, and JPEG/WebP bytes were saved with matching extensions.
 
 ## Compatibility and recorded coverage
 

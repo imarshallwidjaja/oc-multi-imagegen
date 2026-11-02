@@ -15,7 +15,7 @@ import {
 } from "./nano-gpt-models"
 import { type Backend, type CredentialSpec, expectHeaderSafeKey, type ImageCredential } from "./types"
 
-// NanoGPT's normalized Image API. One endpoint serves generation and editing; the model ID selects the operation, and
+// NanoGPT's normalized Image API. One endpoint serves generation and editing; the tool selects the operation, and
 // reference images go in `input_references` as data URLs. Legacy image aliases are not sent.
 // https://docs.nano-gpt.com/api-reference/endpoint/image-api-generate
 const IMAGES_ENDPOINT = "https://api.nano-gpt.com/api/v1/images"

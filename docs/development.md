@@ -47,6 +47,16 @@ For real-agent runs on both hosts, use the [container-testing runbook](https://g
 
 Recorded compatibility evidence lives in [Backends](backends.md#compatibility-and-recorded-coverage) and the runbook. Mocked coverage, a build or a successful example doesn't establish live parity across every host, model and backend.
 
+### NanoGPT direct-tool matrix
+
+From a source checkout, `bun run test:nanogpt:live --live /absolute/new-evidence-directory` explicitly spends NanoGPT account credit. The runner at `scripts/nanogpt-live.ts` imports the candidate backend and invokes its real shared `tool.run` flow with a minimal host. Permission precedes the existing credential resolver. It uses the namespaced environment key or saved `nano-gpt-images` credential and fails if neither exists. It does not start or restart an OpenCode server.
+
+Before a paid attempt, run `bun run test:nanogpt:live --preflight /absolute/new-preflight-directory`. This deliberately exits 1 after a synthetic transport failure and retains a report plus both deterministic 512px reference PNGs. Confirm that the report records the request and failed phase and that both referenced input paths exist. The mocked unit suite also exercises this collector boundary and missing-credential refusal.
+
+The live matrix runs ten serial requests: generation and two-reference editing for Qwen Image 3 Pro, Seedream's base ID, WAN 2.7 Image Pro and Muse; Seedream's explicit `/edit` route; and WAN `auto` generation. Qwen generation uses `1k` with `aspect_ratio: auto`; Seedream uses `1k`; WAN uses `4k` generation and `2k` editing; Muse uses `1:1`. Each invocation needs a new directory and stops on the first failure without retrying. Preserve the failed report separately before any input correction.
+
+`report.json` retains the Git identity, safe prompts and controls, ordered reference byte counts and hashes, HTTP status, response shape, and each output's actual path, MIME type, dimensions and hash. Keys, authorization headers, signed URLs and full base64 payloads are omitted. Inputs are stored once. Open every output and compare the subject identity from Image 1, the pattern from Image 2 and the requested change; saved headers alone do not establish reference retention. Keep visual findings alongside the report. The runner and local evidence are excluded from the npm package.
+
 ## Release to npm
 
 The [publish workflow](https://github.com/imarshallwidjaja/oc-multi-imagegen/blob/main/.github/workflows/publish.yml) runs the normal checks and publishes matching `v*` tags through npm Trusted Publishing. It uses GitHub's OIDC identity rather than an npm publishing secret. Manual **Run workflow** executions run verification only; they don't publish, even when run against a tag.
