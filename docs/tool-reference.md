@@ -15,7 +15,7 @@ The active backend owns its tool schemas. Codex and the OpenAI Images API expose
 | `background` | Optional `opaque` or `transparent`; defaults to `opaque`. |
 | `model`, `quality` | Optional strings passed through. [Backend defaults and confidence](backends.md#codex) differ. |
 
-Other arguments, including `n`, are removed by plugin validation and aren't sent. There is no image-count or output-format argument. Each call saves one PNG.
+Other arguments, including `n`, are removed by plugin validation and aren't sent. There is no image-count or output-format argument. Each call saves one native PNG, JPEG or WebP image.
 
 ## Sizes
 
@@ -63,19 +63,21 @@ FLUX's provider additionally documents references of at least 256 pixels per sid
 
 ## Transparent backgrounds
 
-Set `background: "transparent"` for a cut-out. Prompt for one subject, complete edges and room around it; asking for transparency only in the prose doesn't set the argument.
+For Codex and OpenAI, set `background: "transparent"` for a cut-out. Prompt for one subject, complete edges and room around it; asking for transparency in prose doesn't set the argument.
 
-Codex and OpenAI default to `opaque`. On NanoGPT, only the supported GPT Image 2.5 Flare pair exposes `background`, with `auto`, `opaque` or `transparent`; no default is injected.
+Codex and OpenAI default to `opaque`. On NanoGPT, only the supported GPT Image 2.5 Flare pair exposes `background`, with `auto`, `opaque` or `transparent`; no default is injected. For other NanoGPT families, request transparency in the prompt without passing `background`; results vary by model. See the [observed workflow outcomes](backends.md#nanogpt-live-workflow-coverage).
 
-The plugin doesn't inspect or modify alpha. Recorded Codex transparency includes soft edges and partially transparent subject pixels; in a direct-request study, many subject pixels were at alpha 252-253 rather than 255. Check on light and dark backgrounds and post-process when you need a fully opaque subject or hard matte. The [walkthrough](examples.md#transparency-check) records the example icon's actual alpha behavior.
+The plugin doesn't inspect or modify alpha. Inspect the actual alpha and check on light and dark backgrounds; a filename, RGBA channel or visible checkerboard does not prove transparency. Recorded Codex transparency includes soft edges and partially transparent subject pixels; in a direct-request study, many subject pixels were at alpha 252-253 rather than 255. Post-process when you need a fully opaque subject or hard matte. The [walkthrough](examples.md#transparency-check) records the example icon's actual alpha behavior.
 
 ## Output files
 
-The saved file contains the provider's PNG bytes. Choosing an extension such as `.jpg` doesn't convert the image; it writes PNG data under that name. Non-PNG data is rejected before a directory or file is created.
+The saved file contains the provider's native PNG, JPEG or WebP bytes, without conversion or resizing. The plugin detects the format and reads finite positive dimensions from the image headers before creating a directory or file. Unsupported types and unreadable or invalid header dimensions fail with a bounded diagnostic that includes the detected type when available. Header inspection doesn't establish that every pixel can be decoded or that the file is free of corruption.
 
-An existing path is kept and the next available `-v2`, `-v3`, up to `-v999` suffix is chosen. This is best-effort collision avoidance, not an atomic operation. Give parallel calls distinct output paths.
+The extension follows the detected bytes: `.png`, `.jpg` or `.webp`. An already matching extension is preserved, including `.jpeg` for JPEG and case variants. A mismatching `.png`, `.jpg`, `.jpeg` or `.webp` suffix is replaced; a missing or other suffix gets the actual extension appended. For example, JPEG returned for `scene.png` is saved to `scene.jpg`, and JPEG returned for `scene.asset` is saved to `scene.asset.jpg`.
 
-Both hosts return `out` and `versioned` metadata. OpenCode 2 also returns structured output with that shape alongside the text. The message reports the actual pixel dimensions.
+If that format-adjusted target exists, it is kept and the next available `-v2`, `-v3`, up to `-v999` suffix is chosen before the extension. This is best-effort collision avoidance, not an atomic operation. Give parallel calls distinct output paths.
+
+Both hosts return `out` and `versioned` metadata. OpenCode 2 also returns structured output with that shape alongside the text. `out` is the actual absolute saved path: use it for reads and as the next edit's `images` input, rather than assuming the requested path was used. `versioned` is true only for a collision suffix, not an extension adjustment alone. The message reports the actual format and pixel dimensions and explains extension adjustment and collision versioning separately.
 
 Relative `out` and reference paths follow the calling session's directory. On OpenCode 2 that can differ from the directory that loaded the plugin. Absolute paths are accepted, including outside the project; see [file access](permissions.md#file-access).
 
@@ -87,7 +89,7 @@ Relative `out` and reference paths follow the calling session's directory. On Op
 
 The image tools accept a curated set of generation/edit IDs and reject unknown arguments, unsupported controls or values, wrong-operation models, excess references and documented prompt-length violations before contacting the provider. There are no count, format, streaming or generic provider-routing arguments. Omitted controls aren't sent.
 
-Every call asks for one image. Where the model's documented controls permit it, the request asks for PNG; all successful saves require PNG. [The model table](backends.md#generation-and-editing-models) lists the supported families.
+Every call asks for one image. Where the model's documented controls permit it, the request asks for PNG; otherwise the output format is left to NanoGPT. Native PNG, JPEG and WebP responses can be saved. [The model table](backends.md#generation-and-editing-models) lists the supported families.
 
 ## NanoGPT responses and errors
 

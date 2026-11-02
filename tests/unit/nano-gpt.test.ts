@@ -16,7 +16,7 @@ import {
   referenceRules,
 } from "../../src/nano-gpt-models"
 import type { ImageCredential, ImageTool, ImageToolHost } from "../../src/types"
-import { isolateEnvironment, PNG_BASE64, PNG_BUFFER } from "./fixtures"
+import { isolateEnvironment, JPEG_BUFFER, PNG_BASE64, PNG_BUFFER, WEBP_BUFFER } from "./fixtures"
 import { loadV2Tool, STORED_CREDENTIALS, selectBackendVariable, v1Harness, v1ToolContext, v2Harness } from "./hosts"
 
 // NanoGPT-specific behavior: the model registry and the schemas derived from it, the request each tool sends, how the
@@ -517,18 +517,6 @@ describe("NanoGPT responses", () => {
 
     await expect(generate()).rejects.toThrow("returned a response that is not JSON. Nothing was saved. NanoGPT may")
   })
-
-  test("saves nothing, and says the provider may have charged, when the image is not a PNG", async () => {
-    stubFetch(() => inlineResponse(Buffer.from("<svg/>").toString("base64")))
-
-    const error = await generate({ out: "nested/cat.png" }).catch((caught: Error) => caught)
-
-    expect((error as Error).message).toContain("not a PNG image; nothing was saved")
-    expect((error as Error).message).toContain(
-      "The image was not saved. NanoGPT may already have charged for this generation.",
-    )
-    expect(await readdir(dir)).toEqual(["ref.png"])
-  })
 })
 
 const URL_RESPONSE = () =>
@@ -715,27 +703,30 @@ describe("NanoGPT transport failures", () => {
 })
 
 describe("NanoGPT image URLs", () => {
-  test("downloads the image without credentials, without following redirects, with the call's signal", async () => {
-    const fetchMock = downloadsAfterRequest(() => new Response(PNG_BUFFER))
-    const controller = new AbortController()
+  test.each([PNG_BUFFER, JPEG_BUFFER, WEBP_BUFFER])(
+    "downloads native bytes without credentials or redirects, with the call's signal",
+    async (bytes) => {
+      const fetchMock = downloadsAfterRequest(() => new Response(bytes))
+      const controller = new AbortController()
 
-    const saved = await run(
-      "imagegen",
-      { model: "nano-banana-pro", prompt: "p", out: "cat.png" },
-      key,
-      controller.signal,
-    )
+      const saved = await run(
+        "imagegen",
+        { model: "nano-banana-pro", prompt: "p", out: "cat.png" },
+        key,
+        controller.signal,
+      )
 
-    expect(await Bun.file(saved.savedPath).bytes()).toEqual(new Uint8Array(PNG_BUFFER))
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-    const [url, init] = fetchMock.mock.calls[1]
-    expect(String(url)).toBe("https://cdn.nano-gpt.example/img/1.png?sig=SECRET")
-    expect(init.method).toBe("GET")
-    expect(init.redirect).toBe("manual")
-    expect(init.signal).toBe(controller.signal)
-    expect(init.headers).toBeUndefined()
-    expect(JSON.stringify(init)).not.toContain("sk-nano")
-  })
+      expect(await Bun.file(saved.savedPath).bytes()).toEqual(new Uint8Array(bytes))
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      const [url, init] = fetchMock.mock.calls[1]
+      expect(String(url)).toBe("https://cdn.nano-gpt.example/img/1.png?sig=SECRET")
+      expect(init.method).toBe("GET")
+      expect(init.redirect).toBe("manual")
+      expect(init.signal).toBe(controller.signal)
+      expect(init.headers).toBeUndefined()
+      expect(JSON.stringify(init)).not.toContain("sk-nano")
+    },
+  )
 
   test("a cancelled download rejects and saves nothing", async () => {
     const controller = new AbortController()
@@ -903,12 +894,12 @@ describe("NanoGPT image URLs", () => {
     expect(await Bun.file(saved.savedPath).bytes()).toEqual(new Uint8Array(PNG_BUFFER))
   })
 
-  test("saves nothing when the downloaded bytes are not a PNG", async () => {
+  test("saves nothing when the downloaded bytes are not an accepted image format", async () => {
     downloadsAfterRequest(() => new Response("<svg/>"))
 
     const error = await generate({ out: "nested/cat.png" }).catch((caught: Error) => caught)
 
-    expect((error as Error).message).toContain("not a PNG image; nothing was saved")
+    expect((error as Error).message).toContain("unsupported image type (unknown)")
     expect(await readdir(dir)).toEqual(["ref.png"])
   })
 })
@@ -949,7 +940,7 @@ describe.each([
       expect(text).toContain(`- ${editId} (`)
     }
     expect(text).toContain("10 of 10 shown")
-    expect(text).toContain("has not been validated with live calls")
+    expect(text).toContain("Sampled live workflow coverage:")
     expect(touched).toEqual([])
     expect(fetchMock).not.toHaveBeenCalled()
   })
@@ -973,7 +964,7 @@ describe.each([
     expect(text).toContain("The generate model of this family is bytedance/seedream-v5.0-pro (imagegen).")
     expect(text).toContain("- resolution: 1:1, 16:9, 9:16, 3:2, 2:3, 4:3, 3:4, 1k, 2k")
     expect(text).toContain("10485760 bytes")
-    expect(text).toContain("Not validated with live calls.")
+    expect(text).toContain("Sampled live workflow coverage and limits:")
     const schema = JSON.parse(text.slice(text.indexOf("{")))
     expect(schema.tool).toBe("imageedit")
     expect(schema.required).toEqual(["model", "prompt", "out", "images"])
@@ -1038,10 +1029,12 @@ describe("NanoGPT tool guidance", () => {
     expect(description("imageedit")).toContain("The prompt and reference images are sent to NanoGPT")
   })
 
-  test("says that one image is requested and only PNG responses are saved, not that PNG is requested", () => {
+  test("describes native output formats and tells callers to chain the returned path", () => {
     for (const name of ["imagegen", "imageedit"]) {
-      expect(description(name)).toContain("Exactly one image is requested; only PNG responses are saved.")
-      expect(description(name)).not.toContain("Exactly one PNG")
+      expect(description(name)).toContain(
+        "Exactly one image is requested; native PNG, JPEG or WebP responses are saved.",
+      )
+      expect(description(name)).toContain("use the returned out path for reads or subsequent edits")
     }
   })
 })

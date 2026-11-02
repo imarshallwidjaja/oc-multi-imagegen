@@ -12,8 +12,8 @@ Use your OpenCode ChatGPT sign-in with the default **Codex backend**, or connect
 
 - **Illustrations from a prompt:** scene art, website imagery, textures and visual concepts.
 - **Variations from references:** change the weather, restyle an image or combine several images in one request.
-- **Transparent assets:** turn a character or object into a cut-out for an avatar, sticker or illustrated icon.
-- **Images your agent can keep working with:** each result is a local PNG, ready to inspect, reference in another call or use in your project.
+- **Transparent assets:** request a character or object cut-out for an avatar, sticker or illustrated icon. Results depend on the model; inspect the returned alpha.
+- **Images your agent can keep working with:** each result is a local PNG, JPEG or WebP with the provider's original bytes and a matching extension. Use the returned path to inspect it, reference it in another call or use it in your project.
 
 ## From a prompt to a finished asset
 
@@ -41,7 +41,7 @@ On Codex, adding `images` makes the same tool perform a reference-guided edit. N
 
 <img src="docs/images/fox-postmaster-icon.png" width="320" alt="The fox postmaster as an isolated, transparent character illustration, wearing a teal coat and carrying a letter and mail satchel.">
 
-The agent supplies the reference and sets `background: "transparent"`. This PNG has real transparency, checked on light and dark backgrounds. Fine edges and the character itself can have soft alpha; use a vector tool when you need an editable vector icon.
+For this Codex example, the agent supplies the reference and sets `background: "transparent"`. This PNG has real transparency, checked on light and dark backgrounds. Fine edges and the character itself can have soft alpha; use a vector tool when you need an editable vector icon.
 
 ## Get started
 
@@ -75,7 +75,7 @@ Then ask for an image. The [permissions guide](docs/permissions.md) covers agent
 | **OpenAI Images API** | An OpenAI image API key | `imagegen` with native pixel sizes |
 | **NanoGPT** | A NanoGPT API key | Separate generation/editing tools and a choice of curated models |
 
-[Backend setup and model choices](docs/backends.md) explain authentication, controls and availability. Generation uses the selected provider's account quota or API credit. NanoGPT support is covered by mocked tests and hasn't been validated with live calls.
+[Backend setup and model choices](docs/backends.md) explain authentication, controls, availability and [recorded NanoGPT workflow coverage](docs/backends.md#nanogpt-live-workflow-coverage). Generation uses the selected provider's account quota or API credit.
 
 ## Documentation
 

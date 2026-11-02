@@ -28,7 +28,7 @@ The existing package test packs the checkout, extracts it, bundles the entry poi
 
 One default export serves both hosts. OpenCode 1 calls `server()` and OpenCode 2 calls `setup()`. OpenCode 2 checks the root `server.js` entry before the package's `main`; both entries reach the same build. Neither OpenCode SDK is imported at runtime.
 
-Each host adapter selects the backend once and registers its declared tools. The shared image flow parses arguments, asks permission, resolves the session directory and credential, reads references, generates, checks cancellation and saves the PNG. Provider-specific schemas, model controls and requests belong to the backend.
+Each host adapter selects the backend once and registers its declared tools. The shared image flow parses arguments, asks permission, resolves the session directory and credential, reads references, generates, checks cancellation and saves native PNG, JPEG or WebP bytes with a matching extension. `file-type` detects the format; `image-size` reads header dimensions without full pixel decoding. Provider-specific schemas, model controls and requests belong to the backend.
 
 ## Bundled skill
 

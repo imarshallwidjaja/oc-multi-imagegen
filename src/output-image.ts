@@ -1,5 +1,8 @@
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
+import { fileTypeFromBuffer } from "file-type"
+import { imageSize } from "image-size"
+import type { SavedImage } from "./types"
 
 const MAX_OUTPUT_VERSION_SUFFIX = 999
 
@@ -27,49 +30,60 @@ export async function pickNonOverwritePath(requested: string, maxVersion = MAX_O
   )
 }
 
-type PixelSize = { width: number; height: number }
-
-const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
-
-// A PNG starts with the signature and an IHDR chunk, which holds the size read below.
-function decodePng(base64: string): Buffer {
-  const png = Buffer.from(base64, "base64")
-  if (png.length < 24 || !png.subarray(0, 8).equals(PNG_SIGNATURE) || png.toString("latin1", 12, 16) !== "IHDR") {
-    throw new Error("the backend returned data that is not a PNG image; nothing was saved")
-  }
-  return png
-}
-
-// The width and height sit at fixed offsets in the IHDR chunk, which always follows the 8-byte PNG signature.
-function readPngSize(png: Buffer): PixelSize {
-  return { width: png.readUInt32BE(16), height: png.readUInt32BE(20) }
-}
-
-// The pixel size is reported because nothing enforces the requested size; the bytes are saved without resizing.
-export function buildSavedMessage(savedPath: string, requestedPath: string, size: PixelSize): string {
-  const versionNote =
-    savedPath !== requestedPath
-      ? ` (the requested path ${requestedPath} already existed; the new image was versioned to avoid overwriting it)`
-      : ""
-  return `Generated image saved to ${savedPath}${versionNote}. The image is ${size.width}x${size.height} pixels.`
-}
-
-type SaveResult = { savedPath: string; versioned: boolean; message: string }
-
 // Resolve the output path (relative to ctxDir unless absolute), then write the
-// decoded PNG. Avoiding an overwrite is best-effort: the collision check and the
+// native image bytes. Avoiding an overwrite is best-effort: the collision check and the
 // write are not atomic, so a concurrent writer racing between them could still be
 // clobbered. Returns the user-facing message alongside the saved path.
-export async function saveGeneratedImage(out: string, ctxDir: string, base64: string): Promise<SaveResult> {
+export async function saveGeneratedImage(out: string, ctxDir: string, base64: string): Promise<SavedImage> {
   const requestedPath = path.isAbsolute(out) ? out : path.resolve(ctxDir, out)
-  // Decode and check the bytes first, so data that is not a PNG creates no directory and no file.
-  const png = decodePng(base64)
-  await fs.mkdir(path.dirname(requestedPath), { recursive: true })
-  const savedPath = await pickNonOverwritePath(requestedPath)
-  await fs.writeFile(savedPath, png)
+  const bytes = Buffer.from(base64, "base64")
+  // Detect the type and read header dimensions before any write. This is not a full corruption check.
+  const detected = await fileTypeFromBuffer(bytes).catch(() => undefined)
+  const format = detected?.mime
+  if (format !== "image/png" && format !== "image/jpeg" && format !== "image/webp") {
+    throw new Error(
+      `the backend returned an unsupported image type (${format ?? "unknown"}); expected PNG, JPEG or WebP; nothing was saved`,
+    )
+  }
+  let size: ReturnType<typeof imageSize>
+  try {
+    // image-size's VP8L bitwise reads treat missing dimension bytes as zeros.
+    // The 20-byte container/chunk prefix needs 5 bytes for VP8L, or 10 for VP8/VP8X.
+    if (format === "image/webp" && bytes.length < (bytes.toString("ascii", 12, 16) === "VP8L" ? 25 : 30)) {
+      throw new Error("incomplete dimension header")
+    }
+    size = imageSize(bytes)
+    if (!Number.isFinite(size.width) || !Number.isFinite(size.height) || size.width <= 0 || size.height <= 0) {
+      throw new Error("invalid dimensions")
+    }
+  } catch {
+    // Parser errors can include provider-controlled text; report only the detected MIME type.
+    throw new Error(`the backend returned malformed ${format} image headers or dimensions; nothing was saved`)
+  }
+  const extension = format === "image/jpeg" ? ".jpg" : format === "image/webp" ? ".webp" : ".png"
+  const requestedExtension = path.extname(requestedPath)
+  const lowerExtension = requestedExtension.toLowerCase()
+  const matches = lowerExtension === extension || (format === "image/jpeg" && lowerExtension === ".jpeg")
+  const targetPath = matches
+    ? requestedPath
+    : [".png", ".jpg", ".jpeg", ".webp"].includes(lowerExtension)
+      ? requestedPath.slice(0, -requestedExtension.length) + extension
+      : requestedPath + extension
+  await fs.mkdir(path.dirname(targetPath), { recursive: true })
+  const savedPath = await pickNonOverwritePath(targetPath)
+  await fs.writeFile(savedPath, bytes)
+  const versioned = savedPath !== targetPath
+  const formatName = format === "image/jpeg" ? "JPEG" : format === "image/webp" ? "WebP" : "PNG"
+  const extensionNote =
+    targetPath !== requestedPath
+      ? ` The requested path ${requestedPath} was adjusted to ${targetPath} to match the ${formatName} bytes.`
+      : ""
+  const versionNote = versioned
+    ? ` The target path ${targetPath} already existed; the new image was versioned to avoid overwriting it.`
+    : ""
   return {
     savedPath,
-    versioned: savedPath !== requestedPath,
-    message: buildSavedMessage(savedPath, requestedPath, readPngSize(png)),
+    versioned,
+    message: `Generated image saved to ${savedPath}. The image is ${formatName}, ${size.width}x${size.height} pixels.${extensionNote}${versionNote}`,
   }
 }

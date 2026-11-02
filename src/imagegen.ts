@@ -20,7 +20,7 @@ export function describeImagegen({ subject, requires, controls }: ImagegenDescri
     "Best for photos, illustrations, textures and concepts; build icons, logos, charts and anything that must scale or stay editable as SVG or code.",
     `With images, name each reference's role in the prompt (for example "Image 1: style; Image 2: layout") and what to keep. The result is a newly generated image, so areas the prompt does not mention can change; use an image editor when pixels must stay identical.`,
     "Choose size by the aspect ratio the use needs. For a cut-out, set background to transparent instead of asking in the prompt, and check the returned alpha.",
-    "Returns the saved PNG's absolute path and actual pixel dimensions; size is a request, so check the dimensions when they matter.",
+    "Saves native PNG, JPEG or WebP bytes and returns the actual absolute path, format and pixel dimensions. The extension is adjusted to match; use the returned out path for reads or subsequent edits. Size is a request, so check the dimensions when they matter.",
     controls,
     "Existing output paths are versioned on a best-effort basis; concurrent writes are not protected.",
   ].join(" ")

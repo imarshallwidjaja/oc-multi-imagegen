@@ -48,7 +48,7 @@ export type ImageToolHost = {
 
 export type SavedImage = { savedPath: string; versioned: boolean; message: string }
 
-// A tool that calls the provider, and saves one PNG. `run` parses the raw arguments with `schema` itself, because
+// A tool that calls the provider, and saves one native PNG, JPEG or WebP. `run` parses the raw arguments with `schema` itself, because
 // hosts can call execute without validating them first.
 export type ImageTool = {
   kind: "image"

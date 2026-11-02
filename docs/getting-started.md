@@ -52,9 +52,9 @@ Ask the agent:
 
 > Create a wide, hand-painted illustration of a woodland post office at sunset and save it as `images/post-office.png`.
 
-The agent can load the bundled `oc-multi-imagegen` skill, call `imagegen`, inspect the saved PNG and use it as a reference for another image. The tool also works when the skill isn't available or permitted.
+The agent can load the bundled `oc-multi-imagegen` skill, call `imagegen`, inspect the saved image and use it as a reference for another image. The tool saves native PNG, JPEG or WebP bytes and adjusts the extension to match. Use the returned `out` path for reads and subsequent edits. The tool also works when the skill isn't available or permitted.
 
-For an edit, name the existing file and the change:
+For an edit, name the existing file from the result's `out` and the change. If the result above is `images/post-office.png`:
 
 > Use `images/post-office.png` as a reference. Change the scene to a rainy evening and save it as `images/post-office-rain.png`.
 

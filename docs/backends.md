@@ -102,7 +102,22 @@ Controls left out of a call aren't sent, so NanoGPT applies its defaults. An uns
 
 Agents are guided to respect the operator's model choice, otherwise pick a supported model and give a short reason. Missing inputs or conflicts with a requested model, capability, cost or requirement need the operator's decision. Errors never silently change a model. Authentication, balance and rate-limit failures aren't retried; an agent should only correct an input when the error identifies a demonstrable mistake.
 
-The curated table follows NanoGPT documentation and public metadata, which are incomplete and inconsistent between sources. It **hasn't been validated with live NanoGPT calls**. A missing control means this plugin doesn't send it, rather than proving the provider lacks it. [Response handling and limits](tool-reference.md#nanogpt-responses-and-errors) explain the supported result shapes.
+The curated table follows NanoGPT documentation and public metadata, which are incomplete and inconsistent between sources. A missing control means this plugin doesn't send it, rather than proving the provider lacks it. [Response handling and limits](tool-reference.md#nanogpt-responses-and-errors) explain the supported result shapes.
+
+### NanoGPT live workflow coverage
+
+On 2026-11-02, standalone OpenCode 1.19.0 with chat model `openai/gpt-6-astra` ran one three-call chain per family below: a scene, a rainy reference edit and a character extraction using the preceding returned path. All 12 calls completed without retries; the scene generations and rainy edits worked. Each extraction prompt requested transparency without a `background` argument, which these four families do not expose.
+
+| Family | Controls used | Observed native outputs | Extraction outcome |
+| --- | --- | --- | --- |
+| Nano Banana Pro | `resolution: 1k`, `aspect_ratio: 16:9` for scenes, `1:1` for extraction | PNG 1376x768, then PNG 1024x1024 | Opaque painted checkerboard. |
+| FLUX.3 Image | `resolution: 1k`, `aspect_ratio: 16:9` for scenes, `1:1` for extraction | PNG 1360x768, then PNG 1024x1024 | RGBA with every pixel opaque and a painted checkerboard. |
+| Seedream 5.0 Pro | `resolution: 16:9` for scenes, `1:1` for extraction | JPEG 2730x1536, then JPEG 2048x2048 | Opaque near-white background. Requested `.png` paths became `.jpg` and the returned paths chained successfully. |
+| Qwen Image 2.1 | `resolution: 1k`, `aspect_ratio: 16:9` for scenes, `1:1` for extraction | PNG 1376x768, then PNG 1024x1024 | Real alpha: 334,292 transparent, 493,113 partial and 221,171 opaque pixels. The requested envelope appeared on the office door in the scenes and was absent from the extraction. |
+
+An earlier, separately run GPT Image 2.5 Flare three-call chain produced a transparent PNG cut-out, confirmed by inspection of the retained file. That chain was not rerun on the candidate used for the four chains above. Flare is the only supported family exposing `background`; Qwen's result came from the prompt alone, not a background control.
+
+These are single-chain observations, not guarantees of transparency or reliability. They do not cover every parameter, resolution or native output format, or establish OpenCode 2 live parity. Actual image and chat charges were not measured. Inspect alpha and the visual result: a PNG, RGBA channel or checkerboard appearance alone does not prove transparency.
 
 ## Compatibility and recorded coverage
 
@@ -113,7 +128,7 @@ The curated table follows NanoGPT documentation and public metadata, which are i
 
 The Codex container runs covered skill loading and image generation before backend selection existed. OpenAI API runs covered generation and a reference edit on each host, including environment-key precedence and, in an earlier run, saved keys. Intermediate or newer host versions aren't established by those runs. The [container runbook](https://github.com/imarshallwidjaja/oc-multi-imagegen/blob/main/docs/container-testing.md) retains the recorded evidence and source identities.
 
-The README artwork is a separate live Codex example chain, not a new container compatibility run. NanoGPT has mocked unit coverage only.
+The README artwork is a separate live Codex example chain, not a new container compatibility run. NanoGPT's standalone live coverage is described above and does not establish container or OpenCode 2 parity.
 
 ## Account access and data
 

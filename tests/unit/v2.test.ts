@@ -245,7 +245,7 @@ describe("OpenCode 2 execution", () => {
     expect(await readFile(savedPath)).toEqual(PNG_BUFFER)
     expect(result).toEqual({
       output: { out: savedPath, versioned: false },
-      content: `Generated image saved to ${savedPath}. The image is 1x1 pixels.`,
+      content: `Generated image saved to ${savedPath}. The image is PNG, 1x1 pixels.`,
       metadata: { out: savedPath, versioned: false },
     })
     expect(tool.output.safeParse(result.output).success).toBe(true)

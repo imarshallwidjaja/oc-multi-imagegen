@@ -106,6 +106,7 @@ export const MODELS: readonly NanoModel[] = [
     requestsPng: true,
     maxPromptCodePoints: 32000,
     maxReferences: 16,
+    notes: "A prior live extraction produced a cut-out with real alpha; inspect each result.",
   }),
   ...family({
     family: "nano-banana-pro",
@@ -117,6 +118,7 @@ export const MODELS: readonly NanoModel[] = [
     resolutions: SIZE_TIERS,
     aspectRatios: ["auto", "1:1", "3:2", "2:3", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"],
     maxReferences: 10,
+    notes: "A sampled live extraction produced an opaque painted checkerboard; inspect alpha rather than appearance.",
   }),
   ...family({
     family: "flux-3",
@@ -145,6 +147,7 @@ export const MODELS: readonly NanoModel[] = [
     ],
     requestsPng: true,
     maxReferences: 10,
+    notes: "A sampled live extraction produced an opaque painted checkerboard despite an RGBA channel; inspect alpha.",
     editNotes:
       "The provider documents references of at least 256 pixels on each side and at most 16 megapixels, and downscales references above 4 megapixels. The plugin does not check pixel sizes.",
   }),
@@ -159,7 +162,7 @@ export const MODELS: readonly NanoModel[] = [
     maxReferences: 10,
     referenceMaxBytes: 10485760,
     notes:
-      "Size is chosen only through resolution: 1k, 2k, or an aspect-ratio value such as 16:9. There is no separate aspect_ratio argument.",
+      "Size is chosen only through resolution: 1k, 2k, or an aspect-ratio value such as 16:9. There is no separate aspect_ratio argument. A sampled live extraction returned an opaque JPEG; use the actual returned path for edits.",
   }),
   ...family({
     family: "qwen-image-2.1",
@@ -207,6 +210,8 @@ export const MODELS: readonly NanoModel[] = [
     seed: true,
     requestsPng: true,
     maxReferences: 10,
+    notes:
+      "A sampled prompt-only cut-out had real alpha but omitted a requested prop. Inspect alpha and content; this family has no background control.",
   }),
 ]
 
@@ -372,7 +377,7 @@ function commonShape(operation: Operation) {
     out: z
       .string()
       .describe(
-        "Destination path, relative to the project directory unless absolute. The file always contains PNG bytes; the extension does not select or convert the format. An existing file is kept and the new image gets a -vN suffix.",
+        "Destination path, relative to the project directory unless absolute. Saves native PNG, JPEG or WebP bytes without conversion, adjusting the extension to match. An existing target is kept and the new image gets a -vN suffix. Use the returned out path for subsequent reads or edits.",
       ),
     resolution: optionalControl(
       "Optional output resolution tier, a value from the chosen model's list in " +
@@ -466,7 +471,7 @@ function describeDetail(model: NanoModel): string {
     "Omitted controls are not sent, so NanoGPT applies its own defaults.",
     model.requestsPng
       ? "The request asks for PNG output."
-      : "The request does not set an output format; the response must be PNG.",
+      : "The request does not set an output format; native PNG, JPEG or WebP responses are saved.",
     ...(model.maxPromptCodePoints ? [`Prompt: at most ${model.maxPromptCodePoints} characters.`] : []),
     ...(model.operation === "edit"
       ? [
@@ -474,7 +479,7 @@ function describeDetail(model: NanoModel): string {
         ]
       : ["References: none. Use the edit model to change existing images."]),
     ...(model.notes ? [model.notes] : []),
-    `Sources: ${MODEL_SOURCES.join(" and ")}. Not validated with live calls.`,
+    `Sources: ${MODEL_SOURCES.join(" and ")}. Sampled live workflow coverage and limits: https://github.com/imarshallwidjaja/oc-multi-imagegen/blob/main/docs/backends.md#nanogpt-live-workflow-coverage.`,
     "Arguments (JSON Schema):",
     JSON.stringify(requestSchema(model), null, 2),
   ]
@@ -494,7 +499,7 @@ function describeList(models: readonly NanoModel[], total: number): string {
   const generate = group("generate")
   const edit = group("edit")
   return [
-    `NanoGPT models this plugin supports (${models.length} of ${total} shown). Support is taken from provider documentation and public model metadata; it has not been validated with live calls. Prices vary by model, resolution and quality; check NanoGPT's pricing when cost matters.`,
+    `NanoGPT models this plugin supports (${models.length} of ${total} shown). Controls come from provider documentation and public model metadata. Sampled live workflow coverage: https://github.com/imarshallwidjaja/oc-multi-imagegen/blob/main/docs/backends.md#nanogpt-live-workflow-coverage. Prices vary by model, resolution and quality; check NanoGPT's pricing when cost matters.`,
     ...(generate.length > 0 ? [`New images from text, with ${GENERATE_TOOL}:`, ...generate] : []),
     ...(edit.length > 0 ? [`Changing or combining existing images, with ${EDIT_TOOL}:`, ...edit] : []),
     ...(models.length === 0 ? [`No supported model matches. Families: ${FAMILIES.join(", ")}.`] : []),
@@ -564,24 +569,28 @@ function modelMenu(operation: Operation): string {
 }
 
 const SKILL_SENTENCE = `Load the ${SKILL_NAME} skill before image work when it is available, permitted and not already loaded; the tool also works without it.`
+const ALPHA_GUIDANCE =
+  "For a cut-out, among the supported families only GPT Image 2.5 Flare supports the background control; for other families request transparency in the prompt without that control. Inspect actual alpha and content: a filename, RGBA channel or painted checkerboard does not prove transparency."
 
 export function describeNanoImageTool(operation: Operation, requires: string): string {
   return operation === "generate"
     ? [
         `Generate one new raster image from a text prompt through NanoGPT. To change or combine existing images use ${EDIT_TOOL} instead. ${SKILL_SENTENCE}`,
         requires,
-        `Required model, one of: ${modelMenu("generate")}. Optional controls (resolution, aspect_ratio, quality, background, seed) each exist only for some models; ${MODELS_TOOL} lists them locally without a key, and an unsupported control or value is rejected before any request. Omitted controls are not sent, so NanoGPT's defaults apply. Exactly one image is requested; only PNG responses are saved.`,
+        `Required model, one of: ${modelMenu("generate")}. Optional controls (resolution, aspect_ratio, quality, background, seed) each exist only for some models; ${MODELS_TOOL} lists them locally without a key, and an unsupported control or value is rejected before any request. Omitted controls are not sent, so NanoGPT's defaults apply. Exactly one image is requested; native PNG, JPEG or WebP responses are saved.`,
         "Best for photos, illustrations, textures and concepts; build icons, logos, charts and anything that must scale or stay editable as SVG or code.",
+        ALPHA_GUIDANCE,
         MODEL_CHOICE_GUIDANCE,
-        "Returns the saved PNG's absolute path and actual pixel dimensions; the requested size is not enforced, so check the dimensions when they matter. Existing output paths are versioned on a best-effort basis; concurrent writes are not protected.",
+        "Returns the actual saved absolute path, format and pixel dimensions. The extension is adjusted to match the bytes; use the returned out path for reads or subsequent edits. The requested size is not enforced, so check the dimensions when they matter. Existing target paths are versioned on a best-effort basis; concurrent writes are not protected.",
       ].join(" ")
     : [
         `Edit or combine existing local images into one new raster image through NanoGPT, guided by a prompt. To create an image from text alone use ${GENERATE_TOOL}. ${SKILL_SENTENCE}`,
         requires,
-        `Required images (local PNG, JPEG or WebP paths) and model, one of: ${modelMenu("edit")}. The count limit depends on the model. Optional controls (resolution, aspect_ratio, quality, background, seed) each exist only for some models; ${MODELS_TOOL} lists them locally without a key, and an unsupported control or value is rejected before any request. Omitted controls are not sent. Exactly one image is requested; only PNG responses are saved.`,
+        `Required images (local PNG, JPEG or WebP paths) and model, one of: ${modelMenu("edit")}. The count limit depends on the model. Optional controls (resolution, aspect_ratio, quality, background, seed) each exist only for some models; ${MODELS_TOOL} lists them locally without a key, and an unsupported control or value is rejected before any request. Omitted controls are not sent. Exactly one image is requested; native PNG, JPEG or WebP responses are saved.`,
         "The result is a newly generated image, so areas the prompt does not mention can change; use an image editor when pixels must stay identical. Name each reference's role in the prompt and what to keep.",
+        ALPHA_GUIDANCE,
         MODEL_CHOICE_GUIDANCE,
-        "Returns the saved PNG's absolute path and actual pixel dimensions. Existing output paths are versioned on a best-effort basis; concurrent writes are not protected.",
+        "Returns the actual saved absolute path, format and pixel dimensions. The extension is adjusted to match the bytes; use the returned out path for reads or subsequent edits. Existing target paths are versioned on a best-effort basis; concurrent writes are not protected.",
       ].join(" ")
 }
 
@@ -589,7 +598,7 @@ export const nanoModelsTool = defineInfoTool({
   name: MODELS_TOOL,
   description: [
     `List the NanoGPT image models this plugin supports, or describe one exactly. It answers from a table inside the plugin: no key, permission prompt, file access or network request, and no cost. Use it before choosing a model for ${GENERATE_TOOL} or ${EDIT_TOOL}.`,
-    "Without model it lists the supported models, filtered by operation, family or query words; with an exact model ID it returns that model's purpose, control values, limits and argument schema. The table follows provider documentation and has not been validated with live calls.",
+    "Without model it lists the supported models, filtered by operation, family or query words; with an exact model ID it returns that model's purpose, control values, limits and argument schema. Controls come from provider documentation and public model metadata. Sampled live workflow coverage: https://github.com/imarshallwidjaja/oc-multi-imagegen/blob/main/docs/backends.md#nanogpt-live-workflow-coverage.",
   ].join(" "),
   schema: modelsSchema,
   answer: answerModels,

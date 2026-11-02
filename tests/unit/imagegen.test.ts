@@ -3,7 +3,15 @@ import { existsSync } from "node:fs"
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { isolateEnvironment, PNG_BASE64, PNG_BUFFER } from "./fixtures"
+import {
+  isolateEnvironment,
+  JPEG_BUFFER,
+  LOSSLESS_WEBP_BUFFER,
+  LOSSY_WEBP_BUFFER,
+  PNG_BASE64,
+  PNG_BUFFER,
+  WEBP_BUFFER,
+} from "./fixtures"
 import {
   ENVIRONMENT_KEY,
   FLAVOURS,
@@ -73,7 +81,7 @@ describe.each(matrix)("%s with the %s backend calling %s", (_host, _backend, _to
     expect(await readFile(savedPath)).toEqual(PNG_BUFFER)
     // PNG_BASE64 is a 1x1 image. The message reports the size of the saved image, not the requested size.
     expect(result).toEqual({
-      message: `Generated image saved to ${savedPath}. The image is 1x1 pixels.`,
+      message: `Generated image saved to ${savedPath}. The image is PNG, 1x1 pixels.`,
       out: savedPath,
       versioned: false,
     })
@@ -91,7 +99,81 @@ describe.each(matrix)("%s with the %s backend calling %s", (_host, _backend, _to
 
     expect(second.out).toBe(path.join(dir, "cat-v2.png"))
     expect(second.versioned).toBe(true)
-    expect(second.message).toContain("the requested path")
+    expect(second.message).toContain(`The target path ${path.join(dir, "cat.png")} already existed`)
+    expect(await readFile(path.join(dir, "cat.png"))).toEqual(PNG_BUFFER)
+  })
+
+  test.each([
+    ["PNG", PNG_BUFFER, "png", "1x1"],
+    ["JPEG", JPEG_BUFFER, "jpg", "3x2"],
+    ["WebP", WEBP_BUFFER, "webp", "3x2"],
+    ["WebP", LOSSLESS_WEBP_BUFFER, "webp", "3x2"],
+    ["WebP", LOSSY_WEBP_BUFFER, "webp", "3x2"],
+  ] as const)("saves native %s bytes with matching extension and dimensions", async (format, bytes, ext, size) => {
+    stubFetch(() => imagesResponse(bytes.toString("base64")))
+    const harness = await createHarness(dir)
+
+    const result = await harness.execute({ ...args, out: "nested/image" })
+
+    expect(result.out).toBe(path.join(dir, `nested/image.${ext}`))
+    expect(await readFile(path.join(dir, `nested/image.${ext}`))).toEqual(bytes)
+    expect(result.versioned).toBe(false)
+    expect(result.message).toContain(`The image is ${format}, ${size} pixels.`)
+    expect(result.message).toContain(`was adjusted to ${result.out} to match the ${format} bytes`)
+    expect(result.message).not.toContain("already existed")
+  })
+
+  test.each([
+    ["image.jpg", PNG_BUFFER, "image.png"],
+    ["image.jpeg", WEBP_BUFFER, "image.webp"],
+    ["image.PNG", JPEG_BUFFER, "image.jpg"],
+    ["image.webp", PNG_BUFFER, "image.png"],
+    ["image.JPEG", JPEG_BUFFER, "image.JPEG"],
+    ["image.JPG", JPEG_BUFFER, "image.JPG"],
+    ["image.PNG", PNG_BUFFER, "image.PNG"],
+    ["image.WEBP", WEBP_BUFFER, "image.WEBP"],
+    ["image.data", JPEG_BUFFER, "image.data.jpg"],
+  ] as const)("adjusts or preserves %s according to the bytes", async (out, bytes, target) => {
+    stubFetch(() => imagesResponse(bytes.toString("base64")))
+    await Bun.write(path.join(dir, "session/ref.png"), PNG_BUFFER)
+    const harness = await createHarness(path.join(dir, "session"))
+
+    const result = await harness.execute({ ...args, out: path.join(dir, out) })
+
+    expect(result.out).toBe(path.join(dir, target))
+    expect(result.versioned).toBe(false)
+    expect(await readFile(path.join(dir, target))).toEqual(bytes)
+    expect(result.message.includes("was adjusted")).toBe(out !== target)
+  })
+
+  test("versions the format-adjusted target, distinguishing extension adjustment from collision", async () => {
+    stubFetch(() => imagesResponse(JPEG_BUFFER.toString("base64")))
+    const harness = await createHarness(dir)
+    // The requested path and both earlier JPEG targets belong to existing outputs.
+    for (const file of ["cat.png", "cat.jpg", "cat-v2.jpg"]) await Bun.write(path.join(dir, file), PNG_BUFFER)
+
+    const result = await harness.execute(args)
+
+    expect(result.out).toBe(path.join(dir, "cat-v3.jpg"))
+    expect(result.versioned).toBe(true)
+    expect(await readFile(path.join(dir, "cat-v3.jpg"))).toEqual(JPEG_BUFFER)
+    expect(result.message).toContain(`was adjusted to ${path.join(dir, "cat.jpg")} to match the JPEG bytes`)
+    expect(result.message).toContain(`The target path ${path.join(dir, "cat.jpg")} already existed`)
+    for (const file of ["cat.png", "cat.jpg", "cat-v2.jpg"]) {
+      expect(await readFile(path.join(dir, file))).toEqual(PNG_BUFFER)
+    }
+  })
+
+  test("an existing requested path alone does not cause collision versioning after extension adjustment", async () => {
+    stubFetch(() => imagesResponse(WEBP_BUFFER.toString("base64")))
+    const harness = await createHarness(dir)
+    await Bun.write(path.join(dir, "cat.png"), PNG_BUFFER)
+
+    const result = await harness.execute(args)
+
+    expect(result.out).toBe(path.join(dir, "cat.webp"))
+    expect(result.versioned).toBe(false)
+    expect(await readFile(path.join(dir, "cat.png"))).toEqual(PNG_BUFFER)
   })
 
   // Codex and the OpenAI Images API keep their original contract: an argument they do not define is dropped.
@@ -230,17 +312,37 @@ describe.each(matrix)("%s with the %s backend calling %s", (_host, _backend, _to
     expect(await listed()).toEqual([])
   })
 
-  test("saves nothing, not even the output directory, when the backend returns data that is not a PNG", async () => {
-    stubFetch(() => imagesResponse(Buffer.from("not an image").toString("base64")))
+  const zeroWidthPng = Buffer.from(PNG_BUFFER)
+  zeroWidthPng.writeUInt32BE(0, 16)
+  test.each([
+    ["unknown bytes", Buffer.from("https://secret.example/?sig=SECRET sk-secret"), "unsupported image type (unknown)"],
+    ["GIF", Buffer.from("GIF89a\x03\x00\x02\x00"), "unsupported image type (image/gif)"],
+    ["truncated PNG", PNG_BUFFER.subarray(0, 16), "malformed image/png"],
+    ["truncated JPEG", JPEG_BUFFER.subarray(0, 20), "malformed image/jpeg"],
+    ["truncated VP8X WebP", WEBP_BUFFER.subarray(0, 16), "malformed image/webp"],
+    ["truncated VP8 WebP", LOSSY_WEBP_BUFFER.subarray(0, 29), "malformed image/webp"],
+    ["truncated VP8X dimensions", WEBP_BUFFER.subarray(0, 29), "malformed image/webp"],
+    ["truncated VP8L WebP", Buffer.from("5249464608000000574542505650384c", "hex"), "malformed image/webp"],
+    ["truncated VP8L dimensions", LOSSLESS_WEBP_BUFFER.subarray(0, 24), "malformed image/webp"],
+    ["zero PNG width", zeroWidthPng, "malformed image/png"],
+  ])("saves nothing, not even the output directory, for %s", async (_name, bytes, diagnostic) => {
+    const fetchMock = stubFetch(() => imagesResponse(bytes.toString("base64")))
     const harness = await createHarness(dir)
 
-    const act = harness.execute({ ...args, out: "nested/cat.png" })
+    const error = (await harness.execute({ ...args, out: "nested/cat.png" }).catch((caught: Error) => caught)) as Error
 
-    await expect(act).rejects.toThrow("not a PNG")
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).toContain(diagnostic)
+    expect(error.message.length).toBeLessThan(400)
+    expect(error.message).not.toMatch(/secret|SECRET|https:/)
+    if (flavour.backend === "nano-gpt") {
+      expect(error.message).toContain("The image was not saved. NanoGPT may already have charged for this generation.")
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(await listed()).toEqual([])
   })
 
-  // Buffer.from decodes an array or a serialized Buffer, so the PNG bytes below would pass the PNG check if the
+  // Buffer.from decodes an array or a serialized Buffer, so the PNG bytes below would pass the format check if the
   // response boundary accepted them. An empty image would otherwise write a 0-byte file.
   const malformedResponses: Array<[string, unknown]> = [
     ["no image", { data: [] }],
@@ -270,6 +372,23 @@ const flavourRows = hosts.flatMap(([host, create]) =>
 )
 
 describe.each(flavourRows)("reference images through %s with the %s backend", (_host, _backend, create, flavour) => {
+  test.each([
+    ["JPEG", JPEG_BUFFER, "image/jpeg"],
+    ["WebP", WEBP_BUFFER, "image/webp"],
+  ] as const)("chains the returned %s output path into the next edit", async (_format, bytes, mime) => {
+    const fetchMock = stubFetch(() => imagesResponse(bytes.toString("base64")))
+    const generator = await create(dir, flavour, flavour.operations[0].tool)
+    const editor = await create(dir, flavour, flavour.editTool)
+    const generated = await generator.execute(flavour.operations[0].args)
+    if (typeof generated.out !== "string") throw new Error("the image tool returned no saved path")
+
+    await editor.execute({ ...flavour.editArgs([generated.out]), out: "edit.png" })
+
+    const body = JSON.parse(fetchMock.mock.calls[1][1].body as string)
+    expect(flavour.editReferences(body)).toEqual([`data:${mime};base64,${bytes.toString("base64")}`])
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
   test("are sent to the editing endpoint in the order given", async () => {
     const fetchMock = stubFetch()
     const second = Buffer.concat([PNG_BUFFER, Buffer.from("trailer")])

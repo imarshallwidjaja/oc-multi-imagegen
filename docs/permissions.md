@@ -73,4 +73,4 @@ The bundled `oc-multi-imagegen` skill is guidance, not an execution dependency. 
 
 The image permission covers the whole operation, including its output and reference paths. The plugin doesn't ask for separate file-access permissions: `out` and `images` accept absolute paths outside the project as well as relative paths.
 
-An agent that inspects the result also needs a suitable `read` rule. Scope it to the files you intend, such as generated `*.png` files. A billed API call asks for no additional billing approval beyond the image permission, so keep image-tool access consistent with the quota you want an agent or subagent to use.
+An agent that inspects the result also needs a suitable `read` rule. Scope it to the generated files you intend, allowing PNG, JPEG (`.jpg` and `.jpeg`) and WebP paths when those formats can be returned. The output extension can change to match the provider's bytes, so use the returned `out` path for reads and subsequent edits. A billed API call asks for no additional billing approval beyond the image permission, so keep image-tool access consistent with the quota you want an agent or subagent to use.

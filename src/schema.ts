@@ -22,7 +22,7 @@ export function createArgsShape(spec: ArgsSpec) {
     out: z
       .string()
       .describe(
-        "Destination path, relative to the project directory unless absolute. The file always contains the backend's PNG bytes; the extension does not select or convert the format. An existing file is kept and the new image gets a -vN suffix.",
+        "Destination path, relative to the project directory unless absolute. Saves native PNG, JPEG or WebP bytes without conversion, adjusting the extension to match. An existing target is kept and the new image gets a -vN suffix. Use the returned out path for subsequent reads or edits.",
       ),
     size: spec.size,
     images: z
@@ -55,8 +55,10 @@ export type GenerateArgs = z.infer<z.ZodObject<ArgsShape>>
 
 // Structured result of a saved image. It matches the metadata both hosts report.
 export const resultSchema = z.object({
-  out: z.string().describe("Absolute path of the saved PNG."),
-  versioned: z.boolean().describe("True when the requested path existed and a -vN suffix was used."),
+  out: z.string().describe("Actual absolute path of the saved PNG, JPEG or WebP. Use this path for reads or edits."),
+  versioned: z
+    .boolean()
+    .describe("True only when the format-adjusted target existed and a -vN collision suffix was used."),
 })
 
 // Hosts can call execute without validating arguments first, so execution parses them again with the complete schema.
