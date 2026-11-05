@@ -34,7 +34,7 @@ You don't need to name a tool or write a JSON request. Your agent turns the desc
 
 ![The same woodland post office and fox at rainy blue hour, with amber windows and wet reflections.](docs/images/forest-post-office-rain.webp)
 
-On Codex, adding `images` makes the same tool perform a reference-guided edit. Name what to keep and what to change; edits generate a new image, so they aren't pixel-exact patches.
+Your agent sends the reference and the change to `imageedit`. Name what to keep and what to change; edits generate a new image, so they aren't pixel-exact patches.
 
 ### 3. Pull out a reusable character
 
@@ -42,7 +42,7 @@ On Codex, adding `images` makes the same tool perform a reference-guided edit. N
 
 <img src="docs/images/fox-postmaster-icon.png" width="320" alt="The fox postmaster as an isolated, transparent character illustration, wearing a teal coat and carrying a letter and mail satchel.">
 
-For this Codex example, the agent supplies the reference and sets `background: "transparent"`. This PNG has real transparency, checked on light and dark backgrounds. Fine edges and the character itself can have soft alpha; use a vector tool when you need an editable vector icon.
+For this Codex example, the agent supplied the reference and set `background: "transparent"`. This PNG has real transparency, checked on light and dark backgrounds. Fine edges and the character itself can have soft alpha; use a vector tool when you need an editable vector icon.
 
 ## Get started
 
@@ -70,13 +70,15 @@ Then ask for an image. The [permissions guide](docs/permissions.md) covers agent
 
 ## Choose a backend
 
-| Backend | Use it with | Image tools |
-| --- | --- | --- |
-| **Codex** (default) | Your OpenCode ChatGPT sign-in | `imagegen` for generation and reference edits |
-| **OpenAI Images API** | An OpenAI image API key | `imagegen` with native pixel sizes and SVG or GIF output, and a live list of the key's models |
-| **NanoGPT** | A NanoGPT API key | Separate generation/editing tools and a choice of curated models |
+Every backend provides the same two image tools: `imagegen` creates a new image from a text prompt, and `imageedit` changes or combines existing images that you pass as references. The backend decides the sign-in, the controls each tool takes and how your agent can discover models.
 
-[Backend setup and model choices](docs/backends.md) explain authentication, controls, availability and [recorded NanoGPT workflow coverage](docs/backends.md#nanogpt-live-workflow-coverage). Generation uses the selected provider's account quota or API credit.
+| Backend | Use it with | Backend-specific controls | Model discovery |
+| --- | --- | --- | --- |
+| **Codex** (default) | Your OpenCode ChatGPT sign-in | Seven size presets | None: model and quality are sent as requested and can't be verified |
+| **OpenAI Images API** | An OpenAI image API key | Native pixel sizes, and SVG or GIF output from `imagegen` | `imagegen_models` lists the key's models live |
+| **NanoGPT** | A NanoGPT API key | A curated choice of models, each with its own controls | `imagegen_models` describes the curated models locally |
+
+[Backend setup and model choices](docs/backends.md) explain authentication, controls, availability and [recorded NanoGPT workflow coverage](docs/backends.md#nanogpt-live-workflow-coverage). Generation uses the selected provider's account quota or API credit. If you made Codex or OpenAI reference edits with `imagegen` in an earlier release, see [moving reference edits to imageedit](docs/tool-reference.md#moving-reference-edits-to-imageedit).
 
 ## Documentation
 

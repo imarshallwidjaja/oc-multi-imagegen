@@ -4,12 +4,13 @@ import os from "node:os"
 import path from "node:path"
 import { z } from "zod"
 import { readReferenceImages } from "../../src/input-image"
-import { openaiApiImagegen, openaiApiModels } from "../../src/openai-api"
+import { openaiApiImageedit, openaiApiImagegen, openaiApiModels } from "../../src/openai-api"
 import { lookUpOpenAiModels } from "../../src/openai-models"
 import type { ImageCredential } from "../../src/types"
 import { PNG_BUFFER } from "./fixtures"
 
 type GenerateArgs = z.output<typeof openaiApiImagegen.schema>
+type EditArgs = z.output<typeof openaiApiImageedit.schema>
 
 function imagesResponse(data: Array<{ b64_json: string }>): Response {
   return new Response(JSON.stringify({ created: 0, data }))
@@ -19,11 +20,19 @@ function generateArgs(overrides: Partial<GenerateArgs> = {}): GenerateArgs {
   return { prompt: "a cat", out: "cat.png", size: "1536x864", ...overrides }
 }
 
+function editArgs(overrides: Partial<EditArgs> = {}): EditArgs {
+  return { prompt: "a cat", out: "cat.png", size: "1536x864", images: ["ref.png"], ...overrides }
+}
+
 const signal = new AbortController().signal
 const key: ImageCredential = { type: "key", key: "sk-images" }
 
-function callApi(args: GenerateArgs, dataUrls: string[] = [], credential: ImageCredential = key) {
-  return openaiApiImagegen.generate(credential, args, dataUrls, signal)
+function callApi(args: GenerateArgs, credential: ImageCredential = key) {
+  return openaiApiImagegen.generate(credential, args, [], signal)
+}
+
+function callEdit(args: EditArgs, dataUrls: string[]) {
+  return openaiApiImageedit.generate(key, args, dataUrls, signal)
 }
 
 const originalFetch = globalThis.fetch
@@ -38,7 +47,7 @@ function stubImage(image = "BASE64IMAGE") {
 }
 
 describe("OpenAI Images API backend request", () => {
-  test("posts the documented generation body with the key as a bearer token", async () => {
+  test("imagegen posts the documented generation body with the key as a bearer token", async () => {
     const fetchMock = stubImage()
 
     const result = await callApi(generateArgs({ prompt: "a mountain lake" }))
@@ -61,11 +70,11 @@ describe("OpenAI Images API backend request", () => {
     })
   })
 
-  test("posts the same body with the references as data URLs to the edits endpoint", async () => {
+  test("imageedit posts the same body with the references as data URLs to the edits endpoint", async () => {
     const fetchMock = stubImage()
     const dataUrls = ["data:image/png;base64,AAA", "data:image/webp;base64,BBB"]
 
-    await callApi(generateArgs({ background: "transparent" }), dataUrls)
+    await callEdit(editArgs({ background: "transparent" }), dataUrls)
 
     const [url, init] = fetchMock.mock.calls[0]
     expect(url).toBe("https://api.openai.com/v1/images/edits")
@@ -124,6 +133,19 @@ describe("OpenAI Images API backend request", () => {
     })
   })
 
+  test.each([
+    ["jpeg", {}, { output_format: "jpeg", background: "opaque" }],
+    ["webp", { background: "transparent" }, { output_format: "webp", background: "transparent" }],
+  ] as const)("imageedit sends output_format %s to the edits endpoint", async (format, extra, expected) => {
+    const fetchMock = stubImage()
+
+    await callEdit(editArgs({ output_format: format, ...extra }), ["data:image/png;base64,AAA"])
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe("https://api.openai.com/v1/images/edits")
+    expect(JSON.parse(init.body as string)).toMatchObject(expected)
+  })
+
   test("never sends the legacy response_format or an organization header", async () => {
     const fetchMock = stubImage()
 
@@ -137,7 +159,7 @@ describe("OpenAI Images API backend request", () => {
   test("refuses a credential of another kind before any request", async () => {
     const fetchMock = stubImage()
 
-    await expect(callApi(generateArgs(), [], { type: "oauth", access: "tok" })).rejects.toThrow(
+    await expect(callApi(generateArgs(), { type: "oauth", access: "tok" })).rejects.toThrow(
       "The backend needs a key credential but received oauth.",
     )
 
@@ -149,7 +171,7 @@ describe("OpenAI Images API backend request", () => {
     async (bad) => {
       const fetchMock = stubImage()
 
-      const error = await callApi(generateArgs(), [], { type: "key", key: bad }).catch((caught: Error) => caught)
+      const error = await callApi(generateArgs(), { type: "key", key: bad }).catch((caught: Error) => caught)
 
       expect(error).toBeInstanceOf(Error)
       expect((error as Error).message).toBe(
@@ -212,23 +234,47 @@ describe("OpenAI Images API backend arguments", () => {
     expect(parse({ size: "16x16" }).success).toBe(true)
   })
 
-  test("takes up to sixteen reference images", () => {
-    const images = (count: number) => parse({ size: "1536x864", images: Array(count).fill("a.png") })
+  test("imageedit takes one to sixteen reference images", () => {
+    const images = (count: number) =>
+      openaiApiImageedit.schema.safeParse({
+        prompt: "p",
+        out: "o.png",
+        size: "1536x864",
+        images: Array(count).fill("a.png"),
+      })
+    expect(images(1).success).toBe(true)
     expect(images(16).success).toBe(true)
+    expect(images(0).success).toBe(false)
     expect(images(17).success).toBe(false)
   })
 
   test("documents its defaults and limits without Codex caveats", () => {
-    const schema = z.toJSONSchema(openaiApiImagegen.schema, { io: "input" }) as {
+    const generate = z.toJSONSchema(openaiApiImagegen.schema, { io: "input" }) as {
       properties: Record<string, { description: string }>
     }
-    const text = JSON.stringify(schema) + openaiApiImagegen.description
+    const edit = z.toJSONSchema(openaiApiImageedit.schema, { io: "input" }) as typeof generate
+    const text = JSON.stringify([generate, edit]) + openaiApiImagegen.description + openaiApiImageedit.description
 
-    expect(schema.properties.model.description).toContain("gpt-image-2.6-sunburst")
-    expect(schema.properties.quality.description).toContain("auto")
-    expect(schema.properties.images.description).toContain("up to 16")
-    expect(schema.properties.images.description).toContain("PNG, JPEG or WebP")
+    for (const schema of [generate, edit]) {
+      expect(schema.properties.model.description).toContain("gpt-image-2.6-sunburst")
+      expect(schema.properties.quality.description).toContain("auto")
+    }
+    expect(edit.properties.images.description).toContain("1 to 16")
+    expect(edit.properties.images.description).toContain("PNG, JPEG or WebP")
     expect(text).not.toMatch(/Codex|unverified|1254x1254|in the prompt sentence/)
+  })
+
+  test("imageedit describes raster output only, and the generation-only formats as imagegen's", () => {
+    const edit = z.toJSONSchema(openaiApiImageedit.schema, { io: "input" }) as {
+      properties: Record<string, { anyOf?: Array<{ enum?: string[] }>; description: string }>
+    }
+
+    expect(Object.keys(edit.properties)).not.toContain("frame_count")
+    expect(Object.keys(edit.properties)).not.toContain("svg_model")
+    expect(edit.properties.output_format.anyOf?.[0].enum).toEqual(["png", "jpeg", "webp"])
+    expect(edit.properties.out.description).toContain("PNG, JPEG or WebP bytes")
+    expect(openaiApiImageedit.description).toContain("GIF and SVG come only from imagegen")
+    expect(openaiApiImageedit.outputFormats).toEqual(["png", "jpeg", "webp"])
   })
 
   test("accepts every documented output format and the GIF limits at both ends", () => {
@@ -242,8 +288,6 @@ describe("OpenAI Images API backend arguments", () => {
       expect(parse({ size: "1024x1024", output_format: "gif", frame_count, frame_duration_ms }).success).toBe(true)
     }
     expect(parse({ size: "1024x1024", output_format: "webp", background: "transparent" }).success).toBe(true)
-    // An empty reference list is not an edit, so it does not conflict with a generation-only format.
-    expect(parse({ size: "1024x1024", output_format: "svg", images: [] }).success).toBe(true)
   })
 
   test("documents the discovery step, the output controls and the GIF limits as tool limits", () => {
@@ -252,6 +296,7 @@ describe("OpenAI Images API backend arguments", () => {
     }
 
     expect(openaiApiImagegen.description).toContain("Call imagegen_models first")
+    expect(openaiApiImageedit.description).toContain("Call imagegen_models first")
     expect(openaiApiImagegen.description).toContain("never a guessed one")
     expect(schema.properties.out.description).toContain("PNG, JPEG, WebP, GIF or SVG")
     expect(schema.properties.frame_count.description).toContain("not a proven provider maximum")
@@ -262,6 +307,7 @@ describe("OpenAI Images API backend arguments", () => {
 
   test("adds no note to the result text", () => {
     expect(openaiApiImagegen).not.toHaveProperty("resultNote")
+    expect(openaiApiImageedit).not.toHaveProperty("resultNote")
   })
 })
 
@@ -310,22 +356,22 @@ describe("OpenAI model lookup", () => {
     const lines = text.split("\n").filter((line) => line.startsWith("- "))
     expect(lines).toEqual([
       "- gpt-image-2.6-flare: created 2027-01-15, owned by system",
-      "- gpt-image-2.6-sunburst (imagegen default): created 2027-01-15, owned by system",
+      "- gpt-image-2.6-sunburst (default): created 2027-01-15, owned by system",
       "- chatgpt-image-latest: created 2026-09-21, owned by system",
       "- gpt-image-1: created 2025-02-19, owned by system, shutdown date 2026-10-23",
     ])
     expect(text).toContain("(gpt-image-* and chatgpt-image-* IDs): 4 of 5 model IDs.")
     expect(text).toContain("not proof that it supports SVG, GIF, a size or any other feature")
-    expect(text).toContain("imagegen sends any model ID unchanged, listed or not")
+    expect(text).toContain("imagegen and imageedit send any model ID unchanged, listed or not")
     expect(text).not.toContain("gpt-4.1")
     expect(text).not.toContain("is not in this list")
   })
 
-  test("says when the default is not listed, and that imagegen still sends it", async () => {
+  test("says when the default is not listed, and that both image tools still send it", async () => {
     stubModels({ data: listed.filter((model) => model.id !== "gpt-image-2.6-sunburst") })
 
     expect(await ask()).toContain(
-      "The imagegen default gpt-image-2.6-sunburst is not in this list; imagegen still sends it when model is omitted.",
+      "The default gpt-image-2.6-sunburst is not in this list; imagegen and imageedit still send it when model is omitted.",
     )
   })
 
@@ -348,7 +394,7 @@ describe("OpenAI model lookup", () => {
     expect(found).toContain("gpt-image-2.6-flare is listed by GET /v1/models for this key.")
     expect(found).toContain("not proof that it supports SVG")
     expect(missing).toContain("gpt-image-9 is not listed by GET /v1/models for this key (5 model IDs listed).")
-    expect(missing).toContain("- gpt-image-2.6-sunburst (imagegen default)")
+    expect(missing).toContain("- gpt-image-2.6-sunburst (default)")
   })
 
   test("names how many entries a long list leaves out instead of dropping them silently", async () => {
@@ -445,7 +491,7 @@ describe("OpenAI Images API reference images", () => {
   ])("accepts %s", async (_name, mime, bytes) => {
     const where = await reference("ref", bytes)
 
-    expect(await readReferenceImages(["ref"], where, openaiApiImagegen.references(generateArgs()).rules)).toEqual([
+    expect(await readReferenceImages(["ref"], where, openaiApiImageedit.references(editArgs()).rules)).toEqual([
       `data:${mime};base64,${bytes.toString("base64")}`,
     ])
   })
@@ -454,7 +500,7 @@ describe("OpenAI Images API reference images", () => {
     const where = await reference("ref.gif", Buffer.from("GIF89a"))
 
     await expect(
-      readReferenceImages(["ref.gif"], where, openaiApiImagegen.references(generateArgs()).rules),
+      readReferenceImages(["ref.gif"], where, openaiApiImageedit.references(editArgs()).rules),
     ).rejects.toThrow(
       `unsupported reference image type image/gif: ${path.join(where, "ref.gif")}. Use image/png, image/jpeg, image/webp.`,
     )
@@ -465,14 +511,14 @@ describe("OpenAI Images API reference images", () => {
     const where = await reference("big.png", Buffer.concat([PNG_BUFFER, Buffer.alloc(15_728_640 - PNG_BUFFER.length)]))
 
     await expect(
-      readReferenceImages(["big.png"], where, openaiApiImagegen.references(generateArgs()).rules),
+      readReferenceImages(["big.png"], where, openaiApiImageedit.references(editArgs()).rules),
     ).rejects.toThrow("reference image is too large")
   })
 
   test("accepts a reference whose data URL is just under the documented length", async () => {
     const where = await reference("max.png", Buffer.concat([PNG_BUFFER, Buffer.alloc(15_728_610 - PNG_BUFFER.length)]))
 
-    const [dataUrl] = await readReferenceImages(["max.png"], where, openaiApiImagegen.references(generateArgs()).rules)
+    const [dataUrl] = await readReferenceImages(["max.png"], where, openaiApiImageedit.references(editArgs()).rules)
 
     expect(dataUrl.length).toBeLessThanOrEqual(20_971_520)
     expect(dataUrl.length).toBeGreaterThan(20_971_480)

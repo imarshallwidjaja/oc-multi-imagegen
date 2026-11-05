@@ -1,15 +1,17 @@
 ---
 name: "oc-multi-imagegen"
-description: "Use before any image generation or image edit with the imagegen or imageedit tool: choosing raster or code, labelling reference images, writing the prompt, correcting a result, keeping related images consistent, transparent backgrounds, and checking what came back."
+description: "Use before any image generation or image edit with the imagegen or imageedit tool: choosing raster or code, choosing between creating and editing, labelling reference images, writing the prompt, correcting a result, keeping related images consistent, transparent backgrounds, and checking what came back."
 ---
 
-# Image generation with imagegen
+# Image generation and editing
 
-The image tools follow reference pixels better than prose. Each call has three parts: references that carry look and geometry, a prompt that carries structure and facts, and a check of the file that came back. The tool descriptions list their arguments and limits. Where a backend registers separate tools for creating from text and for editing existing images, create with `imagegen` and edit with `imageedit`, and use the model information tool it offers (`imagegen_models`) before choosing a model instead of guessing one. Where that tool lists the account's models live, a listed model is available to the key, not proven to support a format or feature.
+The image tools follow reference pixels better than prose. Each call has three parts: references that carry look and geometry, a prompt that carries structure and facts, and a check of the file that came back. The tool descriptions list their arguments and limits.
+
+Every backend has the same two image tools. Create a new image from text with `imagegen`. Change, restyle or combine existing images with `imageedit`, which takes them as reference images. Whenever an existing image should guide the result, including a correction, a sibling in a consistent set or a rendered layout, the call is an `imageedit` call. Where the backend offers `imagegen_models`, use it before choosing a model instead of guessing one; where it lists the account's models live, a listed model is available to the key, not proven to support a format or feature.
 
 ## Pick the medium
 
-Icons, logos, charts, diagrams, and anything that must scale, be recoloured or be edited later belong in SVG or code, or in an existing icon set. Where the backend generates SVG, use it for a simple icon or logo that must scale, and ask for flat shapes and few colours; charts, diagrams and exact layouts still belong in code. Generate rasters for photos, illustrations, textures and visual concepts. For a short animated GIF, describe the subject, the motion and how the loop returns to its first frame. When a layout needs exact positions, spacing or small text, render it in code and pass the render as a reference.
+Icons, logos, charts, diagrams, and anything that must scale, be recoloured or be edited later belong in SVG or code, or in an existing icon set. Where the backend generates SVG, use it for a simple icon or logo that must scale, and ask for flat shapes and few colours; charts, diagrams and exact layouts still belong in code. Generate rasters for photos, illustrations, textures and visual concepts. For a short animated GIF, describe the subject, the motion and how the loop returns to its first frame. When a layout needs exact positions, spacing or small text, render it in code and pass the render to `imageedit` as a reference.
 
 ## Write the call
 
@@ -19,17 +21,21 @@ Icons, logos, charts, diagrams, and anything that must scale, be recoloured or b
 - Assign colour by role and name where colour must not appear; otherwise labels and states get colour-coded on their own.
 - Pick the size or aspect ratio that fits the use.
 
+## Chain results
+
+Each result reports the path it was actually saved to, which can differ from the requested one: the extension follows the returned format, and an existing file gets a `-vN` suffix. Read the file from that path, and when it is a PNG, JPEG or WebP, pass it as the next `imageedit` reference. A GIF or SVG result cannot be a reference; follow the GIF and SVG steps under "Correct" and "Keep related images consistent".
+
 ## Correct
 
-For a PNG, JPEG or WebP result, pass it back as a reference and write: "Reproduce Image 1 faithfully: same layout, scale, colours and text. Apply only these corrections: 1. ... 2. ..." Name the region and the exact new values. Batch every fix for an image into one round, because each regeneration can change things you did not mention. Compare the result with the previous version, not only against the requested fix.
+For a PNG, JPEG or WebP result, pass it to `imageedit` as Image 1 and write: "Reproduce Image 1 faithfully: same layout, scale, colours and text. Apply only these corrections: 1. ... 2. ..." Name the region and the exact new values. Batch every fix for an image into one round, because each regeneration can change things you did not mention. Compare the result with the previous version, not only against the requested fix.
 
-A GIF or SVG result cannot be a reference image. Correct it with a new generation in the format the operator asked for: reuse the previous prompt, describe what to keep from the result, and list each correction. Convert a result to another format only when the operator asks for that.
+A GIF or SVG result cannot be a reference image. Correct it with a new `imagegen` call in the format the operator asked for: reuse the previous prompt, describe what to keep from the result, and list each correction. Convert a result to another format only when the operator asks for that.
 
 A reference-guided edit regenerates the whole image. When a region must stay pixel-identical, or one region keeps failing, edit or composite locally and record that the image was patched.
 
 ## Keep related images consistent
 
-Approve one anchor image first, then pass it as the style reference for each sibling and label its role. When the anchor is a GIF or SVG, repeat its prompt's style description word for word in each sibling's prompt instead. Separate generations drift in layout and detail, so frames that must match each other, such as a storyboard or a before-and-after pair, may be better generated as one numbered grid and cut afterwards.
+Approve one anchor image first, then create each sibling with `imageedit`, passing the anchor as the style reference and labelling its role. When the anchor is a GIF or SVG, create each sibling with `imagegen` and repeat the anchor prompt's style description word for word instead. Separate generations drift in layout and detail, so frames that must match each other, such as a storyboard or a before-and-after pair, may be better generated as one numbered grid and cut afterwards.
 
 ## Exact text
 
@@ -37,7 +43,7 @@ Large headings usually render correctly; small text can pick up misspellings. Wh
 
 ## Transparency
 
-Set `background` to `transparent` for an isolated cut-out and ask for one subject with clear margin on every side. The returned alpha can be soft at the edges and across the subject, so process it when a hard cut-out or fully opaque subject is needed. Recheck the alpha after every correction round; do not assume an edit kept it.
+Where the tool has a `background` argument, set it to `transparent` for an isolated cut-out instead of asking for transparency in the prompt, and ask for one subject with clear margin on every side. The returned alpha can be soft at the edges and across the subject, so process it when a hard cut-out or fully opaque subject is needed. Recheck the alpha after every correction round; do not assume an edit kept it.
 
 ## Check and record
 

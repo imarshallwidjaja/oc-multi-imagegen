@@ -1,12 +1,20 @@
 import { z } from "zod"
-import { defineImageTool, describeImagegen, IMAGEGEN_TOOL } from "./imagegen"
+import { defineImageTool, describeEditTool, describeGenerationTool } from "./imagegen"
 import { postImagesRequest } from "./images-request"
 import { RASTER_FORMATS } from "./output-image"
-import { createArgsShape, type GenerateArgs } from "./schema"
+import {
+  type ArgsSpec,
+  editShape,
+  GENERATION_MOVED_ARGUMENTS,
+  generationShape,
+  IMAGEEDIT_TOOL,
+  IMAGEGEN_TOOL,
+  strictArgs,
+} from "./schema"
 import { appendSizeToPrompt, IMAGE_SIZES, type ImageSize, SIZE_CHOICES } from "./size"
 import { type Backend, expectCredential, type ImageCredential } from "./types"
 
-// Codex OAuth images endpoint URLs. Codex calls edits when reference images are given.
+// Codex OAuth images endpoint URLs: generations for imagegen, edits for imageedit.
 // https://github.com/openai/codex/blob/a4ebc509f4cdff88a8e58e175541970a30a2d385/codex-rs/model-provider-info/src/lib.rs#L80
 // https://github.com/openai/codex/blob/a4ebc509f4cdff88a8e58e175541970a30a2d385/codex-rs/codex-api/src/endpoint/images.rs#L62-L83
 const CODEX_IMAGES_GENERATIONS_ENDPOINT = "https://chatgpt.com/backend-api/codex/images/generations"
@@ -22,7 +30,7 @@ const CODEX_REQUEST_DEFAULTS = { model: "gpt-image-2", quality: "auto", size: "a
 // https://github.com/openai/codex/blob/a4ebc509f4cdff88a8e58e175541970a30a2d385/codex-rs/ext/image-generation/src/tool.rs#L59
 const MAX_REFERENCE_IMAGES = 5
 
-const argsShape = createArgsShape({
+const shared: ArgsSpec = {
   size: z
     .enum(Object.keys(IMAGE_SIZES) as [ImageSize, ...ImageSize[]], {
       error: (issue) =>
@@ -33,23 +41,28 @@ const argsShape = createArgsShape({
     .describe(
       "Requested width x height preset; choose it by aspect ratio. The tool asks for it in the prompt and does not resize the result; the result reports the actual pixel dimensions.",
     ),
-  maxImages: MAX_REFERENCE_IMAGES,
   savedFormats: RASTER_FORMATS,
   model: `Optional model name, sent to the Codex backend unchanged. Omit it to send ${CODEX_REQUEST_DEFAULTS.model}. Whether the backend applies it is unverified in recorded runs and can change, so the result text lists it as requested, not verified.`,
   quality: `Optional quality value, sent to the Codex backend unchanged. Omit it to send ${CODEX_REQUEST_DEFAULTS.quality}. Whether the backend applies it is unverified in recorded runs and can change, so the result text lists it as requested, not verified.`,
-})
+}
 
-async function generate(
+const generateSchema = strictArgs(IMAGEGEN_TOOL, generationShape(shared), GENERATION_MOVED_ARGUMENTS)
+const editSchema = strictArgs(IMAGEEDIT_TOOL, editShape({ ...shared, maxImages: MAX_REFERENCE_IMAGES }))
+
+export type CodexArgs = z.output<typeof generateSchema>
+
+// One request to the endpoint of the invoked tool. `extra` holds the fields only that tool sends.
+async function request(
+  url: string,
   credential: ImageCredential,
-  args: GenerateArgs,
-  inputImageDataUrls: string[],
+  args: CodexArgs,
   signal: AbortSignal,
+  extra: Record<string, unknown> = {},
 ): Promise<string> {
   const auth = expectCredential(credential, "oauth")
-  const isEdit = inputImageDataUrls.length > 0
   return postImagesRequest({
     label: "codex",
-    url: isEdit ? CODEX_IMAGES_EDITS_ENDPOINT : CODEX_IMAGES_GENERATIONS_ENDPOINT,
+    url,
     headers: {
       Authorization: `Bearer ${auth.access}`,
       ...(auth.accountId ? { "ChatGPT-Account-Id": auth.accountId } : {}),
@@ -61,34 +74,56 @@ async function generate(
       ...(args.model ? { model: args.model } : {}),
       ...(args.quality ? { quality: args.quality } : {}),
       background: args.background ?? "opaque",
-      ...(isEdit ? { images: inputImageDataUrls.map((dataUrl) => ({ image_url: dataUrl })) } : {}),
+      ...extra,
     },
     signal,
     secret: auth.access,
   })
 }
 
+function resultNote(args: CodexArgs) {
+  const requested = [args.model && `model ${args.model}`, args.quality && `quality ${args.quality}`].filter(Boolean)
+  if (requested.length === 0) return undefined
+  return `Requested ${requested.join(" and ")}; the Codex response does not report which settings it applied, so they are unverified.`
+}
+
+const SUBJECT = "the ChatGPT Codex image backend"
+const REQUIRES = "Requires OpenCode ChatGPT OAuth authentication."
+const CONTROLS =
+  "Optional model and quality are sent unchanged, but whether this backend applies them is unverified and can change; when you set either, the result text separates what was requested from what is verified. There are no image-count or output-format controls."
+
 export const codexImagegen = {
   name: IMAGEGEN_TOOL,
-  description: describeImagegen({
-    subject: "the ChatGPT Codex image backend",
-    requires:
-      "Requires OpenCode ChatGPT OAuth authentication. The prompt and any reference images are sent to the provider.",
-    controls:
-      "Optional model and quality are sent unchanged, but whether this backend applies them is unverified and can change; when you set either, the result text separates what was requested from what is verified. There are no image-count or output-format controls, and other arguments are not sent to the provider.",
+  description: describeGenerationTool({
+    subject: SUBJECT,
+    requires: `${REQUIRES} The prompt is sent to the provider.`,
+    controls: CONTROLS,
   }),
-  schema: z.object(argsShape),
-  references: (args: GenerateArgs) => ({ paths: args.images, rules: {} }),
-  generate,
-  resultNote(args: GenerateArgs) {
-    const requested = [args.model && `model ${args.model}`, args.quality && `quality ${args.quality}`].filter(Boolean)
-    if (requested.length === 0) return undefined
-    return `Requested ${requested.join(" and ")}; the Codex response does not report which settings it applied, so they are unverified.`
-  },
+  schema: generateSchema,
+  generate: (credential: ImageCredential, args: CodexArgs, _references: string[], signal: AbortSignal) =>
+    request(CODEX_IMAGES_GENERATIONS_ENDPOINT, credential, args, signal),
+  resultNote,
+}
+
+export const codexImageedit = {
+  name: IMAGEEDIT_TOOL,
+  description: describeEditTool({
+    subject: SUBJECT,
+    requires: `${REQUIRES} The prompt and reference images are sent to the provider.`,
+    references: `Required images: 1 to ${MAX_REFERENCE_IMAGES} local reference image paths.`,
+    controls: CONTROLS,
+  }),
+  schema: editSchema,
+  references: (args: z.output<typeof editSchema>) => ({ paths: args.images, rules: {} }),
+  generate: (credential: ImageCredential, args: CodexArgs, references: string[], signal: AbortSignal) =>
+    request(CODEX_IMAGES_EDITS_ENDPOINT, credential, args, signal, {
+      images: references.map((dataUrl) => ({ image_url: dataUrl })),
+    }),
+  resultNote,
 }
 
 export const codexBackend = {
   id: "codex",
   credential: { type: "oauth", provider: "openai", label: "OpenAI ChatGPT OAuth" },
-  tools: [defineImageTool(codexImagegen)],
+  tools: [defineImageTool(codexImagegen), defineImageTool(codexImageedit)],
 } satisfies Backend

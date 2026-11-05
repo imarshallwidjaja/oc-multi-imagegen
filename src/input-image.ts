@@ -25,13 +25,13 @@ async function readImageAsDataUrl(filePath: string, ctxDir: string, rules: Refer
   return dataUrl
 }
 
-// Read the optional reference image paths and encode them as data URLs, which the images edits endpoints accept as
+// Read the reference image paths and encode them as data URLs, which the images edits endpoints accept as
 // `images[].image_url`. Paths resolve relative to the OpenCode context directory unless absolute. The backend's rules
 // reject a reference it cannot take before any request is sent.
 export async function readReferenceImages(
-  paths: readonly string[] | null | undefined,
+  paths: readonly string[],
   ctxDir: string,
   rules: ReferenceRules = {},
 ): Promise<string[]> {
-  return Promise.all((paths ?? []).map((p) => readImageAsDataUrl(p, ctxDir, rules)))
+  return Promise.all(paths.map((p) => readImageAsDataUrl(p, ctxDir, rules)))
 }

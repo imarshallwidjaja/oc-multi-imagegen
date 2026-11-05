@@ -29,6 +29,8 @@ export type Operation = {
   failure: string
   // The message for a provider answer that holds no usable image.
   unusableResponse: string
+  // Whether the tool also saves GIF and SVG (true) or only PNG, JPEG and WebP (false).
+  savesGifAndSvg: boolean
 }
 
 export type Flavour = {
@@ -38,79 +40,127 @@ export type Flavour = {
   resource: string
   // The credential provider id it reads from the OpenCode credential store.
   provider: string
-  // The tools the shared tests call.
-  operations: Operation[]
-  // The call that edits the given reference images in the shared flow, and the endpoint it posts to.
-  editTool: string
-  editArgs: (images: string[]) => Record<string, unknown>
-  editsUrl: string
+  // The tools the shared tests call: imagegen, then imageedit.
+  operations: [generation: Operation, edit: Operation]
   // The reference data URLs of an editing request body, in order.
   editReferences: (body: Record<string, unknown>) => string[]
-  // Whether an argument the tool does not define is dropped (true) or rejected (false).
-  dropsUnknownArguments: boolean
-  // Whether the image tools also save GIF and SVG (true) or only PNG, JPEG and WebP (false).
-  savesGifAndSvg: boolean
   // For a key credential: the variable that overrides the saved key, and the saved key itself.
   key?: { variable: string; saved: string; label: string }
 }
 
-const legacyReferences = (body: Record<string, unknown>) =>
+const imagesReferences = (body: Record<string, unknown>) =>
   (body.images as Array<{ image_url: string }> | undefined)?.map((image) => image.image_url) ?? []
 
 // A size both Codex and the OpenAI Images API accept.
 export const SHARED_SIZE = "1536x1024"
-const LEGACY_ARGS = { prompt: "a cat", out: "cat.png", size: SHARED_SIZE }
-const LEGACY_INVALID: Operation["invalid"] = [
-  ["an unsupported background", { ...LEGACY_ARGS, background: "auto" }, "at background"],
-  ["a missing prompt", { out: "cat.png", size: SHARED_SIZE }, "at prompt"],
-  ["an empty model", { ...LEGACY_ARGS, model: "" }, "at model"],
-  ["a non-string quality", { ...LEGACY_ARGS, quality: 3 }, "at quality"],
-  ["a missing size", { prompt: "a cat", out: "cat.png" }, "Missing size"],
+const GENERATE_ARGS = { prompt: "a cat", out: "cat.png", size: SHARED_SIZE }
+const EDIT_ARGS = { ...GENERATE_ARGS, prompt: "make the cat orange", images: ["ref.png"] }
+
+const without = (args: Record<string, unknown>, key: string) =>
+  Object.fromEntries(Object.entries(args).filter(([name]) => name !== key))
+
+// What both image tools of Codex and the OpenAI Images API reject, given each tool's valid arguments.
+const sharedInvalid = (args: Record<string, unknown>, tool: string): Operation["invalid"] => [
+  ["an unsupported background", { ...args, background: "auto" }, "at background"],
+  ["a missing prompt", without(args, "prompt"), "at prompt"],
+  ["an empty model", { ...args, model: "" }, "at model"],
+  ["a non-string quality", { ...args, quality: 3 }, "at quality"],
+  ["a missing size", without(args, "size"), "Missing size"],
+  ["an unknown argument", { ...args, n: 4 }, `Unsupported argument: n. ${tool} accepts:`],
 ]
 
-const LEGACY_NULLS: Record<string, null> = { images: null, background: null, model: null, quality: null }
+// A generation call that passes references in any form is refused, so it never generates a different image.
+const GENERATION_INVALID: Operation["invalid"] = [
+  ...sharedInvalid(GENERATE_ARGS, "imagegen"),
+  ["reference images", { ...GENERATE_ARGS, images: ["ref.png"] }, "use imageedit"],
+  ["an empty reference list", { ...GENERATE_ARGS, images: [] }, "use imageedit"],
+  ["a null reference list", { ...GENERATE_ARGS, images: null }, "use imageedit"],
+]
 
-function legacyOperation(url: string, label: string): Operation {
+const editInvalid = (maxImages: number): Operation["invalid"] => [
+  ...sharedInvalid(EDIT_ARGS, "imageedit"),
+  ["no reference image", { ...EDIT_ARGS, images: [] }, "needs at least one reference image"],
+  ["a missing reference list", without(EDIT_ARGS, "images"), "Missing images"],
+  ["a null reference list", { ...EDIT_ARGS, images: null }, "Missing images"],
+  ["an empty reference path", { ...EDIT_ARGS, images: [""] }, "at images"],
+  [
+    "too many references",
+    { ...EDIT_ARGS, images: Array(maxImages + 1).fill("ref.png") },
+    `takes at most ${maxImages} reference images`,
+  ],
+]
+
+const NULLS: Record<string, null> = { background: null, model: null, quality: null }
+
+function imagesApiOperation(
+  tool: string,
+  url: string,
+  label: string,
+  args: Record<string, unknown>,
+  invalid: Operation["invalid"],
+): Operation {
   return {
-    tool: "imagegen",
+    tool,
     url,
-    args: LEGACY_ARGS,
-    invalid: LEGACY_INVALID,
-    nulls: LEGACY_NULLS,
+    args,
+    invalid,
+    nulls: NULLS,
     nullBody: { background: "opaque" },
     absentWhenNull: [],
     failure: `${label} images request failed: 500 upstream boom`,
     unusableResponse: `no image returned by ${label} images endpoint`,
+    savesGifAndSvg: false,
   }
 }
 
-// The OpenAI Images API adds output controls whose combinations are checked before permission or any request.
-const openaiOperation: Operation = {
-  ...legacyOperation("https://api.openai.com/v1/images/generations", "openai-api"),
-  invalid: [
-    ...LEGACY_INVALID,
-    ["an unknown output format", { ...LEGACY_ARGS, output_format: "bmp" }, "at output_format"],
-    ["GIF output with reference images", { ...LEGACY_ARGS, output_format: "gif", images: ["ref.png"] }, "at images"],
-    ["SVG output with reference images", { ...LEGACY_ARGS, output_format: "svg", images: ["ref.png"] }, "at images"],
-    ["frame_count without GIF output", { ...LEGACY_ARGS, frame_count: 4 }, "at frame_count"],
-    ["frame_count above the tool limit", { ...LEGACY_ARGS, output_format: "gif", frame_count: 17 }, "at frame_count"],
-    ["a fractional frame_count", { ...LEGACY_ARGS, output_format: "gif", frame_count: 2.5 }, "at frame_count"],
+// The OpenAI Images API adds output controls whose combinations are checked before permission or any request. GIF and
+// SVG come only from generation, so imageedit refuses their format and controls.
+const OPENAI_NULLS = { ...NULLS, output_format: null }
+const openaiGeneration: Operation = {
+  ...imagesApiOperation("imagegen", "https://api.openai.com/v1/images/generations", "openai-api", GENERATE_ARGS, [
+    ...GENERATION_INVALID,
+    ["an unknown output format", { ...GENERATE_ARGS, output_format: "bmp" }, "at output_format"],
+    ["frame_count without GIF output", { ...GENERATE_ARGS, frame_count: 4 }, "at frame_count"],
+    ["frame_count above the tool limit", { ...GENERATE_ARGS, output_format: "gif", frame_count: 17 }, "at frame_count"],
+    ["a fractional frame_count", { ...GENERATE_ARGS, output_format: "gif", frame_count: 2.5 }, "at frame_count"],
     [
       "frame_duration_ms below the tool limit",
-      { ...LEGACY_ARGS, output_format: "gif", frame_duration_ms: 10 },
+      { ...GENERATE_ARGS, output_format: "gif", frame_duration_ms: 10 },
       "at frame_duration_ms",
     ],
     [
       "frame_duration_ms with SVG output",
-      { ...LEGACY_ARGS, output_format: "svg", frame_duration_ms: 100 },
+      { ...GENERATE_ARGS, output_format: "svg", frame_duration_ms: 100 },
       "at frame_duration_ms",
     ],
-    ["svg_model without SVG output", { ...LEGACY_ARGS, output_format: "gif", svg_model: "author" }, "at svg_model"],
-    ["an empty svg_model", { ...LEGACY_ARGS, output_format: "svg", svg_model: "" }, "at svg_model"],
-    ["a transparent JPEG", { ...LEGACY_ARGS, output_format: "jpeg", background: "transparent" }, "at background"],
-    ["a transparent GIF", { ...LEGACY_ARGS, output_format: "gif", background: "transparent" }, "at background"],
-  ],
-  nulls: { ...LEGACY_NULLS, output_format: null, frame_count: null, frame_duration_ms: null, svg_model: null },
+    ["svg_model without SVG output", { ...GENERATE_ARGS, output_format: "gif", svg_model: "author" }, "at svg_model"],
+    ["an empty svg_model", { ...GENERATE_ARGS, output_format: "svg", svg_model: "" }, "at svg_model"],
+    ["a transparent JPEG", { ...GENERATE_ARGS, output_format: "jpeg", background: "transparent" }, "at background"],
+    ["a transparent GIF", { ...GENERATE_ARGS, output_format: "gif", background: "transparent" }, "at background"],
+  ]),
+  nulls: { ...OPENAI_NULLS, frame_count: null, frame_duration_ms: null, svg_model: null },
+  nullBody: { background: "opaque", output_format: "png" },
+  absentWhenNull: ["frame_count", "frame_duration_ms", "svg"],
+  savesGifAndSvg: true,
+}
+
+const GENERATION_ONLY = "GIF and SVG output come only from imagegen"
+const openaiEdit: Operation = {
+  ...imagesApiOperation("imageedit", "https://api.openai.com/v1/images/edits", "openai-api", EDIT_ARGS, [
+    ...editInvalid(16),
+    ["GIF output", { ...EDIT_ARGS, output_format: "gif" }, `output_format gif is generation-only`],
+    ["SVG output", { ...EDIT_ARGS, output_format: "svg" }, `output_format svg is generation-only`],
+    ["an unknown output format", { ...EDIT_ARGS, output_format: "bmp" }, "at output_format"],
+    ["frame_count", { ...EDIT_ARGS, frame_count: 4 }, `Unsupported argument: frame_count. ${GENERATION_ONLY}`],
+    [
+      "frame_duration_ms",
+      { ...EDIT_ARGS, frame_duration_ms: 150 },
+      `Unsupported argument: frame_duration_ms. ${GENERATION_ONLY}`,
+    ],
+    ["svg_model", { ...EDIT_ARGS, svg_model: "author" }, `Unsupported argument: svg_model. ${GENERATION_ONLY}`],
+    ["a transparent JPEG", { ...EDIT_ARGS, output_format: "jpeg", background: "transparent" }, "at background"],
+  ]),
+  nulls: OPENAI_NULLS,
   nullBody: { background: "opaque", output_format: "png" },
   absentWhenNull: ["frame_count", "frame_duration_ms", "svg"],
 }
@@ -135,26 +185,31 @@ export const FLAVOURS: Flavour[] = [
     authorization: "Bearer tok",
     resource: "codex",
     provider: "openai",
-    operations: [legacyOperation("https://chatgpt.com/backend-api/codex/images/generations", "codex")],
-    editTool: "imagegen",
-    editArgs: (images) => ({ ...LEGACY_ARGS, images }),
-    editsUrl: "https://chatgpt.com/backend-api/codex/images/edits",
-    editReferences: legacyReferences,
-    dropsUnknownArguments: true,
-    savesGifAndSvg: false,
+    operations: [
+      imagesApiOperation(
+        "imagegen",
+        "https://chatgpt.com/backend-api/codex/images/generations",
+        "codex",
+        GENERATE_ARGS,
+        GENERATION_INVALID,
+      ),
+      imagesApiOperation(
+        "imageedit",
+        "https://chatgpt.com/backend-api/codex/images/edits",
+        "codex",
+        EDIT_ARGS,
+        editInvalid(5),
+      ),
+    ],
+    editReferences: imagesReferences,
   },
   {
     backend: "openai-api",
     authorization: "Bearer sk-images",
     resource: "openai-api",
     provider: "openai-images",
-    operations: [openaiOperation],
-    editTool: "imagegen",
-    editArgs: (images) => ({ ...LEGACY_ARGS, images }),
-    editsUrl: "https://api.openai.com/v1/images/edits",
-    editReferences: legacyReferences,
-    dropsUnknownArguments: true,
-    savesGifAndSvg: true,
+    operations: [openaiGeneration, openaiEdit],
+    editReferences: imagesReferences,
     key: { variable: "OC_MULTI_IMAGEGEN_OPENAI_API_KEY", saved: "sk-images", label: "OpenAI Images API" },
   },
   {
@@ -181,6 +236,7 @@ export const FLAVOURS: Flavour[] = [
         absentWhenNull: NANO_ABSENT,
         failure: "NanoGPT imagegen (nano-banana-pro) request failed: HTTP 500: upstream boom.",
         unusableResponse: NANO_UNUSABLE,
+        savesGifAndSvg: false,
       },
       {
         tool: "imageedit",
@@ -199,14 +255,10 @@ export const FLAVOURS: Flavour[] = [
         absentWhenNull: NANO_ABSENT,
         failure: "NanoGPT imageedit (nano-banana-pro-edit) request failed: HTTP 500: upstream boom.",
         unusableResponse: NANO_UNUSABLE,
+        savesGifAndSvg: false,
       },
     ],
-    editTool: "imageedit",
-    editArgs: (images) => ({ ...NANO_EDIT_ARGS, images }),
-    editsUrl: NANO_URL,
     editReferences: nanoReferences,
-    dropsUnknownArguments: false,
-    savesGifAndSvg: false,
     key: { variable: "OC_MULTI_IMAGEGEN_NANOGPT_API_KEY", saved: "sk-nano", label: "NanoGPT API" },
   },
 ]

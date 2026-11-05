@@ -2,29 +2,48 @@
 
 [README](../README.md) · [Examples](examples.md) · [Backends](backends.md) · [Permissions](permissions.md)
 
-The active backend owns its tool schemas. Codex and the OpenAI Images API expose `imagegen` for both generation and reference edits. The OpenAI Images API also exposes `imagegen_models`, which lists the key's models from OpenAI on each call. NanoGPT exposes `imagegen`, `imageedit` and local model information through `imagegen_models`.
+Every backend registers the same two image tools with the same roles:
+
+- `imagegen` creates a new image from a text prompt. It takes no reference images.
+- `imageedit` changes, restyles or combines existing images. It requires a nonempty `images` list of local reference files.
+
+Choose the tool by what the call starts from, not by backend. Each result reports the path it was actually saved to; pass that `out` path to the next `imageedit` call. The active backend decides each tool's controls, defaults and limits, described below. Where it offers `imagegen_models`, an agent uses it to choose a model: the OpenAI Images API lists the key's models live, and NanoGPT describes its curated models from a table in the plugin. Codex offers no model discovery.
+
+Each image tool rejects an argument it doesn't define before permission is requested, rather than dropping it. An `images` argument passed to `imagegen`, even an empty or `null` one, fails with a message that points to `imageedit`, so a call that names references never generates an image without them.
+
+## Moving reference edits to imageedit
+
+Earlier releases ran Codex and OpenAI Images API reference edits through `imagegen` with an `images` argument, such as:
+
+```json
+{ "prompt": "Make the sky stormy", "out": "storm.png", "size": "1672x941", "images": ["scene.png"] }
+```
+
+That `imagegen` call now fails before permission is requested. Send the same arguments to `imageedit` instead.
+
+There is no alias. A permission configuration that allows only `imagegen` also needs `imageedit`; see [permissions](permissions.md). On the OpenAI Images API, GIF and SVG output stay with `imagegen`.
 
 ## Codex and OpenAI arguments
 
-| Argument | Behavior |
-| --- | --- |
-| `prompt` | Description of a new image, or the change to make when references are supplied. |
-| `out` | Destination path, relative to the calling session's project directory unless absolute. |
-| `size` | Required. A Codex preset or native OpenAI `WIDTHxHEIGHT`, as described below. |
-| `images` | Optional local reference paths, resolved like `out`. Up to five on Codex or 16 on the OpenAI Images API. |
-| `background` | Optional `opaque` or `transparent`; defaults to `opaque`. On the OpenAI Images API, `transparent` needs PNG or WebP output. |
-| `model`, `quality` | Optional strings passed through. [Backend defaults and confidence](backends.md#codex) differ. |
-| `output_format` | OpenAI Images API only: `png` (default), `jpeg`, `webp`, `gif` or `svg`. See [OpenAI output formats](#openai-output-formats). |
-| `frame_count`, `frame_duration_ms` | OpenAI Images API only, with `output_format: "gif"`. |
-| `svg_model` | OpenAI Images API only, with `output_format: "svg"`. |
+| Argument | Tools | Behavior |
+| --- | --- | --- |
+| `prompt` | Both | For `imagegen`, a description of the new image. For `imageedit`, the change to make, with each reference's role. |
+| `out` | Both | Destination path, relative to the calling session's project directory unless absolute. |
+| `size` | Both | Required. A Codex preset or native OpenAI `WIDTHxHEIGHT`, as described below. |
+| `images` | `imageedit` | Required local reference paths, resolved like `out`. One to five on Codex, one to 16 on the OpenAI Images API. |
+| `background` | Both | Optional `opaque` or `transparent`; defaults to `opaque`. On the OpenAI Images API, `transparent` needs PNG or WebP output. |
+| `model`, `quality` | Both | Optional strings passed through. [Backend defaults and confidence](backends.md#codex) differ. |
+| `output_format` | Both, OpenAI Images API only | `png` (default), `jpeg` or `webp`; `imagegen` also takes `gif` and `svg`. See [OpenAI output formats](#openai-output-formats). |
+| `frame_count`, `frame_duration_ms` | `imagegen`, OpenAI Images API only | With `output_format: "gif"`. |
+| `svg_model` | `imagegen`, OpenAI Images API only | With `output_format: "svg"`. |
 
-Other arguments, including `n`, are removed by plugin validation and aren't sent. There is no image-count argument, and Codex has no output-format argument. Each call saves one native image file: PNG, JPEG or WebP, or on the OpenAI Images API also GIF or SVG.
+There is no image-count argument, and Codex has no output-format argument. Each call saves one native image file: PNG, JPEG or WebP, or from the OpenAI Images API's `imagegen` also GIF or SVG. Unknown arguments, including `n`, are rejected with the list the tool accepts.
 
 ## OpenAI output formats
 
 `output_format` is sent on every OpenAI request, `png` unless set. With PNG, JPEG and WebP the background defaults to `opaque`, and `transparent` needs PNG or WebP.
 
-`gif` and `svg` come from the generations endpoint only, so a call that also passes reference `images` is rejected before permission is requested. Neither format sends a background unless one is set, and only `opaque` is accepted for them.
+`gif` and `svg` come from the generations endpoint only, so only `imagegen` accepts them. `imageedit` rejects either format, and the GIF and SVG controls, before permission is requested. Neither format sends a background unless one is set, and only `opaque` is accepted for them.
 
 | Format | Controls | What comes back |
 | --- | --- | --- |
@@ -37,7 +56,7 @@ Some accounts have SVG author selection enabled and must name the author in `svg
 
 ## OpenAI model discovery
 
-`imagegen_models` accepts no arguments, a `query` or a `model`. `model` can't be combined with `query`, and other arguments are rejected. Without arguments it lists the key's `gpt-image-*` and `chatgpt-image-*` IDs with their creation date, owner and any shutdown date, and marks the `imagegen` default. `query` searches every ID the key lists with words that must all appear. `model` checks one exact ID. [Model discovery](backends.md#model-discovery) covers permission, request and failure behavior.
+`imagegen_models` accepts no arguments, a `query` or a `model`. `model` can't be combined with `query`, and other arguments are rejected. Without arguments it lists the key's `gpt-image-*` and `chatgpt-image-*` IDs with their creation date, owner and any shutdown date, and marks the default model, which both image tools send when `model` is omitted. `query` searches every ID the key lists with words that must all appear. `model` checks one exact ID. [Model discovery](backends.md#model-discovery) covers permission, request and failure behavior.
 
 ## Sizes
 
@@ -69,9 +88,9 @@ NanoGPT takes `resolution` and, where the model lists it, `aspect_ratio`, rather
 
 ## Reference images
 
-Pass local files in `images` and name each role in the prompt, for example: "Image 1: character design. Image 2: setting and colour palette." Files are sent in the order given.
+Pass local files in `imageedit`'s `images` and name each role in the prompt, for example: "Image 1: character design. Image 2: setting and colour palette." Files are sent in the order given, and their contents are uploaded to the provider.
 
-On Codex and OpenAI, a nonempty reference list selects the image-editing endpoint. NanoGPT requires `imageedit` and an edit-model ID. The contents are uploaded to the provider.
+`imageedit` posts to the editing endpoint on Codex and the OpenAI Images API, and sends an edit-model ID with the references on NanoGPT. `imagegen` posts to the generation endpoint and sends no references.
 
 An edit generates a new image guided by the prompt and references. It doesn't guarantee unchanged pixels outside the requested area. Use local image editing or compositing when a region must remain identical.
 
@@ -93,7 +112,7 @@ The plugin doesn't inspect or modify alpha. Inspect the actual alpha and check o
 
 ## Output files
 
-The saved file contains the provider's native bytes, without conversion or resizing. Codex and NanoGPT save PNG, JPEG or WebP; the OpenAI Images API also saves GIF and SVG. Any other type, including GIF or SVG from Codex or NanoGPT, is refused. The plugin detects the format and reads its size before creating a directory or file:
+The saved file contains the provider's native bytes, without conversion or resizing. `imageedit` on every backend, and `imagegen` on Codex and NanoGPT, save PNG, JPEG or WebP; the OpenAI Images API's `imagegen` also saves GIF and SVG. Any other type, including GIF or SVG from any other tool, is refused. The plugin detects the format and reads its size before creating a directory or file:
 
 - PNG, JPEG and WebP: finite positive pixel dimensions from the image header.
 - GIF: the header's logical screen size, reported as the frame size. The frame count and the animation itself aren't checked.
@@ -101,11 +120,11 @@ The saved file contains the provider's native bytes, without conversion or resiz
 
 Unsupported types and unreadable or invalid sizes fail with a bounded diagnostic that includes the detected type or the SVG refusal reason, never the provider's content. Header inspection doesn't establish that every pixel can be decoded or that the file is free of corruption.
 
-The extension follows the detected bytes: `.png`, `.jpg`, `.webp`, `.gif` or `.svg`. An already matching extension is preserved, including `.jpeg` for JPEG and case variants. A mismatching suffix of a format the tool saves is replaced; a missing or other suffix gets the actual extension appended. For example, JPEG returned for `scene.png` is saved to `scene.jpg`, JPEG returned for `scene.asset` is saved to `scene.asset.jpg`, and on the OpenAI Images API an SVG returned for `logo.png` is saved to `logo.svg`. On Codex and NanoGPT a `.gif` or `.svg` suffix isn't one of their formats, so PNG returned for `scene.gif` is saved to `scene.gif.png`.
+The extension follows the detected bytes: `.png`, `.jpg`, `.webp`, `.gif` or `.svg`. An already matching extension is preserved, including `.jpeg` for JPEG and case variants. A mismatching suffix of a format the tool saves is replaced; a missing or other suffix gets the actual extension appended. For example, JPEG returned for `scene.png` is saved to `scene.jpg`, JPEG returned for `scene.asset` is saved to `scene.asset.jpg`, and from the OpenAI Images API's `imagegen` an SVG returned for `logo.png` is saved to `logo.svg`. For a tool that saves only PNG, JPEG or WebP, a `.gif` or `.svg` suffix isn't one of its formats, so PNG returned for `scene.gif` is saved to `scene.gif.png`.
 
 If that format-adjusted target exists, it is kept and the next available `-v2`, `-v3`, up to `-v999` suffix is chosen before the extension. This is best-effort collision avoidance, not an atomic operation. Give parallel calls distinct output paths.
 
-Both hosts return `out` and `versioned` metadata. OpenCode 2 also returns structured output with that shape alongside the text. `out` is the actual absolute saved path: use it for reads and as the next edit's `images` input, rather than assuming the requested path was used. A GIF or SVG can't be an OpenAI reference image. `versioned` is true only for a collision suffix, not an extension adjustment alone. The message reports the actual format and size (pixels, GIF frame size or SVG vector geometry) and explains extension adjustment and collision versioning separately.
+Both hosts return `out` and `versioned` metadata. OpenCode 2 also returns structured output with that shape alongside the text. `out` is the actual absolute saved path: use it for reads and as the next `imageedit` call's `images` input, rather than assuming the requested path was used. A GIF or SVG can't be a reference image. `versioned` is true only for a collision suffix, not an extension adjustment alone. The message reports the actual format and size (pixels, GIF frame size or SVG vector geometry) and explains extension adjustment and collision versioning separately.
 
 Relative `out` and reference paths follow the calling session's directory. On OpenCode 2 that can differ from the directory that loaded the plugin. Absolute paths are accepted, including outside the project; see [file access](permissions.md#file-access).
 
@@ -117,7 +136,7 @@ Relative `out` and reference paths follow the calling session's directory. On Op
 
 Qwen Image 3 Pro, Seedream's base ID, WAN 2.7 Image Pro and Muse use the same exact model ID for both tools. `imagegen` accepts text only; `imageedit` requires references even when its ID contains `text-to-image`. Seedream's additional `/edit` route is accepted only by `imageedit`. No suffix is synthesized or removed.
 
-The image tools accept a curated set of generation/edit IDs and reject unknown arguments, unsupported controls or values, wrong-operation models, excess references and documented prompt-length violations before contacting the provider. There are no count, format, streaming or generic provider-routing arguments. Omitted controls aren't sent.
+The image tools accept a curated set of generation/edit IDs and, like every backend's image tools, reject unknown arguments. They also reject unsupported controls or values, wrong-operation models, excess references and documented prompt-length violations before contacting the provider. There are no count, format, streaming or generic provider-routing arguments. Omitted controls aren't sent.
 
 Every call asks for one image. Where the model's documented controls permit it, the request asks for PNG; otherwise the output format is left to NanoGPT. Native PNG, JPEG and WebP responses can be saved. [The model table](backends.md#generation-and-editing-models) lists the supported families.
 
@@ -131,7 +150,7 @@ Provider HTTP errors include the tool, model, status, bounded error code and mes
 
 ## Validation, permissions and cancellation
 
-Arguments are validated before permission. Permission is requested before credentials, references or the provider are touched. Invalid reference files fail before the quota-consuming request.
+Arguments are validated before permission, on every backend and for both image tools. Permission is requested for the invoked tool's name before credentials, references or the provider are touched. Invalid reference files fail before the quota-consuming request.
 
 The OpenAI Images API's `imagegen_models` follows the same order without a session directory or files: arguments, then permission, then the key, then one model-list request.
 

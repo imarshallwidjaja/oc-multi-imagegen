@@ -108,7 +108,8 @@ describe("OpenCode 1 skill registration", () => {
   })
 })
 
-const LEGACY_ARGUMENTS = ["prompt", "out", "size", "images", "background", "model", "quality"]
+const GENERATE_ARGUMENTS = ["prompt", "out", "size", "background", "model", "quality"]
+const EDIT_ARGUMENTS = ["prompt", "out", "size", "images", "background", "model", "quality"]
 const NANO_ARGUMENTS = ["model", "prompt", "out", "resolution", "aspect_ratio", "quality", "background", "seed"]
 const keyFlavours = FLAVOURS.filter((flavour) => flavour.key)
 const operationRows = FLAVOURS.flatMap((flavour) =>
@@ -117,25 +118,27 @@ const operationRows = FLAVOURS.flatMap((flavour) =>
 const args = { prompt: "a cat", out: "cat.png", size: SHARED_SIZE }
 
 describe("OpenCode 1 adapter", () => {
-  test("registers one imagegen tool with the documented arguments for codex", async () => {
+  test("registers imagegen for text and imageedit with required references for codex", async () => {
     const hooks = await plugin.server({} as never)
 
-    expect(Object.keys(hooks.tool ?? {})).toEqual(["imagegen"])
-    expect(Object.keys((await loadTool(undefined, "codex")).args)).toEqual(LEGACY_ARGUMENTS)
+    expect(Object.keys(hooks.tool ?? {})).toEqual(["imagegen", "imageedit"])
+    expect(Object.keys((await loadTool(undefined, "codex")).args)).toEqual(GENERATE_ARGUMENTS)
+    expect(Object.keys((await loadTool(undefined, "codex", "imageedit")).args)).toEqual(EDIT_ARGUMENTS)
   })
 
-  test("registers imagegen with its output controls and the imagegen_models lookup for openai-api", async () => {
+  test("registers imagegen with its output controls, imageedit and the imagegen_models lookup for openai-api", async () => {
     selectBackendVariable("openai-api")
     const hooks = await plugin.server({} as never)
 
-    expect(Object.keys(hooks.tool ?? {})).toEqual(["imagegen", "imagegen_models"])
+    expect(Object.keys(hooks.tool ?? {})).toEqual(["imagegen", "imageedit", "imagegen_models"])
     expect(Object.keys(hooks.tool?.imagegen.args ?? {})).toEqual([
-      ...LEGACY_ARGUMENTS,
+      ...GENERATE_ARGUMENTS,
       "output_format",
       "frame_count",
       "frame_duration_ms",
       "svg_model",
     ])
+    expect(Object.keys(hooks.tool?.imageedit.args ?? {})).toEqual([...EDIT_ARGUMENTS, "output_format"])
     expect(Object.keys(hooks.tool?.imagegen_models.args ?? {})).toEqual(["query", "model"])
   })
 

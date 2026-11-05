@@ -1,12 +1,63 @@
 import { z } from "zod"
 import { listFormatNames, type OutputFormat } from "./output-image"
 
-// What a backend decides about the arguments: how size is chosen, how many references it takes, and the guidance
-// for the fields whose behavior depends on the provider.
+// The public tool names. Every backend creates a new image from text with IMAGEGEN_TOOL and changes or combines
+// existing images with IMAGEEDIT_TOOL; argument errors point from one to the other.
+export const IMAGEGEN_TOOL = "imagegen"
+export const IMAGEEDIT_TOOL = "imageedit"
+// The model information tool of a backend that offers one: a local table on NanoGPT, a live provider list on the
+// OpenAI Images API.
+export const MODELS_TOOL = "imagegen_models"
+
+export type Operation = "generate" | "edit"
+export const TOOL_OF: Record<Operation, string> = { generate: IMAGEGEN_TOOL, edit: IMAGEEDIT_TOOL }
+
+export const PROMPT_DESCRIPTION: Record<Operation, string> = {
+  generate: "Description of the image to generate. Put every visible string in quotes.",
+  edit: "The edit to make, in natural language. Name each reference image's role (Image 1, Image 2, in the order of images) and what to keep. Put every visible string in quotes.",
+}
+
+export const NO_REFERENCES = `${IMAGEEDIT_TOOL} needs at least one reference image. Use ${IMAGEGEN_TOOL} to create an image from text.`
+
+// The arguments of the generation tool that belong to the edit tool, with what to do instead. A generation tool
+// refuses them instead of dropping them, so a call with references never silently becomes a different image.
+export const GENERATION_MOVED_ARGUMENTS: Readonly<Record<string, string>> = {
+  images: `${IMAGEGEN_TOOL} creates a new image from text; use ${IMAGEEDIT_TOOL} to change or combine existing images.`,
+}
+
+export function outField(savedFormats: readonly OutputFormat[]) {
+  return z
+    .string()
+    .describe(
+      `Destination path, relative to the project directory unless absolute. Saves native ${listFormatNames(savedFormats)} bytes without conversion, adjusting the extension to match. An existing target is kept and the new image gets a -vN suffix. Use the returned out path for subsequent reads or edits.`,
+    )
+}
+
+// The error for the arguments a strict tool schema does not define. `moved` names, for an argument that belongs to
+// another tool, what to do instead; any other argument is answered with the list the tool accepts.
+function unrecognizedArguments(tool: string, accepted: readonly string[], moved: Readonly<Record<string, string>>) {
+  return (issue: z.core.$ZodRawIssue) => {
+    if (issue.code !== "unrecognized_keys") return undefined
+    const names = issue.keys.join(", ")
+    const advice = issue.keys.map((key) => moved[key]).find(Boolean) ?? `${tool} accepts: ${accepted.join(", ")}.`
+    return `Unsupported argument${issue.keys.length === 1 ? "" : "s"}: ${names}. ${advice}`
+  }
+}
+
+// Every image tool rejects arguments it does not define, so the host's own validation refuses them too, before the
+// tool runs.
+export function strictArgs<T extends z.core.$ZodLooseShape>(
+  tool: string,
+  shape: T,
+  moved: Readonly<Record<string, string>> = {},
+) {
+  return z.strictObject(shape, { error: unrecognizedArguments(tool, Object.keys(shape), moved) })
+}
+
+// What the Codex and OpenAI Images API backends decide about the arguments both their image tools share: how size is
+// chosen, the guidance for the fields whose behavior depends on the provider, and the formats the tool saves.
 export type ArgsSpec = {
   size: z.ZodType<string>
-  maxImages: number
-  imagesNote?: string
   model: string
   quality: string
   // The formats the tool saves, which `out` describes; the same list the tool passes to the save.
@@ -15,34 +66,10 @@ export type ArgsSpec = {
   background?: string
 }
 
-// The imagegen arguments of the Codex and OpenAI Images API backends. OpenCode 1 takes the raw shape, OpenCode 2
-// takes the object schema, and execution parses raw input with the same schema.
-export function createArgsShape(spec: ArgsSpec) {
+export type EditArgsSpec = ArgsSpec & { maxImages: number; imagesNote?: string }
+
+function controlFields(spec: ArgsSpec) {
   return {
-    prompt: z
-      .string()
-      .describe(
-        "Description of the image to generate, or of the edit to make when images are given. Put every visible string in quotes, and name each reference image's role when images are given.",
-      ),
-    out: z
-      .string()
-      .describe(
-        `Destination path, relative to the project directory unless absolute. Saves native ${listFormatNames(spec.savedFormats)} bytes without conversion, adjusting the extension to match. An existing target is kept and the new image gets a -vN suffix. Use the returned out path for subsequent reads or edits.`,
-      ),
-    size: spec.size,
-    images: z
-      .array(z.string())
-      .max(spec.maxImages)
-      .nullish()
-      .describe(
-        [
-          `Optional local reference image paths, up to ${spec.maxImages}, relative to the project directory unless absolute; they are sent in order, so call them Image 1, Image 2 in the prompt.`,
-          spec.imagesNote,
-          "Their contents are uploaded to the provider, and a nonempty list makes the call a generative edit: areas the prompt does not mention can still change, so pixel-exact edits belong in an image editor.",
-        ]
-          .filter(Boolean)
-          .join(" "),
-      ),
     background: z
       .enum(["opaque", "transparent"])
       .nullish()
@@ -55,9 +82,42 @@ export function createArgsShape(spec: ArgsSpec) {
   }
 }
 
-export type ArgsShape = ReturnType<typeof createArgsShape>
+// The imagegen arguments of the Codex and OpenAI Images API backends: text only. OpenCode 1 takes the raw shape,
+// OpenCode 2 takes the object schema, and execution parses raw input with the same schema.
+export function generationShape(spec: ArgsSpec) {
+  return {
+    prompt: z.string().describe(PROMPT_DESCRIPTION.generate),
+    out: outField(spec.savedFormats),
+    size: spec.size,
+    ...controlFields(spec),
+  }
+}
 
-export type GenerateArgs = z.infer<z.ZodObject<ArgsShape>>
+// The imageedit arguments of the Codex and OpenAI Images API backends: the generation arguments with a required,
+// nonempty list of reference images.
+export function editShape(spec: EditArgsSpec) {
+  return {
+    prompt: z.string().describe(PROMPT_DESCRIPTION.edit),
+    out: outField(spec.savedFormats),
+    size: spec.size,
+    images: z
+      .array(z.string().min(1), {
+        error: (issue) => (issue.input == null ? `Missing images. ${NO_REFERENCES}` : undefined),
+      })
+      .min(1, NO_REFERENCES)
+      .max(spec.maxImages, `${IMAGEEDIT_TOOL} takes at most ${spec.maxImages} reference images.`)
+      .describe(
+        [
+          `Required local reference image paths, 1 to ${spec.maxImages}, relative to the project directory unless absolute; they are sent in order, so call them Image 1, Image 2 in the prompt.`,
+          spec.imagesNote,
+          "Their contents are uploaded to the provider. The result is a generative edit: areas the prompt does not mention can still change, so pixel-exact edits belong in an image editor.",
+        ]
+          .filter(Boolean)
+          .join(" "),
+      ),
+    ...controlFields(spec),
+  }
+}
 
 // Structured result of a saved image. It matches the metadata both hosts report.
 export const resultSchema = z.object({

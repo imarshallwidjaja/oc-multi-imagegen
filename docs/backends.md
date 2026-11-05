@@ -2,13 +2,13 @@
 
 [README](../README.md) · [Getting started](getting-started.md) · [Tool reference](tool-reference.md)
 
-One backend is active per plugin load. The selected backend controls the registered tools, their arguments and their defaults.
+One backend is active per plugin load. Every backend registers the same two image tools: `imagegen` creates a new image from text, and `imageedit` changes or combines existing images passed as references. The selected backend decides the credential, each tool's arguments, defaults and limits, and whether a model discovery tool exists.
 
-| `OC_MULTI_IMAGEGEN_BACKEND` | Provider | Credential | Tools |
-| --- | --- | --- | --- |
-| Unset or `codex` | ChatGPT Codex image backend | OpenCode's ChatGPT sign-in for `openai` | `imagegen` |
-| `openai-api` | Official OpenAI Images API | `OC_MULTI_IMAGEGEN_OPENAI_API_KEY`, otherwise saved `openai-images` key | `imagegen`, `imagegen_models` |
-| `nano-gpt` | NanoGPT normalized image API | `OC_MULTI_IMAGEGEN_NANOGPT_API_KEY`, otherwise saved `nano-gpt-images` key | `imagegen`, `imageedit`, `imagegen_models` |
+| `OC_MULTI_IMAGEGEN_BACKEND` | Provider | Credential | Image tools | Model discovery |
+| --- | --- | --- | --- | --- |
+| Unset or `codex` | ChatGPT Codex image backend | OpenCode's ChatGPT sign-in for `openai` | `imagegen`, `imageedit` | None |
+| `openai-api` | Official OpenAI Images API | `OC_MULTI_IMAGEGEN_OPENAI_API_KEY`, otherwise saved `openai-images` key | `imagegen`, `imageedit` | `imagegen_models`, a live list of the key's models |
+| `nano-gpt` | NanoGPT normalized image API | `OC_MULTI_IMAGEGEN_NANOGPT_API_KEY`, otherwise saved `nano-gpt-images` key | `imagegen`, `imageedit` | `imagegen_models`, the plugin's curated model table |
 
 Changing the backend takes a server restart. A call can't select another backend, and a failure doesn't trigger a retry or fallback to another backend.
 
@@ -55,19 +55,21 @@ Codex uses OpenCode's ChatGPT sign-in. Access depends on your account and the av
 
 OpenCode 2 doesn't read `OPENCODE_AUTH_CONTENT` or `auth.json`, and the plugin doesn't refresh OAuth tokens. Neither image API key variable affects Codex.
 
-The default request names `gpt-image-2` with `quality: auto`. Model and quality overrides are sent as requested, but the Codex response doesn't identify the settings it applied. In a direct-request study on one ChatGPT Pro account on 2026-10-20, requests accepted nonexistent model names and didn't reliably honor requested quality tiers. Treat these controls as **requested, not verified**; a call using either override reports that distinction. See [sizes and output](tool-reference.md#sizes) for the similar distinction between requested and returned dimensions.
+`imagegen` posts to the Codex generations endpoint and `imageedit` to its edits endpoint, with up to five references. The default request names `gpt-image-2` with `quality: auto`. Model and quality overrides are sent as requested, but the Codex response doesn't identify the settings it applied. In a direct-request study on one ChatGPT Pro account on 2026-10-20, requests accepted nonexistent model names and didn't reliably honor requested quality tiers. Treat these controls as **requested, not verified**; a call using either override reports that distinction. See [sizes and output](tool-reference.md#sizes) for the similar distinction between requested and returned dimensions.
+
+Codex has no model discovery. The backend offers no authoritative list of the models it applies, so the plugin registers no `imagegen_models` for it, and a model name is a request, not a choice it can confirm.
 
 ## OpenAI Images API
 
-This backend uses a key separate from the `openai` chat provider. The plugin sends it only to OpenAI: to `/v1/images/generations` or `/v1/images/edits` when an image is requested, and to `/v1/models` when an agent calls `imagegen_models`. Loading the plugin doesn't check the key or make a network request.
+This backend uses a key separate from the `openai` chat provider. The plugin sends it only to OpenAI: to `/v1/images/generations` for `imagegen`, to `/v1/images/edits` for `imageedit`, and to `/v1/models` when an agent calls `imagegen_models`. Loading the plugin doesn't check the key or make a network request.
 
-The request defaults to model `gpt-image-2.6-sunburst`, quality `auto` and output format `png`. Any `model` or `quality` string is passed through; the API decides whether the model exists, the key can use it and the settings are supported. Image calls bill the key's account. HTTP errors include the status and response body, with the key removed.
+Both image tools default to model `gpt-image-2.6-sunburst`, quality `auto` and output format `png`. Any `model` or `quality` string is passed through; the API decides whether the model exists, the key can use it and the settings are supported. Image calls bill the key's account. HTTP errors include the status and response body, with the key removed.
 
-`imagegen` can also return JPEG, WebP, an animated GIF or a static SVG; [OpenAI output formats](tool-reference.md#openai-output-formats) describes the controls and what the plugin checks before saving.
+`imagegen` can also return JPEG, WebP, an animated GIF or a static SVG. `imageedit` returns PNG, JPEG or WebP, because the edits endpoint doesn't produce GIF or SVG. [OpenAI output formats](tool-reference.md#openai-output-formats) describes the controls and what the plugin checks before saving.
 
 ### Model discovery
 
-`imagegen_models` lists the image models the key can use at the time of the call. The tool descriptions ask agents to call it before choosing a model. Each call asks for the `imagegen_models` permission on the `openai-api` resource, resolves the key the same way as `imagegen`, and sends one `GET /v1/models` request. Nothing is fetched when the plugin loads, nothing is cached between calls, and a failed request is reported once without a retry or a fallback list. The call generates no image.
+`imagegen_models` lists the image models the key can use at the time of the call. The tool descriptions ask agents to call it before choosing a model. Each call asks for the `imagegen_models` permission on the `openai-api` resource, resolves the key the same way as the image tools, and sends one `GET /v1/models` request. Nothing is fetched when the plugin loads, nothing is cached between calls, and a failed request is reported once without a retry or a fallback list. The call generates no image.
 
 - Without arguments it lists every `gpt-image-*` and `chatgpt-image-*` ID, newest first, and marks the default. When the default isn't listed for the key, it says so.
 - `query` searches every listed ID, image models or not, with words that must all appear. Use it to find candidate IDs for `svg_model`.
@@ -75,9 +77,9 @@ The request defaults to model `gpt-image-2.6-sunburst`, quality `auto` and outpu
 
 A list longer than 200 entries names how many it leaves out and asks for a narrower query. A response that isn't a JSON object with a `data` list of models, each with a usable `id`, fails without quoting the body.
 
-Listing models needs the `api.model.read` scope: a restricted key needs the List models `Read` permission, and its owner needs a project role that grants it ([OpenAI RBAC guide](https://developers.openai.com/api/docs/guides/rbac)). Without it the API answers 403 "You have insufficient permissions for this operation. Missing scopes: api.model.read. ..." and `imagegen_models` reports that error. A key without the scope can still generate images, as one did in the 2026-11-05 run; without a model list, name the model in the request or let `imagegen` send the default.
+Listing models needs the `api.model.read` scope: a restricted key needs the List models `Read` permission, and its owner needs a project role that grants it ([OpenAI RBAC guide](https://developers.openai.com/api/docs/guides/rbac)). Without it the API answers 403 "You have insufficient permissions for this operation. Missing scopes: api.model.read. ..." and `imagegen_models` reports that error. A key without the scope can still generate images, as one did in the 2026-11-05 run; without a model list, name the model in the request or let the image tools send the default.
 
-`GET /v1/models` reports only each model's ID, creation date, owner and shutdown date. A listed model is not evidence that it supports SVG or GIF output, a size or another feature, and the list is not an allowlist: `imagegen` still sends any model ID unchanged, and the API decides.
+`GET /v1/models` reports only each model's ID, creation date, owner and shutdown date. A listed model is not evidence that it supports SVG or GIF output, a size or another feature, and the list is not an allowlist: both image tools still send any model ID unchanged, and the API decides.
 
 ### Key precedence
 
@@ -165,9 +167,9 @@ Local evidence is retained at `/tmp/opencode/nanogpt-both-live-20261102/live/rep
 | OpenCode 1 | 1.18.29 | 1.19.3: real-agent Codex and OpenAI API runs. Floor: plugin/skill load and OpenAI API sign-in registration only. |
 | OpenCode 2 | 2.0.32 | 2.0.32: real-agent Codex and OpenAI API runs. |
 
-The Codex container runs covered skill loading and image generation before backend selection existed. OpenAI API runs covered generation and a reference edit on each host, including environment-key precedence and, in an earlier run, saved keys. Intermediate or newer host versions aren't established by those runs. The [container runbook](https://github.com/imarshallwidjaja/oc-multi-imagegen/blob/main/docs/container-testing.md) retains the recorded evidence and source identities.
+The Codex container runs covered skill loading and image generation before backend selection existed. OpenAI API runs covered generation and a reference edit on each host, including environment-key precedence and, in an earlier run, saved keys. Intermediate or newer host versions aren't established by those runs. One recorded run, on OpenCode 1.19.3 and 2.0.32, exercised `imageedit` on Codex and the OpenAI Images API: the agent generated with `imagegen` and edited that result with `imageedit`, and every call completed. The earlier recorded reference edits on those backends predate `imageedit`: each was an `imagegen` call with `images`. The [container runbook](https://github.com/imarshallwidjaja/oc-multi-imagegen/blob/main/docs/container-testing.md) retains the recorded evidence and source identities.
 
-The README artwork is a separate live Codex example chain, not a new container compatibility run. NanoGPT's standalone live coverage is described above and does not establish container or OpenCode 2 parity. For the OpenAI Images API's `imagegen_models`, its `gpt-image-2.6-sunburst` default and its GIF and SVG output, container runs on OpenCode 1.19.3 and 2.0.32 on 2026-11-05 observed: with plugin source at commit `39869d3`, PNG generation and a reference edit with the default model completed, a four-frame GIF completed at 768x768 and was rejected at 1024x1024, and SVG without `svg_model` was rejected because the account requires an author; with plugin source at commit `36d2f01`, SVG with the operator-chosen author `svg_model: "gpt-6.1-sol"` completed on both hosts and saved a static SVG of paths, rects and a circle with a 1024x1024 viewBox. On every run `imagegen_models` returned 403 because the key lacked `api.model.read`. A successful model lookup is not yet observed live. Later commits changed only the SVG check, documentation and tests, and were not rerun live.
+The README artwork is a separate live Codex example chain, not a new container compatibility run. NanoGPT's standalone live coverage is described above and does not establish container or OpenCode 2 parity. For the OpenAI Images API's `imagegen_models`, its `gpt-image-2.6-sunburst` default and its GIF and SVG output, container runs on OpenCode 1.19.3 and 2.0.32 on 2026-11-05 observed: with plugin source at commit `39869d3`, PNG generation and a reference edit with the default model completed, a four-frame GIF completed at 768x768 and was rejected at 1024x1024, and SVG without `svg_model` was rejected because the account requires an author; with plugin source at commit `36d2f01`, SVG with the operator-chosen author `svg_model: "gpt-6.1-sol"` completed on both hosts and saved a static SVG of paths, rects and a circle with a 1024x1024 viewBox. On those runs `imagegen_models` returned 403 because the key lacked `api.model.read`. Between `36d2f01` and the integrated commit `9e9e93c`, only the SVG check, documentation and tests changed, and those commits were not run live. A later run with plugin source at commit `026e0e5` covered generation with `imagegen` and a reference edit with `imageedit`, not the GIF or SVG cases; in it every `imagegen_models` call completed and listed 11 of the key's 96 model IDs with `gpt-image-2.6-sunburst` as the default. Commits after `026e0e5`, which changed plugin source as well as documentation and tests, were not run live.
 
 ## Account access and data
 

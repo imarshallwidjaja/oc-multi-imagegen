@@ -178,28 +178,9 @@ describe.each(matrix)("%s with the %s backend calling %s", (_host, _backend, _to
     expect(await readFile(path.join(dir, "cat.png"))).toEqual(PNG_BUFFER)
   })
 
-  // Codex and the OpenAI Images API keep their original contract: an argument they do not define is dropped.
-  if (flavour.dropsUnknownArguments) {
-    test("drops arguments it does not define", async () => {
-      const fetchMock = stubFetch()
-      const harness = await createHarness(dir)
-
-      await harness.execute({
-        ...args,
-        n: 4,
-        moderation: "low",
-        ...(flavour.savesGifAndSvg ? {} : { output_format: "jpeg" }),
-      })
-
-      const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
-      expect(body.n).not.toBe(4)
-      expect(body).not.toHaveProperty("moderation")
-      if (!flavour.savesGifAndSvg) expect(body).not.toHaveProperty("output_format")
-    })
-  }
-
-  // The OpenAI Images API also saves GIF and SVG; the other backends refuse both like any other unsupported type.
-  if (flavour.savesGifAndSvg) {
+  // The OpenAI Images API's imagegen also saves GIF and SVG; every other image tool refuses both like any other
+  // unsupported type.
+  if (operation.savesGifAndSvg) {
     test.each([
       [
         "GIF",
@@ -303,7 +284,9 @@ describe.each(matrix)("%s with the %s backend calling %s", (_host, _backend, _to
 
     // The reference image does not exist: reading it first would fail with a different error. A tool that takes no
     // references has none to read.
-    const act = harness.execute(operation.tool === flavour.editTool ? { ...args, images: ["missing.png"] } : args)
+    const act = harness.execute(
+      operation.tool === flavour.operations[1].tool ? { ...args, images: ["missing.png"] } : args,
+    )
 
     await expect(act).rejects.toThrow("denied by the host")
     expect(fetchMock).not.toHaveBeenCalled()
@@ -379,7 +362,7 @@ describe.each(matrix)("%s with the %s backend calling %s", (_host, _backend, _to
 
   const zeroWidthPng = Buffer.from(PNG_BUFFER)
   zeroWidthPng.writeUInt32BE(0, 16)
-  const rasterOnly: Array<[string, Buffer, string]> = flavour.savesGifAndSvg
+  const rasterOnly: Array<[string, Buffer, string]> = operation.savesGifAndSvg
     ? []
     : [
         ["GIF", ANIMATED_GIF_BUFFER, "unsupported image type (image/gif)"],
@@ -396,7 +379,7 @@ describe.each(matrix)("%s with the %s backend calling %s", (_host, _backend, _to
   // covers the reasons themselves.
   const refusedSvg = (reason: string) => `the backend returned an SVG this plugin will not save: ${reason}`
   const svgBytes = (markup: string) => Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg"${markup}</svg>`)
-  const gifAndSvg: Array<[string, Buffer, string]> = flavour.savesGifAndSvg
+  const gifAndSvg: Array<[string, Buffer, string]> = operation.savesGifAndSvg
     ? [
         ["truncated GIF", ANIMATED_GIF_BUFFER.subarray(0, 8), "malformed image/gif"],
         ["zero GIF width", zeroWidthGif, "malformed image/gif"],
@@ -481,12 +464,13 @@ describe.each(flavourRows)("reference images through %s with the %s backend", (_
     ["WebP", WEBP_BUFFER, "image/webp"],
   ] as const)("chains the returned %s output path into the next edit", async (_format, bytes, mime) => {
     const fetchMock = stubFetch(() => imagesResponse(bytes.toString("base64")))
-    const generator = await create(dir, flavour, flavour.operations[0].tool)
-    const editor = await create(dir, flavour, flavour.editTool)
-    const generated = await generator.execute(flavour.operations[0].args)
+    const [generation, edit] = flavour.operations
+    const generator = await create(dir, flavour, generation.tool)
+    const editor = await create(dir, flavour, edit.tool)
+    const generated = await generator.execute(generation.args)
     if (typeof generated.out !== "string") throw new Error("the image tool returned no saved path")
 
-    await editor.execute({ ...flavour.editArgs([generated.out]), out: "edit.png" })
+    await editor.execute({ ...edit.args, images: [generated.out], out: "edit.png" })
 
     const body = JSON.parse(fetchMock.mock.calls[1][1].body as string)
     expect(flavour.editReferences(body)).toEqual([`data:${mime};base64,${bytes.toString("base64")}`])
@@ -498,11 +482,12 @@ describe.each(flavourRows)("reference images through %s with the %s backend", (_
     const second = Buffer.concat([PNG_BUFFER, Buffer.from("trailer")])
     await Bun.write(path.join(dir, "first.png"), PNG_BUFFER)
     await Bun.write(path.join(dir, "second.png"), second)
-    const harness = await create(dir, flavour, flavour.editTool)
+    const edit = flavour.operations[1]
+    const harness = await create(dir, flavour, edit.tool)
 
-    await harness.execute(flavour.editArgs(["first.png", "second.png"]))
+    await harness.execute({ ...edit.args, images: ["first.png", "second.png"] })
 
-    expect(fetchMock.mock.calls[0][0]).toBe(flavour.editsUrl)
+    expect(fetchMock.mock.calls[0][0]).toBe(edit.url)
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
     expect(flavour.editReferences(body)).toEqual([
       `data:image/png;base64,${PNG_BASE64}`,
@@ -628,7 +613,7 @@ describe.each(hosts)("the OpenAI model lookup through %s", (_host, create) => {
 
     const result = await harness.execute({})
 
-    expect(result.message).toContain("- gpt-image-2.6-sunburst (imagegen default)")
+    expect(result.message).toContain("- gpt-image-2.6-sunburst (default)")
     expect(result.out).toBeUndefined()
     expect(fetchMock).toHaveBeenCalledTimes(1)
     const [url, init] = fetchMock.mock.calls[0]

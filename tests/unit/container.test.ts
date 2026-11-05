@@ -779,6 +779,10 @@ describe("opencode-container.sh cases", () => {
     expect(runs[0]).toContain("size 1536x1024")
     expect(runs[1]).toContain("size 1536x1024")
     expect(runs[1]).toContain("smoke-generate.png")
+    // Plain-language requests: the agent chooses imagegen for the new image and imageedit for the edit.
+    for (const run of runs) {
+      expect(run.split("--model provider/model-under-test ")[1]).not.toMatch(/imagegen|imageedit|images argument/i)
+    }
     expect(readdirSync(path.join(sandbox, "logs")).sort()).toEqual([
       "v1-case-E.err",
       "v1-case-E.out",
@@ -893,6 +897,7 @@ describe("opencode-container.sh host configuration", () => {
     expect(configOf(sandbox, "v1").permission).toEqual({
       "*": "deny",
       imagegen: "allow",
+      imageedit: "allow",
       imagegen_models: "allow",
       skill: { "*": "deny", "oc-multi-imagegen": "allow" },
       read: { "*": "deny", ...Object.fromEntries(SAVED_EXTENSIONS.map((ext) => [`*.${ext}`, "allow"])) },
@@ -900,6 +905,7 @@ describe("opencode-container.sh host configuration", () => {
     expect(configOf(sandbox, "v2").permissions).toEqual([
       { action: "*", resource: "*", effect: "deny" },
       { action: "imagegen", resource: "*", effect: "allow" },
+      { action: "imageedit", resource: "*", effect: "allow" },
       { action: "imagegen_models", resource: "*", effect: "allow" },
       { action: "skill", resource: "oc-multi-imagegen", effect: "allow" },
       ...SAVED_EXTENSIONS.map((ext) => ({ action: "read", resource: `*.${ext}`, effect: "allow" })),
@@ -917,10 +923,16 @@ describe("opencode-container.sh host configuration", () => {
       for (const host of ["v1", "v2"]) {
         expect((await c.run(["prepare", host, mode], { OC_SANDBOX: sandbox })).code).toBe(0)
       }
-      expect(configOf(sandbox, "v1").permission).toEqual({ "*": "deny", imagegen: effect, imagegen_models: effect })
+      expect(configOf(sandbox, "v1").permission).toEqual({
+        "*": "deny",
+        imagegen: effect,
+        imageedit: effect,
+        imagegen_models: effect,
+      })
       expect(configOf(sandbox, "v2").permissions).toEqual([
         { action: "*", resource: "*", effect: "deny" },
         { action: "imagegen", resource: "*", effect: effect },
+        { action: "imageedit", resource: "*", effect: effect },
         { action: "imagegen_models", resource: "*", effect: effect },
       ])
     }
@@ -970,6 +982,7 @@ describe("opencode-container.sh host configuration", () => {
     expect(configOf(sandbox, "v2").plugins).toEqual(["/pluginpkg"])
     // The permission rules are the same whichever backend is selected: the wildcard covers both resources.
     expect(configOf(sandbox, "v1").permission.imagegen).toBe("allow")
+    expect(configOf(sandbox, "v1").permission.imageedit).toBe("allow")
 
     expect((await c.run(["prepare", "v1", "allow", "codex"], { OC_SANDBOX: sandbox })).code).toBe(0)
     expect(existsSync(path.join(sandbox, "v1/backend"))).toBe(false)
@@ -1330,7 +1343,7 @@ case $last in
     models=''
     registered && models=',{"id":"imagegen_models","description":"List the OpenAI image models this key can use now.","parameters":{}}'
     if [ -n "$FAKE_TOOLS" ]; then echo "$FAKE_TOOLS"
-    else echo '[{"id":"invalid","description":"Do not use"},{"id":"imagegen","description":"Generate or edit one image through the OpenAI Images API. Load the skill.","parameters":{}}'"$models"']'; fi ;;
+    else echo '[{"id":"invalid","description":"Do not use"},{"id":"imagegen","description":"Generate one image from a text prompt through the OpenAI Images API. Load the skill.","parameters":{}},{"id":"imageedit","description":"Edit or combine existing local images into one new raster image.","parameters":{}}'"$models"']'; fi ;;
   */api/integration)
     connections='[]'
     case $FAKE_METHODS in *'"env"'*) [ -z "$OC_MULTI_IMAGEGEN_OPENAI_API_KEY" ] || connections='[{"type":"env","name":"OC_MULTI_IMAGEGEN_OPENAI_API_KEY"}]' ;; esac
@@ -1372,7 +1385,8 @@ describe("container-backend-probe.sh", () => {
     expect(result.code).toBe(0)
     expect(result.stdout).toContain('sign-in method: "openai-images":[{"type":"api","label":"OpenAI Images API"}]')
     expect(result.stdout).toContain("provider entry: none")
-    expect(result.stdout).toContain("tool: Generate or edit one image through the OpenAI Images API.")
+    expect(result.stdout).toContain("tool: Generate one image from a text prompt through the OpenAI Images API.")
+    expect(result.stdout).toContain("edit tool: Edit or combine existing local images into one new raster image.")
     expect(result.stdout).toContain("models tool: List the OpenAI image models this key can use now.")
   })
 
@@ -1400,7 +1414,10 @@ describe("container-backend-probe.sh", () => {
 
     expect(result.code).toBe(0)
     expect(result.stdout).toMatch(/(sign-in method|integration): none/)
-    if (host === "v1") expect(result.stdout).toContain("models tool: none")
+    if (host === "v1") {
+      expect(result.stdout).toContain("models tool: none")
+      expect(result.stdout).toContain("edit tool: Edit or combine existing local images")
+    }
   })
 
   test.each([
@@ -1460,11 +1477,22 @@ describe("container-backend-probe.sh", () => {
   test("the OpenCode 1 check fails for openai-api when imagegen_models is missing", async () => {
     const result = await backendProbeRunner()(["v1", "openai-api"], {
       FAKE_REGISTERED: "1",
-      FAKE_TOOLS: '[{"id":"imagegen","description":"Generate or edit one image.","parameters":{}}]',
+      FAKE_TOOLS:
+        '[{"id":"imagegen","description":"Generate one image.","parameters":{}},{"id":"imageedit","description":"Edit images.","parameters":{}}]',
     })
 
     expect(result.code).toBe(1)
     expect(result.stderr).toContain("models tool is missing")
+  })
+
+  test.each(["codex", "openai-api"])("the OpenCode 1 check fails for %s when imageedit is missing", async (backend) => {
+    const result = await backendProbeRunner()(["v1", backend], {
+      FAKE_REGISTERED: backend === "openai-api" ? "1" : "",
+      FAKE_TOOLS: '[{"id":"imagegen","description":"Generate one image.","parameters":{}}]',
+    })
+
+    expect(result.code).toBe(1)
+    expect(result.stderr).toContain("edit tool is missing")
   })
 
   test("the OpenCode 1 tool check fails on a reply that has no imagegen entry", async () => {

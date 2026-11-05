@@ -1,23 +1,23 @@
 import type { z } from "zod"
 import { readReferenceImages } from "./input-image"
 import { type OutputFormat, saveGeneratedImage } from "./output-image"
-import { parseArgs } from "./schema"
+import { IMAGEEDIT_TOOL, IMAGEGEN_TOOL, parseArgs } from "./schema"
 import { SKILL_NAME } from "./skill"
 import type { ImageCredential, ImageTool, InfoTool, LookupTool, ReferenceRules, ToolSchema } from "./types"
 
-export const IMAGEGEN_TOOL = "imagegen"
-// The model information tool of a backend that offers one: a local table on NanoGPT, a live provider list on the
-// OpenAI Images API.
-export const MODELS_TOOL = "imagegen_models"
-
-// The sentences of the `imagegen` description that differ per backend; describeImagegen assembles them with the
-// shared guidance. `media` replaces the raster-only sentences for a backend that can also save other formats.
-export type ImagegenDescription = {
+// The sentences of an image tool's description that differ per backend; describeGenerationTool and describeEditTool
+// assemble them with the guidance every Codex-style backend shares, so an agent sees the arguments, defaults and limits
+// of the one backend that will run.
+type ToolDescription = {
   subject: string
   requires: string
   controls: string
-  media?: { what: string; medium: string; saves: string }
 }
+
+// `media` replaces the raster-only sentences for a backend that can also generate other formats.
+export type GenerationDescription = ToolDescription & { media?: { what: string; medium: string; saves: string } }
+// `references` says how many reference images the tool takes, and of which types.
+export type EditDescription = ToolDescription & { references: string }
 
 const RASTER_MEDIA = {
   what: "one raster image",
@@ -27,18 +27,40 @@ const RASTER_MEDIA = {
     "Saves native PNG, JPEG or WebP bytes and returns the actual absolute path, format and pixel dimensions. The extension is adjusted to match; use the returned out path for reads or subsequent edits. Size is a request, so check the dimensions when they matter.",
 }
 
-// The `imagegen` description of the Codex and OpenAI Images API backends: guidance shared by both around the
-// sentences the backend supplies, so an agent sees the arguments, defaults and limits of the one backend that will run.
-export function describeImagegen({ subject, requires, controls, media = RASTER_MEDIA }: ImagegenDescription): string {
+export const SKILL_SENTENCE = `Load the ${SKILL_NAME} skill before image work when it is available, permitted and not already loaded; the tool also works without it.`
+const SIZE_AND_BACKGROUND =
+  "Choose size by the aspect ratio the use needs. For a cut-out, set background to transparent instead of asking in the prompt, and check the returned alpha."
+const VERSIONING = "Existing output paths are versioned on a best-effort basis; concurrent writes are not protected."
+
+// The imagegen description of the Codex and OpenAI Images API backends.
+export function describeGenerationTool({
+  subject,
+  requires,
+  controls,
+  media = RASTER_MEDIA,
+}: GenerationDescription): string {
   return [
-    `Generate or edit ${media.what} through ${subject}. Load the ${SKILL_NAME} skill before image work when it is available, permitted and not already loaded; the tool also works without it.`,
+    `Generate ${media.what} from a text prompt through ${subject}. To change or combine existing images use ${IMAGEEDIT_TOOL} instead. ${SKILL_SENTENCE}`,
     requires,
     media.medium,
-    `With images, name each reference's role in the prompt (for example "Image 1: style; Image 2: layout") and what to keep. The result is a newly generated image, so areas the prompt does not mention can change; use an image editor when pixels must stay identical.`,
-    "Choose size by the aspect ratio the use needs. For a cut-out, set background to transparent instead of asking in the prompt, and check the returned alpha.",
+    SIZE_AND_BACKGROUND,
     media.saves,
     controls,
-    "Existing output paths are versioned on a best-effort basis; concurrent writes are not protected.",
+    VERSIONING,
+  ].join(" ")
+}
+
+// The imageedit description of the Codex and OpenAI Images API backends.
+export function describeEditTool({ subject, requires, controls, references }: EditDescription): string {
+  return [
+    `Edit or combine existing local images into one new raster image through ${subject}, guided by a prompt. To create an image from text alone use ${IMAGEGEN_TOOL}. ${SKILL_SENTENCE}`,
+    requires,
+    references,
+    `Name each reference's role in the prompt (for example "Image 1: style; Image 2: layout") and what to keep. The result is a newly generated image, so areas the prompt does not mention can change; use an image editor when pixels must stay identical.`,
+    SIZE_AND_BACKGROUND,
+    RASTER_MEDIA.saves,
+    controls,
+    VERSIONING,
   ].join(" ")
 }
 
@@ -47,8 +69,8 @@ export type ImageToolSpec<S extends ToolSchema & z.ZodType<{ out: string }>> = {
   name: string
   description: string
   schema: S
-  // The reference image paths of a call and the rules each file must satisfy.
-  references: (args: z.output<S>) => { paths: readonly string[] | null | undefined; rules: ReferenceRules }
+  // The reference image paths of a call and the rules each file must satisfy. Omitted, the tool takes none.
+  references?: (args: z.output<S>) => { paths: readonly string[]; rules: ReferenceRules }
   // Returns the generated image as base64. The credential is one of the kind the backend declares.
   generate: (
     credential: ImageCredential,
@@ -79,8 +101,10 @@ export function defineImageTool<S extends ToolSchema & z.ZodType<{ out: string }
       await host.authorize(spec.name, { ...args })
       const directory = await host.resolveDirectory()
       const credential = await host.resolveCredential()
-      const { paths, rules } = spec.references(args)
-      const referenceDataUrls = await readReferenceImages(paths, directory, rules)
+      const references = spec.references?.(args)
+      const referenceDataUrls = references
+        ? await readReferenceImages(references.paths, directory, references.rules)
+        : []
       const base64 = await spec.generate(credential, args, referenceDataUrls, host.signal)
       host.signal.throwIfAborted()
       const saved = await saveGeneratedImage(args.out, directory, base64, spec.outputFormats).catch(

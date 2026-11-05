@@ -3,16 +3,14 @@ import { defineImageTool } from "./imagegen"
 import {
   controlFields,
   describeNanoImageTool,
-  EDIT_TOOL,
   editSchema,
   findModel,
-  GENERATE_TOOL,
   generateSchema,
   type NanoModel,
   nanoModelsTool,
-  type Operation,
   referenceRules,
 } from "./nano-gpt-models"
+import { IMAGEEDIT_TOOL, IMAGEGEN_TOOL, type Operation } from "./schema"
 import { type Backend, type CredentialSpec, expectHeaderSafeKey, type ImageCredential } from "./types"
 
 // NanoGPT's normalized Image API. One endpoint serves generation and editing; the tool selects the operation, and
@@ -43,7 +41,7 @@ const shown = (text: string, key: string, limit: number) => text.replaceAll(key,
 type Call = { operation: Operation; model: NanoModel }
 
 const label = ({ operation, model }: Call) =>
-  `NanoGPT ${operation === "edit" ? EDIT_TOOL : GENERATE_TOOL} (${model.id})`
+  `NanoGPT ${operation === "edit" ? IMAGEEDIT_TOOL : IMAGEGEN_TOOL} (${model.id})`
 
 // Runs one step that talks to the network. A step that fails because the call was cancelled rethrows the cancellation
 // reason. Any other failure is reported by stage alone: the runtime's message can contain the request URL, which for
@@ -267,17 +265,16 @@ const requires = (sent: string) =>
 const SAVE_FAILURE_NOTE = `The image was not saved. ${CHARGE_NOTE}`
 
 export const nanoGptImagegen = {
-  name: GENERATE_TOOL,
+  name: IMAGEGEN_TOOL,
   description: describeNanoImageTool("generate", requires("The prompt is")),
   schema: generateSchema,
-  references: () => ({ paths: undefined, rules: {} }),
   generate: (credential: ImageCredential, args: NanoArgs, _references: string[], signal: AbortSignal) =>
     requestImage("generate", credential, args, [], signal),
   saveFailureNote: SAVE_FAILURE_NOTE,
 }
 
 export const nanoGptImageedit = {
-  name: EDIT_TOOL,
+  name: IMAGEEDIT_TOOL,
   description: describeNanoImageTool("edit", requires("The prompt and reference images are")),
   schema: editSchema,
   references: (args: { model: string; images: string[] }) => ({

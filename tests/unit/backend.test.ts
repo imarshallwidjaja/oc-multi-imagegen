@@ -42,8 +42,8 @@ describe("selectBackend", () => {
       return selectBackend(undefined).tools.map((tool) => tool.name)
     }
 
-    expect(names("codex")).toEqual(["imagegen"])
-    expect(names("openai-api")).toEqual(["imagegen", "imagegen_models"])
+    expect(names("codex")).toEqual(["imagegen", "imageedit"])
+    expect(names("openai-api")).toEqual(["imagegen", "imageedit", "imagegen_models"])
     expect(names("nano-gpt")).toEqual(["imagegen", "imageedit", "imagegen_models"])
   })
 

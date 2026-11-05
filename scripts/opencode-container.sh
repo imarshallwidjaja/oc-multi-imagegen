@@ -13,7 +13,7 @@
 #   scripts/opencode-container.sh run <host> <name> -- <opencode args>
 #   scripts/opencode-container.sh tools <host>                  tool ids (v1 and v1-floor only; no model)
 #   scripts/opencode-container.sh skills <host>                 skills the host registered (no model)
-#   scripts/opencode-container.sh backend <host> <backend>      the sign-in and tool a host registered for the backend (no model)
+#   scripts/opencode-container.sh backend <host> <backend>      the sign-in and tools a host registered for the backend (no model)
 #   scripts/opencode-container.sh lifecycle v2                  skill update and removal on a running server (no model)
 #   OC_MODEL=... scripts/opencode-container.sh cases <host> [smoke|formats]  four image cases; one generation and one edit; or SVG and GIF
 #   scripts/opencode-container.sh clean                         remove credentials and session state
@@ -179,10 +179,11 @@ case_prompt() {
     B) echo "Make a sticker of a red paper lantern in a $style, with a transparent background so it can be placed on other designs. Save it as lantern-sticker.png in the project folder." ;;
     C) echo "Change lighthouse.png so the sky is stormy with heavy dark clouds and the lighthouse lamp is lit. Keep the rest of the scene as it is. Save the result as lighthouse-storm.png." ;;
     D) echo "Design two portrait screens of a meal-planning mobile app: a weekly plan screen and a shopping list screen. They must look like the same app, with the same colours, type and style. Save them as plan-screen.png and shopping-screen.png in the project folder." ;;
-    # The smoke cases name the tool and ask for low quality at 1536x1024, a size both backends accept, so a run proves one
-    # generation and one reference edit through the selected backend without the four-case spend.
-    G) echo "Use the imagegen tool to create a simple flat illustration of a red paper lantern on a plain light background. Use quality low and size 1536x1024. Save it as smoke-generate.png in the project folder." ;;
-    E) echo "Use the imagegen tool to edit smoke-generate.png: make the lantern blue and keep everything else as it is. Pass the file in images, and use quality low and size 1536x1024. Save the result as smoke-edit.png in the project folder." ;;
+    # The smoke cases ask for low quality at 1536x1024, a size both backends accept, so a run proves one generation and
+    # one reference edit through the selected backend without the four-case spend. Like the four cases they name no
+    # tool, so a run shows whether the agent picks imagegen for the new image and imageedit for the edit.
+    G) echo "Create a simple flat illustration of a red paper lantern on a plain light background. Use quality low and size 1536x1024. Save it as smoke-generate.png in the project folder." ;;
+    E) echo "Edit smoke-generate.png: make the lantern blue and keep everything else as it is. Use quality low and size 1536x1024. Save the result as smoke-edit.png in the project folder." ;;
     # The format cases need the openai-api backend. They name imagegen but not imagegen_models, so a run shows whether
     # the tool descriptions lead the agent to look up the key's models first. The API rejected four 1024x1024 GIF frames
     # ("No supported sheet fits 4 GIF frames", longest sheet edge at most 3840) and accepted four at 768x768.
@@ -228,7 +229,8 @@ case $cmd in
   prepare)
     # allow: the plugin's tools, its skill and reading the image formats it can save (to look at results) are
     # permitted. tool-only: the plugin's tools alone, so the skill is denied. ask: the plugin's tools ask and nothing
-    # else is permitted. The tools are imagegen and imagegen_models, which only the openai-api backend registers.
+    # else is permitted. The tools are imagegen and imageedit on both backends, and imagegen_models, which only the
+    # openai-api backend registers.
     # Everything else is denied, so the agent has no shell and cannot read the credential.
     # The optional backend is recorded for the host and reaches its containers as OC_MULTI_IMAGEGEN_BACKEND (base_args):
     # codex, the plugin's default, sets nothing; openai-api selects the official API. The plugin entries stay plain.
@@ -261,6 +263,7 @@ case $cmd in
   "permissions": [
     { "action": "*", "resource": "*", "effect": "deny" },
     { "action": "imagegen", "resource": "*", "effect": "$tool_effect" },
+    { "action": "imageedit", "resource": "*", "effect": "$tool_effect" },
     { "action": "imagegen_models", "resource": "*", "effect": "$tool_effect" }$extra
   ],
   "update": "disable",
@@ -277,7 +280,7 @@ EOF
 {
   "\$schema": "https://opencode.ai/config.json",
   "plugin": ["file:///pluginpkg"],
-  "permission": { "*": "deny", "imagegen": "$tool_effect", "imagegen_models": "$tool_effect"$extra },
+  "permission": { "*": "deny", "imagegen": "$tool_effect", "imageedit": "$tool_effect", "imagegen_models": "$tool_effect"$extra },
   "autoupdate": false,
   "share": "disabled"
 }

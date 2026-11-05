@@ -4,7 +4,7 @@
 
 The README follows one original fox postmaster through three actual Codex calls: a new scene, a reference-guided weather edit and a transparent character cut-out. The short prompts in the README are examples of what to ask an agent. This page records the longer prompts and settings used to make the displayed images.
 
-All three calls used `imagegen` with the default Codex backend. `model` and `quality` were omitted; no override is claimed to have improved the result. The output paths below are repository-relative equivalents of the temporary paths used during generation. Only those paths have been adapted.
+All three calls used the default Codex backend before it had a separate `imageedit` tool. The scene was an `imagegen` call. The two reference-guided calls passed `images` to that earlier `imagegen`, which sent them to the Codex edits endpoint; with the current tools, the same arguments go to `imageedit`. `model` and `quality` were omitted; no override is claimed to have improved the result. The output paths below are repository-relative equivalents of the temporary paths used during generation. Only those paths have been adapted.
 
 ## 1. Create the woodland post office
 

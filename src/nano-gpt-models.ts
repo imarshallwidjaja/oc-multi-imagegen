@@ -1,17 +1,24 @@
 import { z } from "zod"
-import { defineInfoTool, IMAGEGEN_TOOL, MODELS_TOOL } from "./imagegen"
-import { SKILL_NAME } from "./skill"
+import { defineInfoTool, SKILL_SENTENCE } from "./imagegen"
+import { RASTER_FORMATS } from "./output-image"
+import {
+  GENERATION_MOVED_ARGUMENTS,
+  IMAGEEDIT_TOOL,
+  IMAGEGEN_TOOL,
+  MODELS_TOOL,
+  NO_REFERENCES,
+  type Operation,
+  outField,
+  PROMPT_DESCRIPTION,
+  strictArgs,
+  TOOL_OF,
+} from "./schema"
 
 // The NanoGPT models this plugin supports, and the one place that says what each accepts. Tool schemas, validation,
 // request bodies, the tool descriptions and the imagegen_models answers all derive from MODELS. The entries come from
 // NanoGPT's documentation and public model metadata (see MODEL_SOURCES); no request is made to read them, and a
 // model that is not listed is not supported, even if NanoGPT offers it. A control that an entry omits is not sent:
 // absence here means "not supported by this plugin", not "unsupported by the provider".
-
-export type Operation = "generate" | "edit"
-
-export const GENERATE_TOOL = IMAGEGEN_TOOL
-export const EDIT_TOOL = "imageedit"
 
 export const MODEL_SOURCES = [
   "https://docs.nano-gpt.com/api-reference/endpoint/image-api-generate",
@@ -290,7 +297,6 @@ export const FAMILIES = [...new Set(MODELS.map((model) => model.family))]
 export const REFERENCE_MIME_TYPES = ["image/png", "image/jpeg", "image/webp"] as const
 export const ROUTE_REFERENCE_MAX_BYTES = 31457280
 
-const TOOL_OF: Record<Operation, string> = { generate: GENERATE_TOOL, edit: EDIT_TOOL }
 const OTHER: Record<Operation, Operation> = { generate: "edit", edit: "generate" }
 
 function nonEmpty(values: string[]): [string, ...string[]] {
@@ -416,18 +422,6 @@ function modelError(operation: Operation, input: unknown): string {
   return `Unsupported ${operation} model ${shown}. Use one of: ${ids}. Call ${MODELS_TOOL} for details.`
 }
 
-function unrecognizedArguments(operation: Operation, accepted: string[]) {
-  return (issue: z.core.$ZodRawIssue) => {
-    if (issue.code !== "unrecognized_keys") return undefined
-    const names = issue.keys.join(", ")
-    const advice =
-      operation === "generate" && issue.keys.includes("images")
-        ? `${GENERATE_TOOL} creates a new image from text; use ${EDIT_TOOL} to change or combine existing images.`
-        : `${TOOL_OF[operation]} accepts: ${accepted.join(", ")}.`
-    return `Unsupported argument${issue.keys.length === 1 ? "" : "s"}: ${names}. ${advice}`
-  }
-}
-
 const optionalControl = (description: string) => z.string().min(1).nullish().describe(description)
 
 function commonShape(operation: Operation) {
@@ -438,19 +432,8 @@ function commonShape(operation: Operation) {
       .describe(
         `Required exact model ID. Nothing is chosen for you and a failure is never retried with another model. Call ${MODELS_TOOL} for each model's purpose, controls and limits.`,
       ),
-    prompt: z
-      .string()
-      .min(1)
-      .describe(
-        operation === "edit"
-          ? "The edit to make, in natural language. Name each reference image's role (Image 1, Image 2, in the order of images) and what to keep. Put every visible string in quotes."
-          : "Description of the image to generate. Put every visible string in quotes.",
-      ),
-    out: z
-      .string()
-      .describe(
-        "Destination path, relative to the project directory unless absolute. Saves native PNG, JPEG or WebP bytes without conversion, adjusting the extension to match. An existing target is kept and the new image gets a -vN suffix. Use the returned out path for subsequent reads or edits.",
-      ),
+    prompt: z.string().min(1).describe(PROMPT_DESCRIPTION[operation]),
+    out: outField(RASTER_FORMATS),
     resolution: optionalControl(
       "Optional output resolution tier, a value from the chosen model's list in " +
         `${MODELS_TOOL}. Omit it to let NanoGPT use the model's default.`,
@@ -474,31 +457,26 @@ function commonShape(operation: Operation) {
   }
 }
 
-const COMMON_ARGUMENTS = ["model", "prompt", "out", "resolution", "aspect_ratio", "quality", "background", "seed"]
-
 // Both tools use one stable object schema; the chosen model narrows it through checkAgainstModel. Unknown
 // arguments are rejected instead of dropped.
-export const generateSchema = z
-  .strictObject(commonShape("generate"), { error: unrecognizedArguments("generate", COMMON_ARGUMENTS) })
-  .superRefine(checkAgainstModel("generate"))
+export const generateSchema = strictArgs(
+  IMAGEGEN_TOOL,
+  commonShape("generate"),
+  GENERATION_MOVED_ARGUMENTS,
+).superRefine(checkAgainstModel("generate"))
 
 const MAX_EDIT_REFERENCES = Math.max(...MODELS.map((model) => model.maxReferences ?? 0))
 
-export const editSchema = z
-  .strictObject(
-    {
-      ...commonShape("edit"),
-      images: z
-        .array(z.string().min(1))
-        .min(1, `${EDIT_TOOL} needs at least one reference image. Use ${GENERATE_TOOL} to create an image from text.`)
-        .max(MAX_EDIT_REFERENCES)
-        .describe(
-          "Required local paths of the images to edit or combine, relative to the project directory unless absolute; they are sent in order, so call them Image 1, Image 2 in the prompt. Each file must be PNG, JPEG or WebP. The count limit depends on the model. Their contents are uploaded to NanoGPT.",
-        ),
-    },
-    { error: unrecognizedArguments("edit", [...COMMON_ARGUMENTS, "images"]) },
-  )
-  .superRefine(checkAgainstModel("edit"))
+export const editSchema = strictArgs(IMAGEEDIT_TOOL, {
+  ...commonShape("edit"),
+  images: z
+    .array(z.string().min(1))
+    .min(1, NO_REFERENCES)
+    .max(MAX_EDIT_REFERENCES)
+    .describe(
+      "Required local paths of the images to edit or combine, relative to the project directory unless absolute; they are sent in order, so call them Image 1, Image 2 in the prompt. Each file must be PNG, JPEG or WebP. The count limit depends on the model. Their contents are uploaded to NanoGPT.",
+    ),
+}).superRefine(checkAgainstModel("edit"))
 
 // The request arguments for one model as JSON Schema, derived from the same entry the validation uses.
 function requestSchema(model: NanoModel) {
@@ -574,8 +552,8 @@ function describeList(models: readonly NanoModel[], total: number): string {
   const distinctIds = new Set(models.map((model) => model.id)).size
   return [
     `NanoGPT operation entries this plugin supports (${models.length} of ${total} shown; ${distinctIds} distinct ID${distinctIds === 1 ? "" : "s"} shown). Controls come from provider documentation and public model metadata. Sampled live workflow coverage: https://github.com/imarshallwidjaja/oc-multi-imagegen/blob/main/docs/backends.md#nanogpt-live-workflow-coverage. Prices vary by model, resolution and quality; check NanoGPT's pricing when cost matters.`,
-    ...(generate.length > 0 ? [`New images from text, with ${GENERATE_TOOL}:`, ...generate] : []),
-    ...(edit.length > 0 ? [`Changing or combining existing images, with ${EDIT_TOOL}:`, ...edit] : []),
+    ...(generate.length > 0 ? [`New images from text, with ${IMAGEGEN_TOOL}:`, ...generate] : []),
+    ...(edit.length > 0 ? [`Changing or combining existing images, with ${IMAGEEDIT_TOOL}:`, ...edit] : []),
     ...(models.length === 0 ? [`No supported model matches. Families: ${FAMILIES.join(", ")}.`] : []),
     `Call ${MODELS_TOOL} with model set to an exact ID for its control values, limits and argument schema.`,
   ].join("\n")
@@ -586,7 +564,7 @@ const modelsSchema = z
     operation: z
       .enum(["generate", "edit"])
       .nullish()
-      .describe(`generate lists models for ${GENERATE_TOOL}; edit lists models for ${EDIT_TOOL}.`),
+      .describe(`generate lists models for ${IMAGEGEN_TOOL}; edit lists models for ${IMAGEEDIT_TOOL}.`),
     family: z.enum(nonEmpty(FAMILIES)).nullish().describe("Limit the list to one model family."),
     query: z
       .string()
@@ -653,14 +631,13 @@ function modelMenu(operation: Operation): string {
     .join("; ")
 }
 
-const SKILL_SENTENCE = `Load the ${SKILL_NAME} skill before image work when it is available, permitted and not already loaded; the tool also works without it.`
 const ALPHA_GUIDANCE =
   "For a cut-out, among the supported families only GPT Image 2.5 Flare supports the background control; for other families request transparency in the prompt without that control. Inspect actual alpha and content: a filename, RGBA channel or painted checkerboard does not prove transparency."
 
 export function describeNanoImageTool(operation: Operation, requires: string): string {
   return operation === "generate"
     ? [
-        `Generate one new raster image from a text prompt through NanoGPT. To change or combine existing images use ${EDIT_TOOL} instead. ${SKILL_SENTENCE}`,
+        `Generate one new raster image from a text prompt through NanoGPT. To change or combine existing images use ${IMAGEEDIT_TOOL} instead. ${SKILL_SENTENCE}`,
         requires,
         `Required model, one of: ${modelMenu("generate")}. Optional controls (resolution, aspect_ratio, quality, background, seed) each exist only for some models; ${MODELS_TOOL} lists them locally without a key, and an unsupported control or value is rejected before any request. Omitted controls are not sent, so NanoGPT's defaults apply. Exactly one image is requested; native PNG, JPEG or WebP responses are saved.`,
         "Best for photos, illustrations, textures and concepts; build icons, logos, charts and anything that must scale or stay editable as SVG or code.",
@@ -669,7 +646,7 @@ export function describeNanoImageTool(operation: Operation, requires: string): s
         "Returns the actual saved absolute path, format and pixel dimensions. The extension is adjusted to match the bytes; use the returned out path for reads or subsequent edits. The requested size is not enforced, so check the dimensions when they matter. Existing target paths are versioned on a best-effort basis; concurrent writes are not protected.",
       ].join(" ")
     : [
-        `Edit or combine existing local images into one new raster image through NanoGPT, guided by a prompt. To create an image from text alone use ${GENERATE_TOOL}. ${SKILL_SENTENCE}`,
+        `Edit or combine existing local images into one new raster image through NanoGPT, guided by a prompt. To create an image from text alone use ${IMAGEGEN_TOOL}. ${SKILL_SENTENCE}`,
         requires,
         `Required images (local PNG, JPEG or WebP paths) and model, one of: ${modelMenu("edit")}. The count limit depends on the model. Optional controls (resolution, aspect_ratio, quality, background, seed) each exist only for some models; ${MODELS_TOOL} lists them locally without a key, and an unsupported control or value is rejected before any request. Omitted controls are not sent. Exactly one image is requested; native PNG, JPEG or WebP responses are saved.`,
         "The result is a newly generated image, so areas the prompt does not mention can change; use an image editor when pixels must stay identical. Name each reference's role in the prompt and what to keep.",
@@ -682,7 +659,7 @@ export function describeNanoImageTool(operation: Operation, requires: string): s
 export const nanoModelsTool = defineInfoTool({
   name: MODELS_TOOL,
   description: [
-    `List the NanoGPT image models this plugin supports, or describe one exactly. It answers from a table inside the plugin: no key, permission prompt, file access or network request, and no cost. Use it before choosing a model for ${GENERATE_TOOL} or ${EDIT_TOOL}.`,
+    `List the NanoGPT image models this plugin supports, or describe one exactly. It answers from a table inside the plugin: no key, permission prompt, file access or network request, and no cost. Use it before choosing a model for ${IMAGEGEN_TOOL} or ${IMAGEEDIT_TOOL}.`,
     "Without model it lists the supported models, filtered by operation, family or query words; with an exact model ID it returns that model's purpose, control values, limits and argument schema. Controls come from provider documentation and public model metadata. Sampled live workflow coverage: https://github.com/imarshallwidjaja/oc-multi-imagegen/blob/main/docs/backends.md#nanogpt-live-workflow-coverage.",
   ].join(" "),
   schema: modelsSchema,

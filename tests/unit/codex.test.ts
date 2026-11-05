@@ -1,22 +1,21 @@
 import { afterEach, describe, expect, mock, test } from "bun:test"
 import { z } from "zod"
-import { codexImagegen } from "../../src/codex"
-import type { GenerateArgs } from "../../src/schema"
+import { type CodexArgs, codexImageedit, codexImagegen } from "../../src/codex"
 import type { ImageCredential } from "../../src/types"
 
 function imagesResponse(data: Array<{ b64_json: string }>): Response {
   return new Response(JSON.stringify({ created: 0, data }))
 }
 
-function generateArgs(overrides: Partial<GenerateArgs> = {}): GenerateArgs {
+function generateArgs(overrides: Partial<CodexArgs> = {}): CodexArgs {
   return { prompt: "a cat", out: "cat.png", size: "1254x1254", ...overrides }
 }
 
 const signal = new AbortController().signal
 const auth: ImageCredential = { type: "oauth", access: "tok" }
 
-function callCodex(args: GenerateArgs, dataUrls: string[] = [], credential: ImageCredential = auth) {
-  return codexImagegen.generate(credential, args, dataUrls, signal)
+function callCodex(args: CodexArgs, credential: ImageCredential = auth) {
+  return codexImagegen.generate(credential, args, [], signal)
 }
 
 describe("Codex backend request", () => {
@@ -31,11 +30,11 @@ describe("Codex backend request", () => {
     return fetchMock
   }
 
-  test("posts the Codex request body to the generations endpoint and returns the image when no reference image is given", async () => {
+  test("imagegen posts the Codex request body to the generations endpoint and returns the image", async () => {
     const fetchMock = stubImage()
     const prompt = "a mountain lake"
 
-    const result = await callCodex(generateArgs({ prompt, size: "1254x1254" }), [], {
+    const result = await callCodex(generateArgs({ prompt, size: "1254x1254" }), {
       type: "oauth",
       access: "tok",
       accountId: "acct",
@@ -61,12 +60,12 @@ describe("Codex backend request", () => {
     })
   })
 
-  test("posts the Codex request body with the reference images to the edits endpoint when they are given", async () => {
+  test("imageedit posts the same body with the reference images to the edits endpoint", async () => {
     const fetchMock = stubImage()
     const prompt = "put both characters together"
     const dataUrls = ["data:image/png;base64,AAA", "data:image/jpeg;base64,BBB"]
 
-    await callCodex(generateArgs({ prompt, size: "1672x941" }), dataUrls)
+    await codexImageedit.generate(auth, generateArgs({ prompt, size: "1672x941" }), dataUrls, signal)
 
     const [url, init] = fetchMock.mock.calls[0]
     expect(url).toBe("https://chatgpt.com/backend-api/codex/images/edits")
@@ -121,7 +120,7 @@ describe("Codex backend request", () => {
   test("refuses a credential of another kind before any request", async () => {
     const fetchMock = stubImage()
 
-    await expect(callCodex(generateArgs(), [], { type: "key", key: "sk-test" })).rejects.toThrow(
+    await expect(callCodex(generateArgs(), { type: "key", key: "sk-test" })).rejects.toThrow(
       "The backend needs a oauth credential but received key.",
     )
 
@@ -150,15 +149,25 @@ describe("Codex backend arguments", () => {
     )
   })
 
-  test("takes at most five reference images", () => {
+  test("imageedit takes one to five reference images", () => {
     const images = (count: number) =>
-      parse({ prompt: "p", out: "o.png", size: "1254x1254", images: Array(count).fill("a.png") })
+      codexImageedit.schema.safeParse({
+        prompt: "p",
+        out: "o.png",
+        size: "1254x1254",
+        images: Array(count).fill("a.png"),
+      })
+    expect(images(1).success).toBe(true)
     expect(images(5).success).toBe(true)
+    expect(images(0).success).toBe(false)
     expect(images(6).success).toBe(false)
   })
 
-  test("describes model and quality as unverified requests, not as unsupported", () => {
-    const schema = z.toJSONSchema(codexImagegen.schema, { io: "input" }) as {
+  test.each([
+    ["imagegen", codexImagegen],
+    ["imageedit", codexImageedit],
+  ])("%s describes model and quality as unverified requests, not as unsupported", (_name, tool) => {
+    const schema = z.toJSONSchema(tool.schema, { io: "input" }) as {
       properties: Record<string, { description: string }>
     }
 
@@ -168,14 +177,19 @@ describe("Codex backend arguments", () => {
     }
   })
 
-  test("separates requested settings from verified ones in the result text only when they were given", () => {
-    expect(codexImagegen.resultNote(generateArgs())).toBeUndefined()
-    expect(codexImagegen.resultNote(generateArgs({ model: null, quality: null }))).toBeUndefined()
-    expect(codexImagegen.resultNote(generateArgs({ model: "m1" }))).toBe(
-      "Requested model m1; the Codex response does not report which settings it applied, so they are unverified.",
-    )
-    expect(codexImagegen.resultNote(generateArgs({ model: "m1", quality: "low" }))).toContain(
-      "model m1 and quality low",
-    )
-  })
+  test.each([
+    ["imagegen", codexImagegen.resultNote, {}],
+    ["imageedit", codexImageedit.resultNote, { images: ["ref.png"] }],
+  ])(
+    "%s separates requested settings from verified ones in the result text only when they were given",
+    (_name, resultNote, extra) => {
+      const args = (overrides: Partial<CodexArgs> = {}) => ({ ...generateArgs(overrides), ...extra })
+      expect(resultNote(args())).toBeUndefined()
+      expect(resultNote(args({ model: null, quality: null }))).toBeUndefined()
+      expect(resultNote(args({ model: "m1" }))).toBe(
+        "Requested model m1; the Codex response does not report which settings it applied, so they are unverified.",
+      )
+      expect(resultNote(args({ model: "m1", quality: "low" }))).toContain("model m1 and quality low")
+    },
+  )
 })

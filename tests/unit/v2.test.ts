@@ -37,10 +37,10 @@ function stubFetch() {
 const args = { prompt: "a cat", out: "cat.png", size: SHARED_SIZE } as const
 
 describe("OpenCode 2 tool registration", () => {
-  test("registers imagegen as a direct tool without a namespace", async () => {
+  test("registers imagegen and imageedit as direct tools without a namespace", async () => {
     const { registered, tool } = await loadV2Tool({ directory: dir })
 
-    expect(registered).toHaveLength(1)
+    expect(registered.map((candidate) => candidate.name)).toEqual(["imagegen", "imageedit"])
     expect(tool.name).toBe("imagegen")
     // Direct tools run without the execute tool; a permission override would hide the tool under its own name.
     expect(tool.options).toEqual({ codemode: false })
@@ -55,15 +55,7 @@ describe("OpenCode 2 tool registration", () => {
     }
 
     expect(tool.description).toBe(selectBackend(undefined).tools[0].description)
-    expect(Object.keys(schema.properties)).toEqual([
-      "prompt",
-      "out",
-      "size",
-      "images",
-      "background",
-      "model",
-      "quality",
-    ])
+    expect(Object.keys(schema.properties)).toEqual(["prompt", "out", "size", "background", "model", "quality"])
     for (const property of Object.values(schema.properties)) {
       expect(property.description).toEqual(expect.stringMatching(/\S/))
     }
@@ -92,19 +84,32 @@ describe("OpenCode 2 tool registration", () => {
     expect(schema.properties.versioned.type).toBe("boolean")
   })
 
-  test("the host-validated input drops unknown keys and keeps null optional arguments", async () => {
+  test("the host-validated input keeps null optional arguments", async () => {
     const { tool } = await loadV2Tool({ directory: dir })
 
-    const result = await tool.input["~standard"].validate({
-      ...args,
-      n: 2,
-      images: null,
-      background: null,
-      model: null,
-    })
+    const result = await tool.input["~standard"].validate({ ...args, background: null, model: null })
 
-    expect(result).toEqual({ value: { ...args, images: null, background: null, model: null } })
+    expect(result).toEqual({ value: { ...args, background: null, model: null } })
   })
+
+  // OpenCode 2 validates the input with the tool's schema before execute, so an argument the schema dropped would
+  // never reach the tool: imagegen must refuse references there, in any form, instead of generating without them.
+  test.each(FLAVOURS)(
+    "the host-validated $backend imagegen input refuses references and unknown arguments",
+    async (flavour) => {
+      const { tool } = await loadV2Tool({ directory: dir, backend: flavour.backend })
+      const base = flavour.operations[0].args
+
+      for (const images of [["ref.png"], [], null]) {
+        const result = (await tool.input["~standard"].validate({ ...base, images })) as {
+          issues?: Array<{ message: string }>
+        }
+        expect(result.issues?.[0].message).toContain("use imageedit")
+      }
+      const unknown = (await tool.input["~standard"].validate({ ...base, n: 2 })) as { issues?: unknown[] }
+      expect(unknown.issues).toHaveLength(1)
+    },
+  )
 
   test("replaying the registration produces the same definition", async () => {
     const first = await loadV2Tool({ directory: dir })
@@ -364,7 +369,7 @@ describe("OpenCode 2 execution", () => {
     await Bun.write(path.join(dir, "ref.png"), PNG_BUFFER)
     const { run } = await loadV2Tool({ directory: dir })
 
-    await run({ ...args, images: ["ref.png"] })
+    await run({ ...args, images: ["ref.png"] }, undefined, undefined, "imageedit")
 
     expect(fetchMock.mock.calls[0][0]).toBe("https://chatgpt.com/backend-api/codex/images/edits")
   })

@@ -1,13 +1,15 @@
 import { beforeAll, describe, expect, test } from "bun:test"
 import { spawn } from "node:child_process"
-import { existsSync } from "node:fs"
+import { existsSync, writeFileSync } from "node:fs"
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
+import { findReferenceEdit, readToolCalls } from "./tool-events"
 
 const WORKDIR = await mkdtemp(path.join(os.tmpdir(), "qa-imagegen-work-"))
 const XDG_CONFIG_HOME = await mkdtemp(path.join(os.tmpdir(), "qa-imagegen-cfg-"))
+const EVIDENCE_DIR = await mkdtemp(path.join(os.tmpdir(), "qa-imagegen-events-"))
 const REPO_DIR = path.resolve(import.meta.dir, "../..")
 const RUN_TIMEOUT_MS = 600_000
 const TEST_TIMEOUT_MS = RUN_TIMEOUT_MS + 10_000
@@ -33,17 +35,19 @@ async function writeOpencodeConfig(): Promise<void> {
   const config = {
     $schema: "https://opencode.ai/config.json",
     plugin: [pathToFileURL(REPO_DIR).href],
-    permission: { "*": "deny", imagegen: "allow" },
+    permission: { "*": "deny", imagegen: "allow", imageedit: "allow" },
   }
   await writeFile(path.join(cfgDir, "opencode.jsonc"), JSON.stringify(config, null, 2))
 }
 
-async function runOpencode(prompt: string): Promise<void> {
+// Runs one prompt and returns its JSON event output, which is also kept at EVIDENCE_DIR/<name>.jsonl.
+async function runOpencode(name: string, prompt: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const args = ["run", prompt, "--dir", WORKDIR]
+    const args = ["run", prompt, "--format", "json", "--dir", WORKDIR]
     if (process.env.OPENCODE_MODEL) args.push("--model", process.env.OPENCODE_MODEL)
+    const chunks: Buffer[] = []
     const proc = spawn("opencode", args, {
-      stdio: "inherit",
+      stdio: ["ignore", "pipe", "inherit"],
       // The sizes below are the Codex presets, whatever backend the caller's own environment selects.
       env: { ...process.env, XDG_CONFIG_HOME, OC_MULTI_IMAGEGEN_BACKEND: "codex" },
     })
@@ -54,8 +58,18 @@ async function runOpencode(prompt: string): Promise<void> {
       clearTimeout(timer)
       reject(err)
     })
+    proc.stdout.on("data", (chunk: Buffer) => chunks.push(chunk))
     proc.on("close", (code, signal) => {
       clearTimeout(timer)
+      const output = Buffer.concat(chunks).toString("utf8")
+      const evidence = path.join(EVIDENCE_DIR, `${name}.jsonl`)
+      try {
+        writeFileSync(evidence, output)
+      } catch (err) {
+        reject(err)
+        return
+      }
+      console.log(`${name} events: ${evidence}`)
       if (signal === "SIGTERM") {
         reject(new Error(`opencode run timed out after ${RUN_TIMEOUT_MS}ms`))
         return
@@ -64,7 +78,7 @@ async function runOpencode(prompt: string): Promise<void> {
         reject(new Error(`opencode run failed (exit=${code} signal=${signal ?? "null"})`))
         return
       }
-      resolve()
+      resolve(output)
     })
   })
 }
@@ -85,10 +99,11 @@ function readPngColorType(buf: Buffer): number {
   return buf[25]
 }
 
-describe("imagegen e2e", () => {
+describe("image tools e2e", () => {
   beforeAll(async () => {
     console.log(`WORKDIR: ${WORKDIR}`)
     console.log(`XDG_CONFIG_HOME: ${XDG_CONFIG_HOME}`)
+    console.log(`EVIDENCE_DIR: ${EVIDENCE_DIR}`)
     await buildPlugin()
     await writeOpencodeConfig()
   })
@@ -97,6 +112,7 @@ describe("imagegen e2e", () => {
     "A. man portrait 1024x1536",
     async () => {
       await runOpencode(
+        "A",
         `Use the imagegen tool to generate an image at character.png. ` +
           `Content: a man wearing a navy-blue samue and a red hachimaki headband, standing in a garden of cherry blossoms in full bloom. ` +
           `Style: ${STYLE}. Size: 1024x1536 (portrait).`,
@@ -117,6 +133,7 @@ describe("imagegen e2e", () => {
     "B. woman landscape 1536x1024 (auto-versioned)",
     async () => {
       await runOpencode(
+        "B",
         `Use the imagegen tool to generate an image at character.png. ` +
           `Content: a woman wearing a yellow yukata and holding a red wagasa parasol, standing in a garden at night with fireflies dancing around her. ` +
           `Style: ${STYLE}. Size: 1536x1024 (landscape).`,
@@ -134,15 +151,22 @@ describe("imagegen e2e", () => {
   test(
     "C. compose two characters from A and B references",
     async () => {
-      await runOpencode(
-        `Use the imagegen tool to generate an image at together.png. ` +
-          `Pass ./character.png and ./character-v2.png in the images argument. ` +
+      const output = await runOpencode(
+        "C",
+        // A plain-language edit request: the agent chooses the edit tool for the two reference images itself.
+        `Combine ./character.png and ./character-v2.png into one new image saved at together.png. ` +
           `Content: the man from Image 1 (navy samue + red hachimaki) and the woman from Image 2 (yellow yukata + red wagasa) standing side by side ` +
           `on the engawa veranda of an old Japanese house, smiling at the viewer. ` +
           `Preserve each character's outfit, hairstyle, and props exactly. ` +
           `Style: ${STYLE}. Size: 1672x941.`,
       )
-      const out = path.join(WORKDIR, "together.png")
+      // Require an edit that passed both references and saved together.png, so a separate imagegen call cannot supply it.
+      const { out } = findReferenceEdit(
+        readToolCalls(output),
+        ["character.png", "character-v2.png"],
+        "together.png",
+        WORKDIR,
+      )
       const buf = await assertPng(out)
       const { width, height } = readPngDimensions(buf)
       // The backend sometimes returns this size with an edge 1px off (e.g. 1672x940).
@@ -157,6 +181,7 @@ describe("imagegen e2e", () => {
     "D. sticker with a transparent background",
     async () => {
       await runOpencode(
+        "D",
         `Use the imagegen tool to generate an image at sticker.png. ` +
           `Content: a sticker of a red paper lantern with a transparent background. ` +
           `Style: ${STYLE}. Size: 1254x1254.`,

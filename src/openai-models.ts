@@ -1,5 +1,5 @@
 import { z } from "zod"
-import { IMAGEGEN_TOOL } from "./imagegen"
+import { IMAGEEDIT_TOOL, IMAGEGEN_TOOL } from "./schema"
 
 // The model list of the OpenAI API. It reports only each model's id, created, object, owned_by and shutdown_date: no
 // capability, output format or size. The list is read on each call and never cached, so it is the key's current view.
@@ -98,7 +98,7 @@ function describeModel(model: ListedModel, defaultModel: string): string {
     model.ownedBy && `owned by ${model.ownedBy}`,
     model.shutdownDate && `shutdown date ${model.shutdownDate}`,
   ].filter(Boolean)
-  return `- ${model.id}${model.id === defaultModel ? ` (${IMAGEGEN_TOOL} default)` : ""}${facts.length > 0 ? `: ${facts.join(", ")}` : ""}`
+  return `- ${model.id}${model.id === defaultModel ? " (default)" : ""}${facts.length > 0 ? `: ${facts.join(", ")}` : ""}`
 }
 
 // Newest first, then by ID.
@@ -113,7 +113,7 @@ function listLines(models: readonly ListedModel[], defaultModel: string): string
 
 const NOT_CAPABILITIES =
   "GET /v1/models reports only each ID, creation date, owner and shutdown date, so a listed model is not proof that it supports SVG, GIF, a size or any other feature; those are known only when a request succeeds."
-const PASSTHROUGH = `${IMAGEGEN_TOOL} sends any model ID unchanged, listed or not, and the API decides whether the key can use it.`
+const PASSTHROUGH = `${IMAGEGEN_TOOL} and ${IMAGEEDIT_TOOL} send any model ID unchanged, listed or not, and the API decides whether the key can use it.`
 
 // Answers from the list the API returned on this call.
 export async function lookUpOpenAiModels(
@@ -159,7 +159,7 @@ export async function lookUpOpenAiModels(
     ...(defaultListed
       ? []
       : [
-          `The ${IMAGEGEN_TOOL} default ${defaultModel} is not in this list; ${IMAGEGEN_TOOL} still sends it when model is omitted.`,
+          `The default ${defaultModel} is not in this list; ${IMAGEGEN_TOOL} and ${IMAGEEDIT_TOOL} still send it when model is omitted.`,
         ]),
     `This list comes from the API on this call and is the key's current view. ${NOT_CAPABILITIES}`,
     `${PASSTHROUGH} Use query to search every listed ID, for example for an svg_model author, or model to check one ID.`,

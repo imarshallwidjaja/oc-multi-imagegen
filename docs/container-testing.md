@@ -6,8 +6,8 @@ It is written for a source checkout of this repository. The scripts and this fil
 
 ## What a run shows
 
-- The packed package, with only its runtime dependencies installed and no OpenCode SDK, loads in each host, registers `imagegen`, and registers the `oc-multi-imagegen` skill with the packaged body.
-- With the skill permitted, a real agent loads it before its first generation, calls `imagegen` directly, and the tool call, result and saved PNG match the arguments. With the skill denied, the agent still generates.
+- The packed package, with only its runtime dependencies installed and no OpenCode SDK, loads in each host, registers `imagegen` and `imageedit`, and registers the `oc-multi-imagegen` skill with the packaged body.
+- With the skill permitted, a real agent loads it before its first image call, calls `imagegen` for a new image and `imageedit` for an edit of an existing one, and the tool call, result and saved PNG match the arguments. With the skill denied, the agent still generates.
 - OpenCode 2 gets its credential from its own connection store, not from `OPENCODE_AUTH_CONTENT`.
 - The permission request happens inside the plugin, so a rejected request writes no file.
 - With the OpenAI Images API backend, whether an agent looks up the key's models with `imagegen_models` before generating, and whether SVG and GIF requests save usable files (see "Model lookup, SVG and GIF").
@@ -44,7 +44,7 @@ Hold to these rules in any variation of this setup:
 - Check `stat -c '%y' "${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json"` before and after a run. The modification time must not change.
 - When the access token expires, the run stops working until you sign in on the host again and start a new sandbox. Nothing in the container refreshes it.
 
-Because the container holds a usable access token, keep the permission rules that deny everything except the plugin's tools (`imagegen`, and `imagegen_models`, which only the OpenAI Images API backend registers), the `oc-multi-imagegen` skill and reading the image formats the plugin saves (`*.png`, `*.jpg`, `*.jpeg`, `*.webp`, `*.gif` and `*.svg`), so the agent has no shell and cannot read the credential. `read` is scoped to those extensions so the agent can look at what it generated; the credential file has none of them.
+Because the container holds a usable access token, keep the permission rules that deny everything except the plugin's tools (`imagegen`, `imageedit`, and `imagegen_models`, which only the OpenAI Images API backend registers), the `oc-multi-imagegen` skill and reading the image formats the plugin saves (`*.png`, `*.jpg`, `*.jpeg`, `*.webp`, `*.gif` and `*.svg`), so the agent has no shell and cannot read the credential. `read` is scoped to those extensions so the agent can look at what it generated; the credential file has none of them.
 
 OpenCode 1 reads the seed as its `auth.json`, and it stays in the sandbox until `clean`. For OpenCode 2, `seed v2` writes the seed into a new private `seed.XXXXXX` directory under `$OC_SANDBOX`, imports it with `opencode auth import`, and deletes that directory on every exit path: success, a failed import, a timeout, Ctrl-C or SIGTERM. The directory is the only thing the run deletes; a `seed` file or directory already in the sandbox is left as it was. The one exception is a container that Docker cannot confirm is gone, covered below: the directory is kept because that container may still read it. The plugin on OpenCode 2 reads only that imported connection. The `run` command also sets a decoy `OPENCODE_AUTH_CONTENT` for OpenCode 2; generation succeeds regardless, which shows the variable is not a fallback.
 
@@ -70,9 +70,9 @@ for h in v1 v2; do $S seed $h; done   # v1-floor is a load check only and needs 
 
 | Mode | Permits |
 | --- | --- |
-| `allow` (default) | `imagegen`, `imagegen_models`, the `oc-multi-imagegen` skill, and reading the saved image formats |
-| `tool-only` | `imagegen` and `imagegen_models` only, so the skill is denied |
-| `ask` | nothing without a prompt; `imagegen` and `imagegen_models` ask (for the permission probe below) |
+| `allow` (default) | `imagegen`, `imageedit`, `imagegen_models`, the `oc-multi-imagegen` skill, and reading the saved image formats |
+| `tool-only` | `imagegen`, `imageedit` and `imagegen_models` only, so the skill is denied |
+| `ask` | nothing without a prompt; `imagegen`, `imageedit` and `imagegen_models` ask (for the permission probe below) |
 
 `OC_TIMEOUT` (a positive whole number of seconds, default 300; `0` is refused) bounds every container the helper starts.
 
@@ -94,7 +94,7 @@ If a case fails or times out, read its `.err` log, then start over in a new sand
 ### 1. Load checks (no model, no quota)
 
 ```bash
-$S tools v1                   # 1.19.3: the printed tool ids must include "imagegen"
+$S tools v1                   # 1.19.3: the printed tool ids must include "imagegen" and "imageedit"
 $S tools v1-floor             # 1.18.29: same
 $S skills v1                  # JSON list: includes oc-multi-imagegen at /pluginpkg/skills/oc-multi-imagegen/SKILL.md
 $S skills v1-floor            # same on 1.18.29
@@ -105,7 +105,7 @@ $S run v2 load -- run --standalone --print-logs --log-level info --model nonexis
 
 `skills v1` runs `opencode debug skill`. `skills v2` runs [scripts/container-skill-probe.sh](../scripts/container-skill-probe.sh) in the container: it starts a private OpenCode 2 server and polls `GET /api/skill` (a request made before the location boots returns empty lists) until one successful reply lists `oc-multi-imagegen` exactly once, then prints that reply. The built-in skills alone do not satisfy it. If a request fails, a reply is not a complete skill list, or the skill is not listed once within 30 polls, the command exits 1 and prints the last reply and the server log. Compare each listed body with `skills/oc-multi-imagegen/SKILL.md` below its frontmatter (OpenCode 1 keeps a leading newline).
 
-For OpenCode 2, expect a `loading plugin ... entrypoint=file:///pluginpkg/server.js` line and no `failed to load plugin` line. The command then ends with `Model unavailable: nonexistent/model`, which is expected. OpenCode 2 has no tool listing, so this check shows the plugin loaded; the agent run below shows `imagegen` registered.
+For OpenCode 2, expect a `loading plugin ... entrypoint=file:///pluginpkg/server.js` line and no `failed to load plugin` line. The command then ends with `Model unavailable: nonexistent/model`, which is expected. OpenCode 2 has no tool listing, so this check shows the plugin loaded; the agent runs below show `imagegen` and `imageedit` registered.
 
 To check that user skill configuration survives, add a `skills.paths` entry that points at a skill directory you created under `$OC_SANDBOX/v1/work`, to `$OC_SANDBOX/v1/config/opencode/opencode.json` and rerun `skills v1`: both the user's skill and `oc-multi-imagegen` are listed.
 
@@ -124,18 +124,21 @@ It runs the same probe script. The probe starts a private OpenCode 2 server, app
 ```bash
 export OC_MODEL=openai/gpt-6.1-sol-fast
 P="Use the imagegen tool to generate an image at probe.png. Content: a red lantern. Size: 1254x1254."
+PE="Use the imageedit tool to edit probe-ref.png into probe-edit.png. Content: make the lantern blue. Size: 1254x1254."
 for h in v1 v2; do $S prepare $h ask; done
 $S run v1 ask -- run --format json --dir /work --model "$OC_MODEL" "$P" >"$OC_SANDBOX/logs/v1-ask.out" &&
-  $S run v2 ask -- run --standalone --format json --model "$OC_MODEL" "$P" >"$OC_SANDBOX/logs/v2-ask.out"
-jq -c 'select(.type=="tool_use") | .part | {tool, status: .state.status, error: .state.error}' "$OC_SANDBOX"/logs/v?-ask.out
+  $S run v2 ask -- run --standalone --format json --model "$OC_MODEL" "$P" >"$OC_SANDBOX/logs/v2-ask.out" &&
+  $S run v1 ask-edit -- run --format json --dir /work --model "$OC_MODEL" "$PE" >"$OC_SANDBOX/logs/v1-ask-edit.out" &&
+  $S run v2 ask-edit -- run --standalone --format json --model "$OC_MODEL" "$PE" >"$OC_SANDBOX/logs/v2-ask-edit.out"
+jq -c 'select(.type=="tool_use") | .part | {tool, status: .state.status, error: .state.error}' "$OC_SANDBOX"/logs/v?-ask*.out
 ls -A "$OC_SANDBOX"/v1/work "$OC_SANDBOX"/v2/work
 ```
 
-Expect `imagegen` called with status `error` ("rejected permission" on OpenCode 1, "non-interactive run cannot ask" on OpenCode 2) and empty work directories. The tool is visible and runs, and the plugin's own permission request stops it before credentials or the provider are touched. A rule that denies `imagegen` outright hides the tool from the agent instead, which shows nothing about the plugin.
+Expect `imagegen`, then `imageedit`, called with status `error` ("rejected permission" on OpenCode 1, "non-interactive run cannot ask" on OpenCode 2) and empty work directories. Each tool is visible and runs, and the plugin's own permission request stops it before credentials, reference files or the provider are touched: `probe-ref.png` does not exist, so an `imageedit` error about a missing file instead of the permission means the order is wrong. A rule that denies a tool outright hides it from the agent instead, which shows nothing about the plugin.
 
 ### 3. Image scenarios (real quota)
 
-Restore `allow`, then run the four cases on one host after the other. Later cases use earlier outputs. The prompts live in `case_prompt` in the script. They ask in plain terms and name neither `imagegen` nor the skill: a wide lighthouse illustration (A), a sticker with a transparent background (B), a stormy-sky edit of A's file (C), and two screens of one meal-planning app (D).
+Restore `allow`, then run the four cases on one host after the other. Later cases use earlier outputs. The prompts live in `case_prompt` in the script. They ask in plain terms and name no tool and not the skill: a wide lighthouse illustration (A), a sticker with a transparent background (B), a stormy-sky edit of A's file (C), and two screens of one meal-planning app (D).
 
 ```bash
 for h in v1 v2; do $S prepare $h; done
@@ -176,11 +179,11 @@ The agent chooses the size and the file paths within what the prompt says, so ch
 | --- | --- | --- |
 | A | `skill` (`oc-multi-imagegen`), then `imagegen` with a valid `size`, status `completed` | the size the output reports, RGB |
 | B | `skill`, then `imagegen` with `background: transparent` | RGBA |
-| C | `skill`, then `imagegen` with `images` naming A's file | RGB, same size as A |
-| D | `skill`, then `imagegen` for one screen, then `imagegen` for the other with `images` naming the first screen | two RGB portrait screens |
+| C | `skill`, then `imageedit` with `images` naming A's file | RGB, same size as A |
+| D | `skill`, then `imagegen` for one screen, then `imageedit` for the other with `images` naming the first screen | two RGB portrait screens |
 | skill denied (A) | `imagegen` with no `skill` call, status `completed` | RGB |
 
-The agent may also `read` files; a refused `read` of the project directory is a permission result, not a plugin fault. The first `imagegen` must come after the `skill` call in the event order. In the `.out` log, OpenCode 1 reports the skill input as `{"name": ...}` and OpenCode 2 as `{"id": ...}`.
+The agent may also `read` files; a refused `read` of the project directory is a permission result, not a plugin fault. The first image tool call must come after the `skill` call in the event order. An `imagegen` call that passes `images` fails with a message that points to `imageedit`; record whether the agent then called `imageedit`. In the `.out` log, OpenCode 1 reports the skill input as `{"name": ...}` and OpenCode 2 as `{"id": ...}`.
 
 Then look at the images, not just the numbers:
 
@@ -213,9 +216,9 @@ export OC_SANDBOX=$($S init)
 bun install --frozen-lockfile && $S pack
 for h in v1 v1-floor v2; do $S prepare $h allow openai-api; done   # records the backend the container's environment selects
 
-# No model and no key: what each host registered for the backend.
-for h in v1 v1-floor v2; do $S backend $h openai-api; done
+# No model and no key: what each host registered for the backend. The load checks run first (see below).
 $S tools v1; $S tools v1-floor
+for h in v1 v1-floor v2; do $S backend $h openai-api; done
 
 # One generation and one reference edit per host, at low quality and a size both backends accept.
 export OC_IMAGE_KEY_ENV_FILE=/path/to/dotenv OC_MODEL=openai/gpt-6.1-sol-fast
@@ -225,9 +228,9 @@ $S cases v1 smoke && $S cases v2 smoke
 $S clean
 ```
 
-`backend <host> openai-api` starts a private server in the container and fails unless the host registered what the backend needs and no provider entry for it. On OpenCode 1 that is a `/provider/auth` entry under `openai-images` whose one method has type `api`, an absent `/config` provider entry, and both tools, `imagegen` and `imagegen_models`. On OpenCode 2 it is an `openai-images` integration whose methods are exactly the key method and an env method that names only `OC_MULTI_IMAGEGEN_OPENAI_API_KEY`. The probe sets a placeholder for that variable (not a credential) in its own server, and requires the host to list it as a connection of the integration. Run `backend` in a sandbox that has not been seeded, because a saved credential is listed ahead of the environment connection and the probe expects the connection first. `backend <host> codex` checks that the Codex backend registers no sign-in, provider entry, integration or connection, and on OpenCode 1 no `imagegen_models`, after `prepare <host> allow codex`. The probe's arguments name what the sandbox should have selected; the selection itself comes from the container's `OC_MULTI_IMAGEGEN_BACKEND`, so a backend that is not selected fails the check.
+`backend <host> openai-api` starts a private server in the container and fails unless the host registered what the backend needs and no provider entry for it. On OpenCode 1 that is a `/provider/auth` entry under `openai-images` whose one method has type `api`, an absent `/config` provider entry, and the tools `imagegen`, `imageedit` and `imagegen_models`. On OpenCode 2 it is an `openai-images` integration whose methods are exactly the key method and an env method that names only `OC_MULTI_IMAGEGEN_OPENAI_API_KEY`. The probe sets a placeholder for that variable (not a credential) in its own server, and requires the host to list it as a connection of the integration. Run `backend` in a sandbox that has not been seeded, because a saved credential is listed ahead of the environment connection and the probe expects the connection first. `backend <host> codex` checks that the Codex backend registers no sign-in, provider entry, integration or connection, and on OpenCode 1 `imagegen` and `imageedit` but no `imagegen_models`, after `prepare <host> allow codex`. The probe's arguments name what the sandbox should have selected; the selection itself comes from the container's `OC_MULTI_IMAGEGEN_BACKEND`, so a backend that is not selected fails the check. On a host's first start, OpenCode 1 installs its plugin SDK, and that can take longer than the probe's 10-second request timeout. Run the load checks (`tools v1`, `tools v1-floor`) on a new sandbox before `backend` on those hosts.
 
-`cases <host> smoke` runs two cases, G and E, in the same way as the four-case run: G asks the agent to use `imagegen` for one flat illustration at `quality low` and size `1536x1024` (a size both backends accept), and E edits that file with `images`. Check them as in "Check the results": both `imagegen` calls `completed`, `images` naming G's file in E, and two PNGs at the requested size. A completed call with the decoy as the only saved key shows the environment key was used.
+`cases <host> smoke` runs two cases, G and E, in the same way as the four-case run: G asks in plain terms for one flat illustration at `quality low` and size `1536x1024` (a size both backends accept), and E asks for an edit of that file. Neither names a tool. Check them as in "Check the results": an `imagegen` call for G and an `imageedit` call for E with `images` naming G's file, both `completed`, and two PNGs at the requested size. A completed call with the decoy as the only saved key shows the environment key was used.
 
 ### Model lookup, SVG and GIF
 
@@ -289,6 +292,15 @@ Expect `failed to load plugin` with `OC_MULTI_IMAGEGEN_BACKEND is not a known ba
 
 ## Last validated run
 
+The split tools were run once, on smoke cases G and E only; that run is recorded first. The earlier runs recorded below it predate `imageedit` on the Codex and OpenAI Images API backends: every reference edit they record (case C, the second screen of case D and smoke case E) was an `imagegen` call with `images`, which the current `imagegen` refuses. Those records stay as history of their runs. The four-case scenario has not been run with the split tools.
+
+Codex and OpenAI Images API backends with `imagegen` and `imageedit`, run on 2026-11-05 with the pinned 1.19.3 and 2.0.32 hosts and plugin source at commit `026e0e5` (clean worktree): `dist/index.js` sha256 `f6390f0f4d7fbca2bcc1a4035d6af1c2d712c7c885eab416631ee0e471c812e6`, tarball sha256 `6c6fcd53dbccdc5a591633946addf587b8710332bf268fdf9779cad9aa95baf3`, the same package for both backends. The agent model was `openai/gpt-6.1-sol-fast`, with no `model` argument in any image call. Each backend ran in its own sandbox. 1.18.29 was not run.
+
+- Load and registration, no model: in each sandbox `tools v1` exited 0, then `backend v1 <backend>` and `backend v2 <backend>` exited 0. The first Codex sandbox ran `backend v1 codex` before any load check; it exited 1 when `wget` timed out after 10 seconds on `GET /provider/auth` while OpenCode 1 installed its plugin SDK on first start. No seed or paid call had been made. That sandbox was cleaned and abandoned and the run restarted in a new one. Only a summary note of that failure is retained; its raw output was overwritten.
+- `cases v1 smoke` and `cases v2 smoke` exited 0 for both backends. In all eight cases the agent loaded the `oc-multi-imagegen` skill before its first image call. For G it called `imagegen` with no `images`; for E it called `imageedit` with `images: ["/work/smoke-generate.png"]`, the path G saved. All eight image calls had status `completed` and metadata `{ out, versioned: false, truncated: false }`, and the eight PNGs are RGB 1536x1024. With the OpenAI Images API, the agent also called `imagegen_models` before each image call (four calls, all `completed`); each listed 11 of the key's 96 model IDs with `gpt-image-2.6-sunburst` as the default. Those image calls therefore requested `gpt-image-2.6-sunburst`; the response does not report which model was applied. On OpenCode 2, one `read` of `/work` in an OpenAI Images API edit case was refused by the permission rules before the skill call. The images were not reviewed for content.
+- Credentials: the host `auth.json` modification time (2026-11-05 21:22:25 +1100) was the same before and after the run. No `ocimg` container was left, and a scan found no key-shaped string in the retained evidence or in the cleaned sandboxes.
+- Retained for review (local and temporary, outside the repository): `/tmp/opencode/consistent-tools-live-20261105/` holds `SUMMARY.md`, the command log, the sanitized event logs, the images and the packed identity. Nothing in it is a credential.
+
 Codex backend, run on 2026-10-20 with the pinned versions above, plugin source at commit `a183e39` (clean worktree), built `dist/index.js` sha256 `7e0ffb0354539d4a4210abfce51b11459083a50ef02140d27b892a8a9d50ce04`, tarball sha256 `d9964c9ebb259dd74aa5db48e288d337386087ece8a7ec2c737f433e2639d31c`, agent model `openai/gpt-6.1-sol-fast`. The package under test came from `npm pack` with `npm install --omit=dev`; no `@opencode*` package was installed. This is one model on one ChatGPT account, so it shows what happened in these runs and says nothing about other models.
 
 - Load, no model: `tools v1` (1.19.3) and `tools v1-floor` (1.18.29) listed `imagegen`. `skills v1`, `skills v1-floor` and `skills v2` each listed `oc-multi-imagegen` with the packaged body (compared after trimming), from `/pluginpkg/skills/oc-multi-imagegen/SKILL.md`; OpenCode 2 listed it with `autoinvoke: true`. With a user `skills.paths` entry added, both OpenCode 1 versions listed the user's skill and ours. On OpenCode 1, a marker appended to the sandbox `SKILL.md` appeared on the next start, and an empty `plugin` list removed the skill. `lifecycle v2` on 2.0.32 printed `loaded: entries=1 marker=0`, `updated: entries=1 marker=1`, `removed: entries=0`. The OpenCode 2 load line was logged with no failure.
@@ -323,7 +335,7 @@ Earlier runs with explicit prompts and no skill covered the same hosts with the 
 ## Limits
 
 - The agent must choose to load the skill and to call the tool. The case prompts name neither, so a run shows what one model did with them, not that every model will.
-- The permission probe still names `imagegen`, because it tests the plugin's permission request and not discovery.
+- The permission probes name `imagegen` and `imageedit`, because they test the plugin's permission request and not discovery.
 - Token-sharing, missing-connection and API-key credentials on OpenCode 2 are covered by the unit tests with a fake host, not by this runbook. Exercising them in a container needs a model that does not depend on the same OpenAI sign-in.
 - The documented systemd unit and environment file were not run. The runs set the variables through the container environment, which is the same process environment the plugin reads.
 - The interactive sign-in prompts for `openai-images` (`opencode auth login` on either host, the TUI's **Other** entry) were not driven in a container. The runs show that each host registers the method, and the seed writes the key in the format each host's store uses; they do not show a person typing a key into the prompt.
