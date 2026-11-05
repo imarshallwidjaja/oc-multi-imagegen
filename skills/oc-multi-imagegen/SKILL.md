@@ -5,11 +5,11 @@ description: "Use before any image generation or image edit with the imagegen or
 
 # Image generation with imagegen
 
-The image tools follow reference pixels better than prose. Each call has three parts: references that carry look and geometry, a prompt that carries structure and facts, and a check of the file that came back. The tool descriptions list their arguments and limits. Where a backend registers separate tools for creating from text and for editing existing images, create with `imagegen` and edit with `imageedit`, and use the model information tool it offers (`imagegen_models`) to choose a model instead of guessing one.
+The image tools follow reference pixels better than prose. Each call has three parts: references that carry look and geometry, a prompt that carries structure and facts, and a check of the file that came back. The tool descriptions list their arguments and limits. Where a backend registers separate tools for creating from text and for editing existing images, create with `imagegen` and edit with `imageedit`, and use the model information tool it offers (`imagegen_models`) before choosing a model instead of guessing one. Where that tool lists the account's models live, a listed model is available to the key, not proven to support a format or feature.
 
 ## Pick the medium
 
-Icons, logos, charts, diagrams, and anything that must scale, be recoloured or be edited later belong in SVG or code, or in an existing icon set. Generate rasters for photos, illustrations, textures and visual concepts. When a layout needs exact positions, spacing or small text, render it in code and pass the render as a reference.
+Icons, logos, charts, diagrams, and anything that must scale, be recoloured or be edited later belong in SVG or code, or in an existing icon set. Where the backend generates SVG, use it for a simple icon or logo that must scale, and ask for flat shapes and few colours; charts, diagrams and exact layouts still belong in code. Generate rasters for photos, illustrations, textures and visual concepts. For a short animated GIF, describe the subject, the motion and how the loop returns to its first frame. When a layout needs exact positions, spacing or small text, render it in code and pass the render as a reference.
 
 ## Write the call
 
@@ -21,13 +21,15 @@ Icons, logos, charts, diagrams, and anything that must scale, be recoloured or b
 
 ## Correct
 
-Pass the result back as a reference and write: "Reproduce Image 1 faithfully: same layout, scale, colours and text. Apply only these corrections: 1. ... 2. ..." Name the region and the exact new values. Batch every fix for an image into one round, because each regeneration can change things you did not mention. Compare the result with the previous version, not only against the requested fix.
+For a PNG, JPEG or WebP result, pass it back as a reference and write: "Reproduce Image 1 faithfully: same layout, scale, colours and text. Apply only these corrections: 1. ... 2. ..." Name the region and the exact new values. Batch every fix for an image into one round, because each regeneration can change things you did not mention. Compare the result with the previous version, not only against the requested fix.
+
+A GIF or SVG result cannot be a reference image. Correct it with a new generation in the format the operator asked for: reuse the previous prompt, describe what to keep from the result, and list each correction. Convert a result to another format only when the operator asks for that.
 
 A reference-guided edit regenerates the whole image. When a region must stay pixel-identical, or one region keeps failing, edit or composite locally and record that the image was patched.
 
 ## Keep related images consistent
 
-Approve one anchor image first, then pass it as the style reference for each sibling and label its role. Separate generations drift in layout and detail, so frames that must match each other, such as a storyboard or a before-and-after pair, may be better generated as one numbered grid and cut afterwards.
+Approve one anchor image first, then pass it as the style reference for each sibling and label its role. When the anchor is a GIF or SVG, repeat its prompt's style description word for word in each sibling's prompt instead. Separate generations drift in layout and detail, so frames that must match each other, such as a storyboard or a before-and-after pair, may be better generated as one numbered grid and cut afterwards.
 
 ## Exact text
 
@@ -42,4 +44,5 @@ Set `background` to `transparent` for an isolated cut-out and ask for one subjec
 - Open every result at full size and crop dense regions. Read the pixel size the tool reports instead of assuming the requested size.
 - Check each quoted string, the colour roles, everything the prompt forbade, and anything that changed without being asked.
 - For transparency, check the image mode and alpha, and view the result on a light and a dark background.
+- For an SVG, render it and check its shapes, colours and text; its viewBox is in vector units, not pixels. For a GIF, check that the frames change and the loop closes; the reported size is one frame's.
 - Report what the final file is: which images were generated, from which references, and any post-processing such as upscaling, patching or matting. Say so when a result was not checked or differs from the request.

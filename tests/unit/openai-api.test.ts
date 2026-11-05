@@ -4,10 +4,12 @@ import os from "node:os"
 import path from "node:path"
 import { z } from "zod"
 import { readReferenceImages } from "../../src/input-image"
-import { openaiApiImagegen } from "../../src/openai-api"
-import type { GenerateArgs } from "../../src/schema"
+import { openaiApiImagegen, openaiApiModels } from "../../src/openai-api"
+import { lookUpOpenAiModels } from "../../src/openai-models"
 import type { ImageCredential } from "../../src/types"
 import { PNG_BUFFER } from "./fixtures"
+
+type GenerateArgs = z.output<typeof openaiApiImagegen.schema>
 
 function imagesResponse(data: Array<{ b64_json: string }>): Response {
   return new Response(JSON.stringify({ created: 0, data }))
@@ -48,7 +50,7 @@ describe("OpenAI Images API backend request", () => {
     expect(init.method).toBe("POST")
     expect(init.headers).toEqual({ "Content-Type": "application/json", Authorization: "Bearer sk-images" })
     expect(JSON.parse(init.body as string)).toEqual({
-      model: "gpt-image-2.5-sunburst",
+      model: "gpt-image-2.6-sunburst",
       prompt: "a mountain lake",
       size: "1536x864",
       quality: "auto",
@@ -68,7 +70,7 @@ describe("OpenAI Images API backend request", () => {
     const [url, init] = fetchMock.mock.calls[0]
     expect(url).toBe("https://api.openai.com/v1/images/edits")
     expect(JSON.parse(init.body as string)).toEqual({
-      model: "gpt-image-2.5-sunburst",
+      model: "gpt-image-2.6-sunburst",
       prompt: "a cat",
       size: "1536x864",
       quality: "auto",
@@ -89,8 +91,37 @@ describe("OpenAI Images API backend request", () => {
     const bodies = fetchMock.mock.calls.map(([, init]) => JSON.parse(init.body as string))
     expect(bodies.map(({ model, quality }) => ({ model, quality }))).toEqual([
       { model: "gpt-image-3-preview", quality: "xhigh" },
-      { model: "gpt-image-2.5-sunburst", quality: "auto" },
+      { model: "gpt-image-2.6-sunburst", quality: "auto" },
     ])
+  })
+
+  test.each([
+    ["jpeg", {}, { output_format: "jpeg", background: "opaque" }],
+    ["webp", { background: "transparent" }, { output_format: "webp", background: "transparent" }],
+    [
+      "gif",
+      { frame_count: 4, frame_duration_ms: 120 },
+      { output_format: "gif", frame_count: 4, frame_duration_ms: 120 },
+    ],
+    ["gif", { background: "opaque" }, { output_format: "gif", background: "opaque" }],
+    ["svg", { svg_model: "author-model" }, { output_format: "svg", svg: { model: "author-model" } }],
+    ["svg", {}, { output_format: "svg" }],
+  ] as const)("sends output_format %s with only the fields that belong to it", async (format, extra, expected) => {
+    const fetchMock = stubImage()
+
+    await callApi(generateArgs({ output_format: format, ...extra }))
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe("https://api.openai.com/v1/images/generations")
+    expect(JSON.parse(init.body as string)).toEqual({
+      model: "gpt-image-2.6-sunburst",
+      prompt: "a cat",
+      size: "1536x864",
+      quality: "auto",
+      n: 1,
+      stream: false,
+      ...expected,
+    })
   })
 
   test("never sends the legacy response_format or an organization header", async () => {
@@ -193,15 +224,204 @@ describe("OpenAI Images API backend arguments", () => {
     }
     const text = JSON.stringify(schema) + openaiApiImagegen.description
 
-    expect(schema.properties.model.description).toContain("gpt-image-2.5-sunburst")
+    expect(schema.properties.model.description).toContain("gpt-image-2.6-sunburst")
     expect(schema.properties.quality.description).toContain("auto")
     expect(schema.properties.images.description).toContain("up to 16")
     expect(schema.properties.images.description).toContain("PNG, JPEG or WebP")
     expect(text).not.toMatch(/Codex|unverified|1254x1254|in the prompt sentence/)
   })
 
+  test("accepts every documented output format and the GIF limits at both ends", () => {
+    for (const output_format of ["png", "jpeg", "webp", "gif", "svg"]) {
+      expect(parse({ size: "1024x1024", output_format }).success).toBe(true)
+    }
+    for (const [frame_count, frame_duration_ms] of [
+      [2, 20],
+      [16, 2000],
+    ]) {
+      expect(parse({ size: "1024x1024", output_format: "gif", frame_count, frame_duration_ms }).success).toBe(true)
+    }
+    expect(parse({ size: "1024x1024", output_format: "webp", background: "transparent" }).success).toBe(true)
+    // An empty reference list is not an edit, so it does not conflict with a generation-only format.
+    expect(parse({ size: "1024x1024", output_format: "svg", images: [] }).success).toBe(true)
+  })
+
+  test("documents the discovery step, the output controls and the GIF limits as tool limits", () => {
+    const schema = z.toJSONSchema(openaiApiImagegen.schema, { io: "input" }) as {
+      properties: Record<string, { description: string }>
+    }
+
+    expect(openaiApiImagegen.description).toContain("Call imagegen_models first")
+    expect(openaiApiImagegen.description).toContain("never a guessed one")
+    expect(schema.properties.out.description).toContain("PNG, JPEG, WebP, GIF or SVG")
+    expect(schema.properties.frame_count.description).toContain("not a proven provider maximum")
+    expect(schema.properties.frame_duration_ms.description).toContain("not a proven provider maximum")
+    expect(schema.properties.svg_model.description).toContain("never guess one")
+    expect(schema.properties.background.description).toContain("transparent needs output_format png or webp")
+  })
+
   test("adds no note to the result text", () => {
     expect(openaiApiImagegen).not.toHaveProperty("resultNote")
+  })
+})
+
+describe("OpenAI model lookup", () => {
+  const listed = [
+    { id: "gpt-4.1", object: "model", created: 1_700_000_000, owned_by: "system" },
+    { id: "chatgpt-image-latest", object: "model", created: 1_790_000_000, owned_by: "system" },
+    { id: "gpt-image-2.6-sunburst", object: "model", created: 1_800_000_000, owned_by: "system" },
+    {
+      id: "gpt-image-1",
+      object: "model",
+      created: 1_740_000_000,
+      owned_by: "system",
+      shutdown_date: "2026-10-23",
+    },
+    { id: "gpt-image-2.6-flare", object: "model", created: 1_800_000_000, owned_by: "system", shutdown_date: null },
+  ]
+
+  function stubModels(body: unknown = { object: "list", data: listed }, status = 200) {
+    const fetchMock = mock(async (_url: string, _init: RequestInit) =>
+      typeof body === "string" ? new Response(body, { status }) : new Response(JSON.stringify(body), { status }),
+    )
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+    return fetchMock
+  }
+
+  const ask = (args: { model?: string; query?: string } = {}) =>
+    lookUpOpenAiModels("sk-images", args, signal, "gpt-image-2.6-sunburst")
+
+  test("sends one GET to the documented endpoint with only the key as a bearer token", async () => {
+    const fetchMock = stubModels()
+
+    await ask()
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe("https://api.openai.com/v1/models")
+    expect(init).toEqual({ method: "GET", headers: { Authorization: "Bearer sk-images" }, signal })
+  })
+
+  test("lists every image-family ID, newest first, marking the default, and says what the list does not prove", async () => {
+    stubModels()
+
+    const text = await ask()
+
+    const lines = text.split("\n").filter((line) => line.startsWith("- "))
+    expect(lines).toEqual([
+      "- gpt-image-2.6-flare: created 2027-01-15, owned by system",
+      "- gpt-image-2.6-sunburst (imagegen default): created 2027-01-15, owned by system",
+      "- chatgpt-image-latest: created 2026-09-21, owned by system",
+      "- gpt-image-1: created 2025-02-19, owned by system, shutdown date 2026-10-23",
+    ])
+    expect(text).toContain("(gpt-image-* and chatgpt-image-* IDs): 4 of 5 model IDs.")
+    expect(text).toContain("not proof that it supports SVG, GIF, a size or any other feature")
+    expect(text).toContain("imagegen sends any model ID unchanged, listed or not")
+    expect(text).not.toContain("gpt-4.1")
+    expect(text).not.toContain("is not in this list")
+  })
+
+  test("says when the default is not listed, and that imagegen still sends it", async () => {
+    stubModels({ data: listed.filter((model) => model.id !== "gpt-image-2.6-sunburst") })
+
+    expect(await ask()).toContain(
+      "The imagegen default gpt-image-2.6-sunburst is not in this list; imagegen still sends it when model is omitted.",
+    )
+  })
+
+  test("searches every listed ID with query words, image models or not", async () => {
+    stubModels()
+
+    const text = await ask({ query: "GPT 4" })
+
+    expect(text).toContain('that contain "gpt" and "4": 1 of 5 model IDs.')
+    expect(text).toContain("- gpt-4.1: created 2023-11-14, owned by system")
+    expect(await ask({ query: "no-such-model" })).toContain("0 of 5 model IDs")
+  })
+
+  test("checks one exact ID, listed or not", async () => {
+    stubModels()
+
+    const found = await ask({ model: "gpt-image-2.6-flare" })
+    const missing = await ask({ model: "gpt-image-9" })
+
+    expect(found).toContain("gpt-image-2.6-flare is listed by GET /v1/models for this key.")
+    expect(found).toContain("not proof that it supports SVG")
+    expect(missing).toContain("gpt-image-9 is not listed by GET /v1/models for this key (5 model IDs listed).")
+    expect(missing).toContain("- gpt-image-2.6-sunburst (imagegen default)")
+  })
+
+  test("names how many entries a long list leaves out instead of dropping them silently", async () => {
+    const many = Array.from({ length: 205 }, (_, index) => ({ id: `gpt-image-x${index}`, created: index }))
+    stubModels({ data: many })
+
+    const text = await ask()
+
+    expect(text.split("\n").filter((line) => line.startsWith("- gpt-image-x"))).toHaveLength(200)
+    expect(text).toContain("- ... and 5 more not shown; narrow the list with query.")
+    expect(text).toContain("205 of 205 model IDs")
+  })
+
+  test.each([
+    ["a body that is not JSON", "<html>oops sk-images</html>", "the body is not JSON"],
+    ["no data list", { object: "list" }, "data is not a list"],
+    ["an entry without an id", { data: [{ object: "model" }] }, "data[0] has no usable id"],
+    ["an id with spaces", { data: [{ id: "gpt image" }] }, "data[0] has no usable id"],
+    [
+      "a non-numeric created",
+      { data: [{ id: "gpt-image-2", created: "today" }] },
+      "data[0].created is not a representable Unix timestamp",
+    ],
+    // JSON.parse accepts 1e300, but a Date cannot hold it, so showing it would throw a RangeError.
+    [
+      "a created time no date can hold",
+      { data: [{ id: "gpt-image-2", created: 1e300 }] },
+      "data[0].created is not a representable Unix timestamp",
+    ],
+    ["a non-string owner", { data: [{ id: "gpt-image-2", owned_by: 7 }] }, "data[0].owned_by is not a string"],
+    [
+      "a non-string shutdown date",
+      { data: [{ id: "gpt-image-2", shutdown_date: 7 }] },
+      "data[0].shutdown_date is not a string or null",
+    ],
+  ])("refuses a response with %s without quoting it", async (_name, body, reason) => {
+    stubModels(body)
+
+    const error = (await ask().catch((caught: Error) => caught)) as Error
+
+    expect(error.message).toBe(`openai-api models response is malformed: ${reason}. The model list could not be read.`)
+  })
+
+  test("reports a rejected request with the status and a bounded body without the key", async () => {
+    stubModels(`{"error":{"message":"Incorrect API key provided: sk-images."}}${"x".repeat(1000)}`, 401)
+
+    const error = (await ask().catch((caught: Error) => caught)) as Error
+
+    expect(error.message).toStartWith(
+      'openai-api models request failed: 401 {"error":{"message":"Incorrect API key provided: [redacted]."}}',
+    )
+    expect(error.message.length).toBeLessThan(600)
+  })
+
+  test("refuses a key that cannot be an HTTP header value before any request", async () => {
+    const fetchMock = stubModels()
+    const host = {
+      signal,
+      authorize: async () => {},
+      resolveCredential: async () => ({ type: "key" as const, key: "sk bad" }),
+    }
+
+    await expect(openaiApiModels.run({}, host)).rejects.toThrow(
+      "The OpenAI Images API key contains characters that cannot be sent in an HTTP header.",
+    )
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  test("describes itself as the expected first step and as no proof of capability", () => {
+    expect(openaiApiModels.description).toContain("expected first step")
+    expect(openaiApiModels.description).toContain("GET /v1/models")
+    expect(openaiApiModels.description).toContain("not proof that it supports SVG, GIF")
+    expect(openaiApiModels.description).toContain("OC_MULTI_IMAGEGEN_OPENAI_API_KEY")
   })
 })
 

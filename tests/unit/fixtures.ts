@@ -24,6 +24,19 @@ export const LOSSY_WEBP_BUFFER = Buffer.from(
   "base64",
 )
 
+// A looping two-frame 3x2 GIF89a with a four-colour palette, encoded by hand; Chromium decodes its first frame as
+// white, red and blue columns.
+export const ANIMATED_GIF_BUFFER = Buffer.from(
+  "R0lGODlhAwACAJEAAAAAAP////8AAAAA/yH/C05FVFNDQVBFMi4wAwEAAAAh+QQACgAAACwAAAAAAwACAAACBIy4UCsAIfkEAAoAAAAsAAAAAAMAAgAAAgScmFEpADs=",
+  "base64",
+)
+
+// A static SVG of the kind the OpenAI Images API documents: vector shapes, a gradient referenced within the document
+// and a style sheet, with no script, external resource or embedded raster.
+export const SVG_BUFFER = Buffer.from(
+  '<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 12" width="240" height="120"><defs><linearGradient id="sky"><stop offset="0" stop-color="#2060a0"/></linearGradient></defs><style>.sun{fill:#f0c020}</style><rect width="24" height="12" fill="url(#sky)"/><circle class="sun" cx="6" cy="6" r="3"/></svg>\n',
+)
+
 export function pngDataUrl(buf: Buffer): string {
   return `data:image/png;base64,${buf.toString("base64")}`
 }

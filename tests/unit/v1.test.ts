@@ -110,7 +110,6 @@ describe("OpenCode 1 skill registration", () => {
 
 const LEGACY_ARGUMENTS = ["prompt", "out", "size", "images", "background", "model", "quality"]
 const NANO_ARGUMENTS = ["model", "prompt", "out", "resolution", "aspect_ratio", "quality", "background", "seed"]
-const legacyFlavours = FLAVOURS.filter((flavour) => flavour.backend !== "nano-gpt")
 const keyFlavours = FLAVOURS.filter((flavour) => flavour.key)
 const operationRows = FLAVOURS.flatMap((flavour) =>
   flavour.operations.map((operation) => [flavour.backend, operation.tool, flavour, operation] as const),
@@ -118,16 +117,27 @@ const operationRows = FLAVOURS.flatMap((flavour) =>
 const args = { prompt: "a cat", out: "cat.png", size: SHARED_SIZE }
 
 describe("OpenCode 1 adapter", () => {
-  test.each(legacyFlavours)(
-    "registers one imagegen tool with the documented arguments for $backend",
-    async (flavour) => {
-      selectBackendVariable(flavour.backend)
-      const hooks = await plugin.server({} as never)
+  test("registers one imagegen tool with the documented arguments for codex", async () => {
+    const hooks = await plugin.server({} as never)
 
-      expect(Object.keys(hooks.tool ?? {})).toEqual(["imagegen"])
-      expect(Object.keys((await loadTool(undefined, flavour.backend)).args)).toEqual(LEGACY_ARGUMENTS)
-    },
-  )
+    expect(Object.keys(hooks.tool ?? {})).toEqual(["imagegen"])
+    expect(Object.keys((await loadTool(undefined, "codex")).args)).toEqual(LEGACY_ARGUMENTS)
+  })
+
+  test("registers imagegen with its output controls and the imagegen_models lookup for openai-api", async () => {
+    selectBackendVariable("openai-api")
+    const hooks = await plugin.server({} as never)
+
+    expect(Object.keys(hooks.tool ?? {})).toEqual(["imagegen", "imagegen_models"])
+    expect(Object.keys(hooks.tool?.imagegen.args ?? {})).toEqual([
+      ...LEGACY_ARGUMENTS,
+      "output_format",
+      "frame_count",
+      "frame_duration_ms",
+      "svg_model",
+    ])
+    expect(Object.keys(hooks.tool?.imagegen_models.args ?? {})).toEqual(["query", "model"])
+  })
 
   test("registers the NanoGPT generation, editing and model information tools", async () => {
     selectBackendVariable("nano-gpt")
@@ -227,6 +237,21 @@ describe("OpenCode 1 adapter", () => {
 
     await expect(act).rejects.toThrow("denied by the host")
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  test("asks for imagegen_models on the openai-api resource before the model list request, and returns the text", async () => {
+    const fetchMock = mock(async () => new Response(JSON.stringify({ object: "list", data: [] })))
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+    const tool = await loadTool(undefined, "openai-api", "imagegen_models")
+    const { asks, ask } = recordAsks()
+
+    const result = await tool.execute({ query: "image" }, v1ToolContext(dir, new AbortController().signal, ask))
+
+    expect(asks).toEqual([
+      { permission: "imagegen_models", patterns: ["openai-api"], always: ["openai-api"], metadata: { query: "image" } },
+    ])
+    expect(result).toEqual({ output: expect.stringContaining('that contain "image": 0 of 0 model IDs') })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 })
 

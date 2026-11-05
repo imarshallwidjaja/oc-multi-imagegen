@@ -1,5 +1,5 @@
 import { z } from "zod"
-import { defineInfoTool, IMAGEGEN_TOOL } from "./imagegen"
+import { defineInfoTool, IMAGEGEN_TOOL, MODELS_TOOL } from "./imagegen"
 import { SKILL_NAME } from "./skill"
 
 // The NanoGPT models this plugin supports, and the one place that says what each accepts. Tool schemas, validation,
@@ -12,7 +12,6 @@ export type Operation = "generate" | "edit"
 
 export const GENERATE_TOOL = IMAGEGEN_TOOL
 export const EDIT_TOOL = "imageedit"
-export const MODELS_TOOL = "imagegen_models"
 
 export const MODEL_SOURCES = [
   "https://docs.nano-gpt.com/api-reference/endpoint/image-api-generate",

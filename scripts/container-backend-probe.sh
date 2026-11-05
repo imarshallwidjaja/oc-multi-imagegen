@@ -3,7 +3,7 @@
 # the host registered for the plugin's selected backend, with no model and no credential. The image has busybox wget, sed
 # and grep but no jq or Node, so this is POSIX sh.
 #
-#   container-backend-probe.sh v1 <codex|openai-api>   OpenCode 1: the sign-in method, any provider entry, the tool
+#   container-backend-probe.sh v1 <codex|openai-api>   OpenCode 1: the sign-in method, any provider entry, the tools
 #   container-backend-probe.sh v2 <codex|openai-api>   OpenCode 2: the integration, its methods and its connections
 #
 # The container's OC_MULTI_IMAGEGEN_BACKEND selects the backend, so the arguments here are what the run expects it to
@@ -11,7 +11,8 @@
 # OpenCode 1 exactly one method, of type api; on OpenCode 2 exactly two, the key method and the env method for
 # OC_MULTI_IMAGEGEN_OPENAI_API_KEY, and a connection for that variable once it is set (the probe sets a placeholder that is
 # not a credential, and the plugin never reads it). codex must register no openai-images entry at all, whatever its
-# methods, because its sign-in belongs to the host. Exit 0 means every printed fact matched; a fact that does not match,
+# methods, because its sign-in belongs to the host. On OpenCode 1 both register imagegen, and only openai-api registers
+# imagegen_models. Exit 0 means every printed fact matched; a fact that does not match,
 # or a request that fails, prints the server log to stderr and exits 1.
 # PROBE_TMP names the container's scratch directory; the unit tests point it at a temporary directory.
 
@@ -79,6 +80,8 @@ if [ "$host" = v1 ]; then
   reply=$(get "/experimental/tool?directory=/work&provider=openai&model=gpt-5") || fail "GET /experimental/tool failed"
   # sed -n with p prints only a reply that has the imagegen entry, so an error body cannot pass as a description.
   expect "tool" "$(printf '%s' "$reply" | sed -n 's/.*{"id":"imagegen","description":"\([^"]\{1,110\}\).*/\1/p')" present
+  # openai-api also registers its live model lookup; codex registers none.
+  expect "models tool" "$(printf '%s' "$reply" | sed -n 's/.*{"id":"imagegen_models","description":"\([^"]\{1,110\}\).*/\1/p')" $wanted
 else
   reply=$(get /api/integration) || fail "GET /api/integration failed"
   found=$(printf '%s' "$reply" | sed 's/{"id":"/\n&/g' | grep '^{"id":"openai-images"')

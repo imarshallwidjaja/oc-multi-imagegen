@@ -35,27 +35,40 @@ export type ReferenceRules = { mimeTypes?: readonly string[]; maxDataUrlLength?:
 // registers its `shape` and OpenCode 2 the schema itself. Strict and stripping objects are both accepted.
 export type ToolSchema = z.ZodObject<z.core.$ZodLooseShape, z.core.$ZodObjectConfig>
 
-// What a host adapter supplies for one image call. The flow in `defineImageTool` invokes these in order:
-// authorize, resolveDirectory, resolveCredential.
-export type ImageToolHost = {
+// What a host adapter supplies for a call that reaches the provider. The shared flows invoke these in order:
+// authorize, then resolveCredential (an image call resolves its directory between the two).
+export type ProviderAccess = {
   signal: AbortSignal
   // Asks the host to allow the whole operation of the tool named `action`. Rejects when the host denies it.
   authorize: (action: string, args: Record<string, unknown>) => Promise<void>
-  resolveDirectory: () => Promise<string>
   // Returns the credential kind the active backend declares.
   resolveCredential: () => Promise<ImageCredential>
 }
 
+// What a host adapter supplies for one image call: provider access and the session directory that relative paths
+// resolve against.
+export type ImageToolHost = ProviderAccess & { resolveDirectory: () => Promise<string> }
+
 export type SavedImage = { savedPath: string; versioned: boolean; message: string }
 
-// A tool that calls the provider, and saves one native PNG, JPEG or WebP. `run` parses the raw arguments with `schema` itself, because
-// hosts can call execute without validating them first.
+// A tool that calls the provider and saves one native image file. `run` parses the raw arguments with `schema`
+// itself, because hosts can call execute without validating them first.
 export type ImageTool = {
   kind: "image"
   name: string
   description: string
   schema: ToolSchema
   run: (rawArgs: unknown, host: ImageToolHost) => Promise<SavedImage>
+}
+
+// A tool that asks the provider for information with the backend's credential, after the host allows it. It reads
+// and writes no files, needs no session directory and returns text.
+export type LookupTool = {
+  kind: "lookup"
+  name: string
+  description: string
+  schema: ToolSchema
+  run: (rawArgs: unknown, host: ProviderAccess) => Promise<string>
 }
 
 // A tool that answers from data in this package. It needs no permission, credential, file or provider access.
@@ -67,7 +80,7 @@ export type InfoTool = {
   run: (rawArgs: unknown) => string
 }
 
-export type BackendTool = ImageTool | InfoTool
+export type BackendTool = ImageTool | LookupTool | InfoTool
 
 // One image backend. The active backend is chosen by the OC_MULTI_IMAGEGEN_BACKEND variable when the plugin loads.
 // A backend owns everything specific to its provider: the tools it registers (each with its own input schema,

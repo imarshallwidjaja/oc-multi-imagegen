@@ -15,7 +15,7 @@
 #   scripts/opencode-container.sh skills <host>                 skills the host registered (no model)
 #   scripts/opencode-container.sh backend <host> <backend>      the sign-in and tool a host registered for the backend (no model)
 #   scripts/opencode-container.sh lifecycle v2                  skill update and removal on a running server (no model)
-#   OC_MODEL=... scripts/opencode-container.sh cases <host> [smoke]  the four image cases, or one generation and one edit
+#   OC_MODEL=... scripts/opencode-container.sh cases <host> [smoke|formats]  four image cases; one generation and one edit; or SVG and GIF
 #   scripts/opencode-container.sh clean                         remove credentials and session state
 #
 # <host> is v1, v1-floor or v2. Each host gets its own HOME and XDG directories under $OC_SANDBOX.
@@ -183,6 +183,11 @@ case_prompt() {
     # generation and one reference edit through the selected backend without the four-case spend.
     G) echo "Use the imagegen tool to create a simple flat illustration of a red paper lantern on a plain light background. Use quality low and size 1536x1024. Save it as smoke-generate.png in the project folder." ;;
     E) echo "Use the imagegen tool to edit smoke-generate.png: make the lantern blue and keep everything else as it is. Pass the file in images, and use quality low and size 1536x1024. Save the result as smoke-edit.png in the project folder." ;;
+    # The format cases need the openai-api backend. They name imagegen but not imagegen_models, so a run shows whether
+    # the tool descriptions lead the agent to look up the key's models first. The API rejected four 1024x1024 GIF frames
+    # ("No supported sheet fits 4 GIF frames", longest sheet edge at most 3840) and accepted four at 768x768.
+    V) echo "Use the imagegen tool to create a simple flat vector logo of a red paper lantern as an SVG file that stays sharp at any size. Use quality low and size 1024x1024. Save it as lantern-logo.svg in the project folder." ;;
+    F) echo "Use the imagegen tool to create a short looping animated GIF of a red paper lantern gently swaying, with 4 frames of 150 milliseconds each. Use quality low and size 768x768. Save it as lantern-loop.gif in the project folder." ;;
   esac
 }
 
@@ -221,8 +226,9 @@ case $cmd in
     ;;
 
   prepare)
-    # allow: imagegen, the plugin's skill and reading PNG files (to look at results) are permitted.
-    # tool-only: imagegen alone, so the skill is denied. ask: imagegen asks and nothing else is permitted.
+    # allow: the plugin's tools, its skill and reading the image formats it can save (to look at results) are
+    # permitted. tool-only: the plugin's tools alone, so the skill is denied. ask: the plugin's tools ask and nothing
+    # else is permitted. The tools are imagegen and imagegen_models, which only the openai-api backend registers.
     # Everything else is denied, so the agent has no shell and cannot read the credential.
     # The optional backend is recorded for the host and reaches its containers as OC_MULTI_IMAGEGEN_BACKEND (base_args):
     # codex, the plugin's default, sets nothing; openai-api selects the official API. The plugin entries stay plain.
@@ -236,11 +242,16 @@ case $cmd in
     tool_effect=$perm
     [ "$perm" != tool-only ] || tool_effect=allow
     extra=''
+    # The extensions of every format the plugin can save; the credential file has none of them.
+    readable="png jpg jpeg webp gif svg"
     if [ "$host" = v2 ]; then
       if [ "$perm" = allow ]; then
         extra=',
-    { "action": "skill", "resource": "oc-multi-imagegen", "effect": "allow" },
-    { "action": "read", "resource": "*.png", "effect": "allow" }'
+    { "action": "skill", "resource": "oc-multi-imagegen", "effect": "allow" }'
+        for ext in $readable; do
+          extra="$extra,
+    { \"action\": \"read\", \"resource\": \"*.$ext\", \"effect\": \"allow\" }"
+        done
       fi
       # update and share are OpenCode 2's own settings; the run needs neither the updater nor sharing.
       cat >"$sandbox/$host/config/opencode/opencode.json" <<EOF
@@ -249,7 +260,8 @@ case $cmd in
   "plugins": ["/pluginpkg"],
   "permissions": [
     { "action": "*", "resource": "*", "effect": "deny" },
-    { "action": "imagegen", "resource": "*", "effect": "$tool_effect" }$extra
+    { "action": "imagegen", "resource": "*", "effect": "$tool_effect" },
+    { "action": "imagegen_models", "resource": "*", "effect": "$tool_effect" }$extra
   ],
   "update": "disable",
   "share": "disabled"
@@ -257,13 +269,15 @@ case $cmd in
 EOF
     else
       if [ "$perm" = allow ]; then
-        extra=', "skill": { "*": "deny", "oc-multi-imagegen": "allow" }, "read": { "*": "deny", "*.png": "allow" }'
+        reads=''
+        for ext in $readable; do reads="$reads, \"*.$ext\": \"allow\""; done
+        extra=", \"skill\": { \"*\": \"deny\", \"oc-multi-imagegen\": \"allow\" }, \"read\": { \"*\": \"deny\"$reads }"
       fi
       cat >"$sandbox/$host/config/opencode/opencode.json" <<EOF
 {
   "\$schema": "https://opencode.ai/config.json",
   "plugin": ["file:///pluginpkg"],
-  "permission": { "*": "deny", "imagegen": "$tool_effect"$extra },
+  "permission": { "*": "deny", "imagegen": "$tool_effect", "imagegen_models": "$tool_effect"$extra },
   "autoupdate": false,
   "share": "disabled"
 }
@@ -377,13 +391,17 @@ EOF
   cases)
     # The paid scenario: four model-driven image calls per host, in order, stopping at the first failure.
     # `cases <host> smoke` runs two instead: one low-quality generation and one reference edit of its output.
+    # `cases <host> formats` runs one SVG and one GIF generation, which need the openai-api backend.
     # Later cases build on earlier outputs, so it only starts from an empty work directory and no earlier logs.
     host=${1:?host}; mode=${2:-full}
-    case $mode in full) case_ids="A B C D" ;; smoke) case_ids="G E" ;; *) die "Cases mode must be full or smoke" ;; esac
+    case $mode in full) case_ids="A B C D" ;; smoke) case_ids="G E" ;; formats) case_ids="V F" ;; *) die "Cases mode must be full, smoke or formats" ;; esac
     model=${OC_MODEL:?Set OC_MODEL to the agent model, for example openai/gpt-6.1-sol-fast}
     case $host in v1) opts=(run --format json --dir /work --model "$model") ;; v2) opts=(run --standalone --format json --model "$model") ;; *) die "cases runs on v1 or v2" ;; esac
     use_sandbox
     [ -d "$sandbox/$host/work" ] || die "Run '$0 prepare $host' first"
+    if [ "$mode" = formats ] && [ "$(cat "$sandbox/$host/backend" 2>/dev/null)" != openai-api ]; then
+      die "The formats cases need the openai-api backend; run '$0 prepare $host allow openai-api' first"
+    fi
     [ -z "$(ls -A "$sandbox/$host/work")" ] || die "$sandbox/$host/work is not empty; start a new attempt with '$0 init'"
     for log in "$sandbox/logs/$host-case-"*; do
       [ ! -e "$log" ] || die "$log exists from an earlier attempt; start a new attempt with '$0 init'"

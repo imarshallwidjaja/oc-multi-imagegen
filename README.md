@@ -13,7 +13,8 @@ Use your OpenCode ChatGPT sign-in with the default **Codex backend**, or connect
 - **Illustrations from a prompt:** scene art, website imagery, textures and visual concepts.
 - **Variations from references:** change the weather, restyle an image or combine several images in one request.
 - **Transparent assets:** request a character or object cut-out for an avatar, sticker or illustrated icon. Results depend on the model; inspect the returned alpha.
-- **Images your agent can keep working with:** each result is a local PNG, JPEG or WebP with the provider's original bytes and a matching extension. Use the returned path to inspect it, reference it in another call or use it in your project.
+- **Vector logos and short animations:** with an OpenAI Images API key, ask for a static SVG logo or icon, or a short looping GIF.
+- **Images your agent can keep working with:** each result is a local file with the provider's original bytes and a matching extension: PNG, JPEG or WebP, or GIF and SVG from the OpenAI Images API. Use the returned path to inspect the file or use it in your project. A PNG, JPEG or WebP result can also be the reference image for another call; a GIF or SVG result cannot.
 
 ## From a prompt to a finished asset
 
@@ -72,7 +73,7 @@ Then ask for an image. The [permissions guide](docs/permissions.md) covers agent
 | Backend | Use it with | Image tools |
 | --- | --- | --- |
 | **Codex** (default) | Your OpenCode ChatGPT sign-in | `imagegen` for generation and reference edits |
-| **OpenAI Images API** | An OpenAI image API key | `imagegen` with native pixel sizes |
+| **OpenAI Images API** | An OpenAI image API key | `imagegen` with native pixel sizes and SVG or GIF output, and a live list of the key's models |
 | **NanoGPT** | A NanoGPT API key | Separate generation/editing tools and a choice of curated models |
 
 [Backend setup and model choices](docs/backends.md) explain authentication, controls, availability and [recorded NanoGPT workflow coverage](docs/backends.md#nanogpt-live-workflow-coverage). Generation uses the selected provider's account quota or API credit.

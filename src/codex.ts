@@ -1,6 +1,7 @@
 import { z } from "zod"
 import { defineImageTool, describeImagegen, IMAGEGEN_TOOL } from "./imagegen"
 import { postImagesRequest } from "./images-request"
+import { RASTER_FORMATS } from "./output-image"
 import { createArgsShape, type GenerateArgs } from "./schema"
 import { appendSizeToPrompt, IMAGE_SIZES, type ImageSize, SIZE_CHOICES } from "./size"
 import { type Backend, expectCredential, type ImageCredential } from "./types"
@@ -33,6 +34,7 @@ const argsShape = createArgsShape({
       "Requested width x height preset; choose it by aspect ratio. The tool asks for it in the prompt and does not resize the result; the result reports the actual pixel dimensions.",
     ),
   maxImages: MAX_REFERENCE_IMAGES,
+  savedFormats: RASTER_FORMATS,
   model: `Optional model name, sent to the Codex backend unchanged. Omit it to send ${CODEX_REQUEST_DEFAULTS.model}. Whether the backend applies it is unverified in recorded runs and can change, so the result text lists it as requested, not verified.`,
   quality: `Optional quality value, sent to the Codex backend unchanged. Omit it to send ${CODEX_REQUEST_DEFAULTS.quality}. Whether the backend applies it is unverified in recorded runs and can change, so the result text lists it as requested, not verified.`,
 })

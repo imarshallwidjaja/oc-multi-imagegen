@@ -48,6 +48,8 @@ export type Flavour = {
   editReferences: (body: Record<string, unknown>) => string[]
   // Whether an argument the tool does not define is dropped (true) or rejected (false).
   dropsUnknownArguments: boolean
+  // Whether the image tools also save GIF and SVG (true) or only PNG, JPEG and WebP (false).
+  savesGifAndSvg: boolean
   // For a key credential: the variable that overrides the saved key, and the saved key itself.
   key?: { variable: string; saved: string; label: string }
 }
@@ -66,18 +68,51 @@ const LEGACY_INVALID: Operation["invalid"] = [
   ["a missing size", { prompt: "a cat", out: "cat.png" }, "Missing size"],
 ]
 
+const LEGACY_NULLS: Record<string, null> = { images: null, background: null, model: null, quality: null }
+
 function legacyOperation(url: string, label: string): Operation {
   return {
     tool: "imagegen",
     url,
     args: LEGACY_ARGS,
     invalid: LEGACY_INVALID,
-    nulls: { images: null, background: null, model: null, quality: null } as Record<string, null>,
+    nulls: LEGACY_NULLS,
     nullBody: { background: "opaque" },
     absentWhenNull: [],
     failure: `${label} images request failed: 500 upstream boom`,
     unusableResponse: `no image returned by ${label} images endpoint`,
   }
+}
+
+// The OpenAI Images API adds output controls whose combinations are checked before permission or any request.
+const openaiOperation: Operation = {
+  ...legacyOperation("https://api.openai.com/v1/images/generations", "openai-api"),
+  invalid: [
+    ...LEGACY_INVALID,
+    ["an unknown output format", { ...LEGACY_ARGS, output_format: "bmp" }, "at output_format"],
+    ["GIF output with reference images", { ...LEGACY_ARGS, output_format: "gif", images: ["ref.png"] }, "at images"],
+    ["SVG output with reference images", { ...LEGACY_ARGS, output_format: "svg", images: ["ref.png"] }, "at images"],
+    ["frame_count without GIF output", { ...LEGACY_ARGS, frame_count: 4 }, "at frame_count"],
+    ["frame_count above the tool limit", { ...LEGACY_ARGS, output_format: "gif", frame_count: 17 }, "at frame_count"],
+    ["a fractional frame_count", { ...LEGACY_ARGS, output_format: "gif", frame_count: 2.5 }, "at frame_count"],
+    [
+      "frame_duration_ms below the tool limit",
+      { ...LEGACY_ARGS, output_format: "gif", frame_duration_ms: 10 },
+      "at frame_duration_ms",
+    ],
+    [
+      "frame_duration_ms with SVG output",
+      { ...LEGACY_ARGS, output_format: "svg", frame_duration_ms: 100 },
+      "at frame_duration_ms",
+    ],
+    ["svg_model without SVG output", { ...LEGACY_ARGS, output_format: "gif", svg_model: "author" }, "at svg_model"],
+    ["an empty svg_model", { ...LEGACY_ARGS, output_format: "svg", svg_model: "" }, "at svg_model"],
+    ["a transparent JPEG", { ...LEGACY_ARGS, output_format: "jpeg", background: "transparent" }, "at background"],
+    ["a transparent GIF", { ...LEGACY_ARGS, output_format: "gif", background: "transparent" }, "at background"],
+  ],
+  nulls: { ...LEGACY_NULLS, output_format: null, frame_count: null, frame_duration_ms: null, svg_model: null },
+  nullBody: { background: "opaque", output_format: "png" },
+  absentWhenNull: ["frame_count", "frame_duration_ms", "svg"],
 }
 
 const NANO_URL = "https://api.nano-gpt.com/api/v1/images"
@@ -106,18 +141,20 @@ export const FLAVOURS: Flavour[] = [
     editsUrl: "https://chatgpt.com/backend-api/codex/images/edits",
     editReferences: legacyReferences,
     dropsUnknownArguments: true,
+    savesGifAndSvg: false,
   },
   {
     backend: "openai-api",
     authorization: "Bearer sk-images",
     resource: "openai-api",
     provider: "openai-images",
-    operations: [legacyOperation("https://api.openai.com/v1/images/generations", "openai-api")],
+    operations: [openaiOperation],
     editTool: "imagegen",
     editArgs: (images) => ({ ...LEGACY_ARGS, images }),
     editsUrl: "https://api.openai.com/v1/images/edits",
     editReferences: legacyReferences,
     dropsUnknownArguments: true,
+    savesGifAndSvg: true,
     key: { variable: "OC_MULTI_IMAGEGEN_OPENAI_API_KEY", saved: "sk-images", label: "OpenAI Images API" },
   },
   {
@@ -169,6 +206,7 @@ export const FLAVOURS: Flavour[] = [
     editsUrl: NANO_URL,
     editReferences: nanoReferences,
     dropsUnknownArguments: false,
+    savesGifAndSvg: false,
     key: { variable: "OC_MULTI_IMAGEGEN_NANOGPT_API_KEY", saved: "sk-nano", label: "NanoGPT API" },
   },
 ]

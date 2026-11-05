@@ -2,7 +2,13 @@ import type { Plugin } from "@opencode/plugin"
 import { selectBackend } from "./backend"
 import { resultSchema } from "./schema"
 import { loadPackagedSkill } from "./skill"
-import { type CredentialSpec, emptyEnvironmentError, environmentOverride, type ImageCredential } from "./types"
+import {
+  type CredentialSpec,
+  emptyEnvironmentError,
+  environmentOverride,
+  type ImageCredential,
+  type ProviderAccess,
+} from "./types"
 
 // The OpenAI integration methods whose OAuth credential the Codex images endpoint accepts.
 const CHATGPT_METHOD_IDS = new Set(["chatgpt-browser", "chatgpt-headless"])
@@ -73,6 +79,8 @@ async function resolveApiKey(integration: Integration, spec: CredentialSpec): Pr
 }
 
 type SkillEditor = Parameters<Parameters<Plugin.Context["skill"]["transform"]>[0]>[0]
+type ToolEditor = Parameters<Parameters<Plugin.Context["tool"]["transform"]>[0]>[0]
+type ToolCallContext = Parameters<Parameters<ToolEditor["add"]>[0]["execute"]>[1]
 
 // OpenCode 2 entry point. Each tool is called directly (not through Code Mode, no namespace), so it is available to
 // agents that allow it without also allowing the execute tool.
@@ -105,6 +113,23 @@ export const setup: Plugin.Plugin["setup"] = async (ctx) => {
       editor.method.update({ integrationID: spec.provider, method: { type: "env", names: [spec.environmentVariable] } })
     })
   }
+  const providerAccess = (context: ToolCallContext): ProviderAccess => ({
+    signal: context.signal,
+    // The action is the tool's name and the resource is the backend id, so a grant saved for one backend does not
+    // cover another.
+    authorize: (action, args) =>
+      ctx.permission.assert({
+        sessionID: context.sessionID,
+        agent: context.agent,
+        action,
+        resources: [backend.id],
+        save: [backend.id],
+        metadata: args,
+        source: { type: "tool", messageID: context.messageID, id: context.id },
+      }),
+    resolveCredential: () =>
+      spec.type === "oauth" ? resolveChatGptAuth(ctx.integration, spec) : resolveApiKey(ctx.integration, spec),
+  })
   await ctx.tool.transform((editor) => {
     for (const tool of backend.tools) {
       if (tool.kind === "info") {
@@ -119,6 +144,18 @@ export const setup: Plugin.Plugin["setup"] = async (ctx) => {
         })
         continue
       }
+      if (tool.kind === "lookup") {
+        editor.add({
+          name: tool.name,
+          description: tool.description,
+          input: tool.schema,
+          options: { codemode: false },
+          async execute(input, context) {
+            return { content: await tool.run(input, providerAccess(context)) }
+          },
+        })
+        continue
+      }
       editor.add({
         name: tool.name,
         description: tool.description,
@@ -127,23 +164,9 @@ export const setup: Plugin.Plugin["setup"] = async (ctx) => {
         options: { codemode: false },
         async execute(input, context) {
           const saved = await tool.run(input, {
-            signal: context.signal,
-            // The action is the tool's name and the resource is the backend id, so a grant saved for one backend
-            // does not cover another.
-            authorize: (action, args) =>
-              ctx.permission.assert({
-                sessionID: context.sessionID,
-                agent: context.agent,
-                action,
-                resources: [backend.id],
-                save: [backend.id],
-                metadata: args,
-                source: { type: "tool", messageID: context.messageID, id: context.id },
-              }),
+            ...providerAccess(context),
             // A session can run in a different directory than the one that loaded the plugin.
             resolveDirectory: async () => (await ctx.session.get({ sessionID: context.sessionID })).location.directory,
-            resolveCredential: () =>
-              spec.type === "oauth" ? resolveChatGptAuth(ctx.integration, spec) : resolveApiKey(ctx.integration, spec),
           })
           const result = { out: saved.savedPath, versioned: saved.versioned }
           return { output: result, content: saved.message, metadata: result }

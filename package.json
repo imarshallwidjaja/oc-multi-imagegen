@@ -60,6 +60,7 @@
   "dependencies": {
     "file-type": "^22.0.1",
     "image-size": "^2.0.4",
+    "saxes": "^6.0.0",
     "xdg-basedir": "^5.1.0",
     "zod": "^4.2.0"
   }

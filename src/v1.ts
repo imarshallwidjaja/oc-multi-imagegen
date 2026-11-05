@@ -2,37 +2,51 @@ import type { Hooks, Plugin, ToolContext, ToolDefinition, ToolResult } from "@op
 import { loadCredential } from "./auth"
 import { selectBackend } from "./backend"
 import { loadPackagedSkill, SKILLS_DIRECTORY } from "./skill"
-import type { Backend, BackendTool } from "./types"
+import type { Backend, BackendTool, ProviderAccess } from "./types"
+
+function providerAccess(backend: Backend, ctx: ToolContext): ProviderAccess {
+  const { credential } = backend
+  return {
+    signal: ctx.abort,
+    // The host binds the session, agent and tool call to this request. The action is the tool's name and the
+    // resource is the backend id, so a grant saved for one backend does not cover another.
+    authorize: (action, args) =>
+      ctx.ask({ permission: action, patterns: [backend.id], always: [backend.id], metadata: args }),
+    resolveCredential: async () => {
+      const loaded = await loadCredential(credential)
+      if (!loaded) {
+        const login = `opencode auth login --provider ${credential.provider}`
+        const action =
+          credential.type === "key"
+            ? `Set ${credential.environmentVariable} in the environment of the OpenCode process, or run \`${login}\`.`
+            : `Run \`${login}\`.`
+        throw new Error(`${credential.label} credentials not configured. ${action}`)
+      }
+      return loaded
+    },
+  }
+}
 
 // A plain tool definition, so the module needs no runtime import from the OpenCode 1 SDK.
 function createTool(backend: Backend, tool: BackendTool) {
-  const { credential } = backend
   const definition = { description: tool.description, args: tool.schema.shape }
   if (tool.kind === "info") {
     return { ...definition, execute: async (rawArgs: unknown): Promise<ToolResult> => ({ output: tool.run(rawArgs) }) }
+  }
+  if (tool.kind === "lookup") {
+    return {
+      ...definition,
+      execute: async (rawArgs: unknown, ctx: ToolContext): Promise<ToolResult> => ({
+        output: await tool.run(rawArgs, providerAccess(backend, ctx)),
+      }),
+    }
   }
   return {
     ...definition,
     async execute(rawArgs: unknown, ctx: ToolContext): Promise<ToolResult> {
       const saved = await tool.run(rawArgs, {
-        signal: ctx.abort,
-        // The host binds the session, agent and tool call to this request. The action is the tool's name and the
-        // resource is the backend id, so a grant saved for one backend does not cover another.
-        authorize: (action, args) =>
-          ctx.ask({ permission: action, patterns: [backend.id], always: [backend.id], metadata: args }),
+        ...providerAccess(backend, ctx),
         resolveDirectory: async () => ctx.directory,
-        resolveCredential: async () => {
-          const loaded = await loadCredential(credential)
-          if (!loaded) {
-            const login = `opencode auth login --provider ${credential.provider}`
-            const action =
-              credential.type === "key"
-                ? `Set ${credential.environmentVariable} in the environment of the OpenCode process, or run \`${login}\`.`
-                : `Run \`${login}\`.`
-            throw new Error(`${credential.label} credentials not configured. ${action}`)
-          }
-          return loaded
-        },
       })
       return { output: saved.message, metadata: { out: saved.savedPath, versioned: saved.versioned } }
     },

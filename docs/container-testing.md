@@ -10,6 +10,7 @@ It is written for a source checkout of this repository. The scripts and this fil
 - With the skill permitted, a real agent loads it before its first generation, calls `imagegen` directly, and the tool call, result and saved PNG match the arguments. With the skill denied, the agent still generates.
 - OpenCode 2 gets its credential from its own connection store, not from `OPENCODE_AUTH_CONTENT`.
 - The permission request happens inside the plugin, so a rejected request writes no file.
+- With the OpenAI Images API backend, whether an agent looks up the key's models with `imagegen_models` before generating, and whether SVG and GIF requests save usable files (see "Model lookup, SVG and GIF").
 
 It does not cover the OpenCode desktop or TUI clients, token refresh, or models other than the one you pick. A model that follows the prompt is part of what you are testing, so a failed run can be the agent's fault rather than the plugin's.
 
@@ -43,7 +44,7 @@ Hold to these rules in any variation of this setup:
 - Check `stat -c '%y' "${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json"` before and after a run. The modification time must not change.
 - When the access token expires, the run stops working until you sign in on the host again and start a new sandbox. Nothing in the container refreshes it.
 
-Because the container holds a usable access token, keep the permission rules that deny everything except `imagegen`, the `oc-multi-imagegen` skill and reading `*.png` files, so the agent has no shell and cannot read the credential. `read` is scoped to PNG files so the agent can look at what it generated; the credential file is not a PNG.
+Because the container holds a usable access token, keep the permission rules that deny everything except the plugin's tools (`imagegen`, and `imagegen_models`, which only the OpenAI Images API backend registers), the `oc-multi-imagegen` skill and reading the image formats the plugin saves (`*.png`, `*.jpg`, `*.jpeg`, `*.webp`, `*.gif` and `*.svg`), so the agent has no shell and cannot read the credential. `read` is scoped to those extensions so the agent can look at what it generated; the credential file has none of them.
 
 OpenCode 1 reads the seed as its `auth.json`, and it stays in the sandbox until `clean`. For OpenCode 2, `seed v2` writes the seed into a new private `seed.XXXXXX` directory under `$OC_SANDBOX`, imports it with `opencode auth import`, and deletes that directory on every exit path: success, a failed import, a timeout, Ctrl-C or SIGTERM. The directory is the only thing the run deletes; a `seed` file or directory already in the sandbox is left as it was. The one exception is a container that Docker cannot confirm is gone, covered below: the directory is kept because that container may still read it. The plugin on OpenCode 2 reads only that imported connection. The `run` command also sets a decoy `OPENCODE_AUTH_CONTENT` for OpenCode 2; generation succeeds regardless, which shows the variable is not a fallback.
 
@@ -69,9 +70,9 @@ for h in v1 v2; do $S seed $h; done   # v1-floor is a load check only and needs 
 
 | Mode | Permits |
 | --- | --- |
-| `allow` (default) | `imagegen`, the `oc-multi-imagegen` skill, and reading `*.png` |
-| `tool-only` | `imagegen` only, so the skill is denied |
-| `ask` | nothing without a prompt; `imagegen` asks (for the permission probe below) |
+| `allow` (default) | `imagegen`, `imagegen_models`, the `oc-multi-imagegen` skill, and reading the saved image formats |
+| `tool-only` | `imagegen` and `imagegen_models` only, so the skill is denied |
+| `ask` | nothing without a prompt; `imagegen` and `imagegen_models` ask (for the permission probe below) |
 
 `OC_TIMEOUT` (a positive whole number of seconds, default 300; `0` is refused) bounds every container the helper starts.
 
@@ -224,9 +225,55 @@ $S cases v1 smoke && $S cases v2 smoke
 $S clean
 ```
 
-`backend <host> openai-api` starts a private server in the container and fails unless the host registered what the backend needs and no provider entry for it. On OpenCode 1 that is a `/provider/auth` entry under `openai-images` whose one method has type `api`, an absent `/config` provider entry and the tool. On OpenCode 2 it is an `openai-images` integration whose methods are exactly the key method and an env method that names only `OC_MULTI_IMAGEGEN_OPENAI_API_KEY`. The probe sets a placeholder for that variable (not a credential) in its own server, and requires the host to list it as a connection of the integration. Run `backend` in a sandbox that has not been seeded, because a saved credential is listed ahead of the environment connection and the probe expects the connection first. `backend <host> codex` checks that the Codex backend registers no sign-in, provider entry, integration or connection, after `prepare <host> allow codex`. The probe's arguments name what the sandbox should have selected; the selection itself comes from the container's `OC_MULTI_IMAGEGEN_BACKEND`, so a backend that is not selected fails the check.
+`backend <host> openai-api` starts a private server in the container and fails unless the host registered what the backend needs and no provider entry for it. On OpenCode 1 that is a `/provider/auth` entry under `openai-images` whose one method has type `api`, an absent `/config` provider entry, and both tools, `imagegen` and `imagegen_models`. On OpenCode 2 it is an `openai-images` integration whose methods are exactly the key method and an env method that names only `OC_MULTI_IMAGEGEN_OPENAI_API_KEY`. The probe sets a placeholder for that variable (not a credential) in its own server, and requires the host to list it as a connection of the integration. Run `backend` in a sandbox that has not been seeded, because a saved credential is listed ahead of the environment connection and the probe expects the connection first. `backend <host> codex` checks that the Codex backend registers no sign-in, provider entry, integration or connection, and on OpenCode 1 no `imagegen_models`, after `prepare <host> allow codex`. The probe's arguments name what the sandbox should have selected; the selection itself comes from the container's `OC_MULTI_IMAGEGEN_BACKEND`, so a backend that is not selected fails the check.
 
 `cases <host> smoke` runs two cases, G and E, in the same way as the four-case run: G asks the agent to use `imagegen` for one flat illustration at `quality low` and size `1536x1024` (a size both backends accept), and E edits that file with `images`. Check them as in "Check the results": both `imagegen` calls `completed`, `images` naming G's file in E, and two PNGs at the requested size. A completed call with the decoy as the only saved key shows the environment key was used.
+
+### Model lookup, SVG and GIF
+
+`cases <host> formats` runs two cases on a host prepared with `openai-api` and refuses any other host before a container starts. V asks for a flat vector logo saved as `lantern-logo.svg` at size 1024x1024, and F for a four-frame looping GIF at 150 ms per frame saved as `lantern-loop.gif` at size 768x768, both at `quality low`. F uses 768x768 because the API rejected four 1024x1024 frames with "No supported sheet fits 4 GIF frames at size '1024x1024'. ... The longest edge must be less than or equal to 3840." and accepted four 768x768 frames. The prompts name `imagegen` but not `imagegen_models`, so a run shows whether the tool descriptions lead the agent to look up the key's models first.
+
+Run the formats cases in a new sandbox of their own. `cases` refuses a host whose work directory or case logs hold an earlier run, so they cannot follow the smoke cases in the same sandbox. The sequence is the smoke setup, including the registration probe, which needs an unseeded sandbox:
+
+```bash
+S=scripts/opencode-container.sh
+export OC_SANDBOX=$($S init)
+bun install --frozen-lockfile && $S pack
+for h in v1 v2; do $S prepare $h allow openai-api; done
+for h in v1 v2; do $S backend $h openai-api; done   # before seed: the probe expects the environment connection first
+
+export OC_IMAGE_KEY_ENV_FILE=/path/to/dotenv OC_MODEL=openai/gpt-6.1-sol-fast
+for h in v1 v2; do $S seed $h; done
+$S cases v1 formats && $S cases v2 formats
+jq -c 'select(.type=="tool_use") | .part | {tool, status: .state.status, input: (.state.input | del(.prompt)), output: .state.output}' \
+  "$OC_SANDBOX"/logs/v?-case-[VF].out
+$S clean
+```
+
+Each host keeps its own work directory and logs, so `v1` and `v2` share the sandbox. To rerun one host after a failure, start another new sandbox and repeat the sequence for that host only.
+
+Check, per host:
+
+| Case | Tool calls | File |
+| --- | --- | --- |
+| V | `imagegen_models` before the first `imagegen`; then `imagegen` with `output_format: "svg"`, status `completed`, and no `svg_model` unless the API asked for one | `lantern-logo.svg`; the result reports a viewBox or width and height, not pixels |
+| F | `imagegen` with `output_format: "gif"`, `frame_count: 4`, `frame_duration_ms: 150`, status `completed` | `lantern-loop.gif`; the result reports the frame size |
+
+Then look at the files: render the SVG and check that it is a lantern made of vector shapes, and play the GIF to check that its frames change and the loop closes. An `imagegen` error that says the account needs an SVG author model, or that the GIF exceeds a size or pixel limit, is the provider's answer for that key: record the message and whether the agent asked the operator or retried with a changed input, rather than counting it as a plugin fault. A lookup that reports a malformed model list, or a refused SVG, needs its message in the report: either can be a plugin defect or a provider answer outside the documented contract.
+
+A key without the `api.model.read` scope answers `imagegen_models` with 403 "You have insufficient permissions for this operation. Missing scopes: api.model.read. ..." That is a property of the key (see [Model discovery](backends.md#model-discovery)), and image generation with the same key can still succeed. An account that requires an SVG author answers V without `svg_model` with 400 "SVG generation requires 'svg.model'." The plugin never picks an author. To test an author model the operator has chosen, run V in a new sandbox, prepared and seeded as above, with a prompt that names it:
+
+```bash
+P="Use the imagegen tool to create a simple flat vector logo of a red paper lantern as an SVG file that stays sharp at any size. Use quality low, size 1024x1024 and svg_model <author-model>. Save it as lantern-logo.svg in the project folder."
+$S run v1 case-V-author -- run --format json --dir /work --model "$OC_MODEL" "$P" >"$OC_SANDBOX/logs/v1-case-V-author.out" &&
+  $S run v2 case-V-author -- run --standalone --format json --model "$OC_MODEL" "$P" >"$OC_SANDBOX/logs/v2-case-V-author.out"
+```
+
+Check the call as for V, with `svg_model` set to the chosen ID. A rejection of that ID is the API's answer for the key, not a plugin fault.
+
+On 2026-11-05, with plugin source at commit `36d2f01`, the operator chose `gpt-6.1-sol`. On 1.19.3 and 2.0.32 the agent loaded the skill, called `imagegen_models` (403, no `api.model.read`), then called `imagegen` with `output_format: "svg"` and `svg_model: "gpt-6.1-sol"`, status `completed`. Each host saved a `lantern-logo.svg` of about 1.3 KB with a 1024x1024 viewBox, made of paths, rects and one circle in flat red fills (OpenCode 2's also gold), with no style sheet, `style` attribute or `url()` reference; rendered in a browser, both showed a lantern. Retained for review (local and temporary): `/tmp/opencode/openai-image26-svg-author-20261105/`.
+
+### Load failures
 
 To check the load failures without a model, give a host an unusable backend value and run the load checks. `prepare` records the backend in `$OC_SANDBOX/<host>/backend` (the helper forwards its text as the variable), so write the value there; an empty file gives an empty variable, which fails too:
 

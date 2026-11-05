@@ -1,4 +1,5 @@
 import { z } from "zod"
+import { listFormatNames, type OutputFormat } from "./output-image"
 
 // What a backend decides about the arguments: how size is chosen, how many references it takes, and the guidance
 // for the fields whose behavior depends on the provider.
@@ -8,6 +9,10 @@ export type ArgsSpec = {
   imagesNote?: string
   model: string
   quality: string
+  // The formats the tool saves, which `out` describes; the same list the tool passes to the save.
+  savedFormats: readonly OutputFormat[]
+  // Guidance for `background`; omitted, the opaque-default guidance shared by Codex and the OpenAI Images API.
+  background?: string
 }
 
 // The imagegen arguments of the Codex and OpenAI Images API backends. OpenCode 1 takes the raw shape, OpenCode 2
@@ -22,7 +27,7 @@ export function createArgsShape(spec: ArgsSpec) {
     out: z
       .string()
       .describe(
-        "Destination path, relative to the project directory unless absolute. Saves native PNG, JPEG or WebP bytes without conversion, adjusting the extension to match. An existing target is kept and the new image gets a -vN suffix. Use the returned out path for subsequent reads or edits.",
+        `Destination path, relative to the project directory unless absolute. Saves native ${listFormatNames(spec.savedFormats)} bytes without conversion, adjusting the extension to match. An existing target is kept and the new image gets a -vN suffix. Use the returned out path for subsequent reads or edits.`,
       ),
     size: spec.size,
     images: z
@@ -42,7 +47,8 @@ export function createArgsShape(spec: ArgsSpec) {
       .enum(["opaque", "transparent"])
       .nullish()
       .describe(
-        "Optional background requested from the backend; defaults to opaque. Use transparent for a cut-out instead of asking for one in the prompt. The returned alpha can be soft, and the tool does not check or clean it up.",
+        spec.background ??
+          "Optional background requested from the backend; defaults to opaque. Use transparent for a cut-out instead of asking for one in the prompt. The returned alpha can be soft, and the tool does not check or clean it up.",
       ),
     model: z.string().min(1).nullish().describe(spec.model),
     quality: z.string().min(1).nullish().describe(spec.quality),
@@ -55,7 +61,7 @@ export type GenerateArgs = z.infer<z.ZodObject<ArgsShape>>
 
 // Structured result of a saved image. It matches the metadata both hosts report.
 export const resultSchema = z.object({
-  out: z.string().describe("Actual absolute path of the saved PNG, JPEG or WebP. Use this path for reads or edits."),
+  out: z.string().describe("Actual absolute path of the saved image file. Use this path for reads or edits."),
   versioned: z
     .boolean()
     .describe("True only when the format-adjusted target existed and a -vN collision suffix was used."),

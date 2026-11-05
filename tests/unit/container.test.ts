@@ -788,6 +788,32 @@ describe("opencode-container.sh cases", () => {
     expect((await c.run(["cases", "v1", "everything"], env)).code).toBe(2)
   })
 
+  test("formats runs one SVG and one GIF generation, and only on a host prepared for openai-api", async () => {
+    const { c, sandbox, env } = await prepared()
+
+    const refused = await c.run(["cases", "v1", "formats"], env)
+    expect(refused.code).toBe(2)
+    expect(refused.stderr).toContain("need the openai-api backend")
+    expect(c.calls()).toEqual([])
+
+    expect((await c.run(["prepare", "v1", "allow", "openai-api"], { OC_SANDBOX: sandbox })).code).toBe(0)
+    const result = await c.run(["cases", "v1", "formats"], env)
+
+    expect(result.code).toBe(0)
+    const runs = c.calls().filter((line) => line.startsWith("run "))
+    expect(runs.map((line) => line.split(" ")[1].replace(/-\d+-\d+$/, ""))).toEqual([
+      "ocimg-v1-case-V",
+      "ocimg-v1-case-F",
+    ])
+    expect(runs[0]).toContain("lantern-logo.svg")
+    expect(runs[0]).toContain("size 1024x1024")
+    expect(runs[1]).toContain("lantern-loop.gif")
+    expect(runs[1]).toContain("4 frames")
+    expect(runs[1]).toContain("size 768x768")
+    // The prompts leave the model lookup to the tool descriptions.
+    for (const run of runs) expect(run).not.toContain("imagegen_models")
+  })
+
   test("asks for the images in plain terms that name neither the tool nor the skill", async () => {
     const { c, env } = await prepared()
 
@@ -858,25 +884,29 @@ describe("opencode-container.sh host configuration", () => {
   const configOf = (sandbox: string, host: string) =>
     JSON.parse(readFileSync(path.join(sandbox, host, "config/opencode/opencode.json"), "utf-8"))
 
-  test("the default permits imagegen, the plugin's skill and PNG reads on both hosts, and nothing else", async () => {
+  const SAVED_EXTENSIONS = ["png", "jpg", "jpeg", "webp", "gif", "svg"]
+
+  test("the default permits the plugin's tools, its skill and reads of the formats it saves, and nothing else", async () => {
     const c = container()
     const sandbox = await c.ready("v1", "v2")
 
     expect(configOf(sandbox, "v1").permission).toEqual({
       "*": "deny",
       imagegen: "allow",
+      imagegen_models: "allow",
       skill: { "*": "deny", "oc-multi-imagegen": "allow" },
-      read: { "*": "deny", "*.png": "allow" },
+      read: { "*": "deny", ...Object.fromEntries(SAVED_EXTENSIONS.map((ext) => [`*.${ext}`, "allow"])) },
     })
     expect(configOf(sandbox, "v2").permissions).toEqual([
       { action: "*", resource: "*", effect: "deny" },
       { action: "imagegen", resource: "*", effect: "allow" },
+      { action: "imagegen_models", resource: "*", effect: "allow" },
       { action: "skill", resource: "oc-multi-imagegen", effect: "allow" },
-      { action: "read", resource: "*.png", effect: "allow" },
+      ...SAVED_EXTENSIONS.map((ext) => ({ action: "read", resource: `*.${ext}`, effect: "allow" })),
     ])
   })
 
-  test("tool-only permits imagegen and leaves the skill denied, and ask permits nothing without a prompt", async () => {
+  test("tool-only permits the plugin's tools and leaves the skill denied, and ask permits nothing without a prompt", async () => {
     const c = container()
     const sandbox = await c.ready()
 
@@ -887,10 +917,11 @@ describe("opencode-container.sh host configuration", () => {
       for (const host of ["v1", "v2"]) {
         expect((await c.run(["prepare", host, mode], { OC_SANDBOX: sandbox })).code).toBe(0)
       }
-      expect(configOf(sandbox, "v1").permission).toEqual({ "*": "deny", imagegen: effect })
+      expect(configOf(sandbox, "v1").permission).toEqual({ "*": "deny", imagegen: effect, imagegen_models: effect })
       expect(configOf(sandbox, "v2").permissions).toEqual([
         { action: "*", resource: "*", effect: "deny" },
         { action: "imagegen", resource: "*", effect: effect },
+        { action: "imagegen_models", resource: "*", effect: effect },
       ])
     }
     expect((await c.run(["prepare", "v1", "everything"], { OC_SANDBOX: sandbox })).code).toBe(2)
@@ -1296,8 +1327,10 @@ case $last in
   */config*)
     if [ -n "$FAKE_PROVIDER_ENTRY" ]; then echo '{"provider":{"openai-images":{}}}'; else echo '{"model":"openai/example"}'; fi ;;
   */experimental/tool*)
+    models=''
+    registered && models=',{"id":"imagegen_models","description":"List the OpenAI image models this key can use now.","parameters":{}}'
     if [ -n "$FAKE_TOOLS" ]; then echo "$FAKE_TOOLS"
-    else echo '[{"id":"invalid","description":"Do not use"},{"id":"imagegen","description":"Generate or edit one raster image through the OpenAI Images API. Load the skill.","parameters":{}}]'; fi ;;
+    else echo '[{"id":"invalid","description":"Do not use"},{"id":"imagegen","description":"Generate or edit one image through the OpenAI Images API. Load the skill.","parameters":{}}'"$models"']'; fi ;;
   */api/integration)
     connections='[]'
     case $FAKE_METHODS in *'"env"'*) [ -z "$OC_MULTI_IMAGEGEN_OPENAI_API_KEY" ] || connections='[{"type":"env","name":"OC_MULTI_IMAGEGEN_OPENAI_API_KEY"}]' ;; esac
@@ -1339,7 +1372,8 @@ describe("container-backend-probe.sh", () => {
     expect(result.code).toBe(0)
     expect(result.stdout).toContain('sign-in method: "openai-images":[{"type":"api","label":"OpenAI Images API"}]')
     expect(result.stdout).toContain("provider entry: none")
-    expect(result.stdout).toContain("tool: Generate or edit one raster image through the OpenAI Images API.")
+    expect(result.stdout).toContain("tool: Generate or edit one image through the OpenAI Images API.")
+    expect(result.stdout).toContain("models tool: List the OpenAI image models this key can use now.")
   })
 
   test("OpenCode 2 with openai-api shows the key and env methods and the connection for the variable", async () => {
@@ -1366,6 +1400,7 @@ describe("container-backend-probe.sh", () => {
 
     expect(result.code).toBe(0)
     expect(result.stdout).toMatch(/(sign-in method|integration): none/)
+    if (host === "v1") expect(result.stdout).toContain("models tool: none")
   })
 
   test.each([
@@ -1420,6 +1455,16 @@ describe("container-backend-probe.sh", () => {
 
     expect(result.code).toBe(1)
     expect(result.stderr).toContain("is registered but should not be")
+  })
+
+  test("the OpenCode 1 check fails for openai-api when imagegen_models is missing", async () => {
+    const result = await backendProbeRunner()(["v1", "openai-api"], {
+      FAKE_REGISTERED: "1",
+      FAKE_TOOLS: '[{"id":"imagegen","description":"Generate or edit one image.","parameters":{}}]',
+    })
+
+    expect(result.code).toBe(1)
+    expect(result.stderr).toContain("models tool is missing")
   })
 
   test("the OpenCode 1 tool check fails on a reply that has no imagegen entry", async () => {

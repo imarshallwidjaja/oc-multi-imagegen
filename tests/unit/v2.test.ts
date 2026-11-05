@@ -334,6 +334,31 @@ describe("OpenCode 2 execution", () => {
     }
   })
 
+  test("the imagegen_models lookup asks for its permission with the call identity, uses the image key and reads no session", async () => {
+    const fetchMock = mock(async () => new Response(JSON.stringify({ object: "list", data: [] })))
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+    const { calls, run, toolNamed } = await loadV2Tool({ directory: dir, backend: "openai-api" })
+
+    const result = await run({ query: "image" }, undefined, undefined, "imagegen_models")
+
+    expect(toolNamed("imagegen_models").options).toEqual({ codemode: false })
+    expect(result).toEqual({ content: expect.stringContaining('that contain "image": 0 of 0 model IDs') } as never)
+    expect(calls.assert).toEqual([
+      {
+        sessionID: "ses_test",
+        agent: "build",
+        action: "imagegen_models",
+        resources: ["openai-api"],
+        save: ["openai-api"],
+        metadata: { query: "image" },
+        source: { type: "tool", messageID: "msg_test", id: "call_test" },
+      },
+    ])
+    expect(calls.active).toEqual(["openai-images"])
+    expect(calls.sessionGet).toEqual([])
+    expect((fetchMock.mock.calls[0] as unknown[])[1]).toMatchObject({ headers: { Authorization: "Bearer sk-images" } })
+  })
+
   test("resolves reference images against the session directory", async () => {
     const fetchMock = stubFetch()
     await Bun.write(path.join(dir, "ref.png"), PNG_BUFFER)

@@ -43,7 +43,7 @@ describe("selectBackend", () => {
     }
 
     expect(names("codex")).toEqual(["imagegen"])
-    expect(names("openai-api")).toEqual(["imagegen"])
+    expect(names("openai-api")).toEqual(["imagegen", "imagegen_models"])
     expect(names("nano-gpt")).toEqual(["imagegen", "imageedit", "imagegen_models"])
   })
 
