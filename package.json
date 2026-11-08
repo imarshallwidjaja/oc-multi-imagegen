@@ -38,7 +38,7 @@
     "prebuild": "rm -rf dist",
     "build": "bun build ./src/index.ts --outdir ./dist --target node --format esm --packages external",
     "test": "bun test tests/unit",
-    "test:e2e": "OC_E2E_LIVE=1 bun test tests/e2e/imagegen.test.ts",
+    "test:e2e": "OC_E2E_LIVE=1 bun --no-env-file test tests/e2e/imagegen.test.ts",
     "test:nanogpt:live": "bun run scripts/nanogpt-live.ts"
   },
   "keywords": [

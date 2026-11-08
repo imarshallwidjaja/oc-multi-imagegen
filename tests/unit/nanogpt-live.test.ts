@@ -1,30 +1,50 @@
 import { expect, test } from "bun:test"
 import { createHash } from "node:crypto"
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises"
+import { existsSync } from "node:fs"
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { imageSize } from "image-size"
 
-const REPO_DIR = path.resolve(import.meta.dir, "../..")
+const RUNNER = path.resolve(import.meta.dir, "../../scripts/nanogpt-live.ts")
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex")
 
 // The runner as an operator starts it, with a throwaway HOME and data directory and nothing else of the caller's
-// environment, so no saved or environment credential can be found.
-function runner(mode: string, directory: string, home: string, extra: Record<string, string> = {}) {
-  return Bun.spawnSync(["bun", "run", "scripts/nanogpt-live.ts", mode, directory], {
-    cwd: REPO_DIR,
+// environment, so no saved or environment credential can be found. Bun reads a `.env` from its working directory even
+// into that environment, so the runner starts in `home`, not the checkout, with dotenv loading off. A preloaded trap
+// replaces fetch before the runner captures it: each request that would leave the process is counted in
+// `home/fetch-attempts`, without its URL, headers or body, and fails.
+async function runner(mode: string, directory: string, home: string, extra: Record<string, string> = {}) {
+  const trap = path.join(home, "fetch-trap.ts")
+  await writeFile(
+    trap,
+    `import { appendFileSync } from "node:fs"
+globalThis.fetch = (async () => {
+  appendFileSync(${JSON.stringify(path.join(home, "fetch-attempts"))}, "fetch\\n")
+  throw new Error("The test's fetch trap blocks every request")
+}) as typeof fetch
+`,
+  )
+  return Bun.spawnSync([process.execPath, "--no-env-file", "run", `--preload=${trap}`, RUNNER, mode, directory], {
+    cwd: home,
     env: { PATH: process.env.PATH, HOME: home, XDG_DATA_HOME: home, ...extra },
   })
+}
+
+async function fetchAttempts(home: string) {
+  const log = path.join(home, "fetch-attempts")
+  return existsSync(log) ? (await readFile(log, "utf8")).split("\n").filter(Boolean).length : 0
 }
 
 test("the preflight runs every collector, stops at the controlled edit failure and keeps its evidence", async () => {
   const parent = await mkdtemp(path.join(os.tmpdir(), "nano-live-"))
   try {
     const directory = path.join(parent, "preflight")
-    const result = runner("--preflight", directory, parent)
+    const result = await runner("--preflight", directory, parent)
 
     // The process has exited, so the restored fetch and the final write are behind it: what remains is the evidence.
     expect(result.exitCode).toBe(1)
+    expect(await fetchAttempts(parent)).toBe(0)
     expect(result.stdout.toString()).toBe(`1-generate: saved ${path.join(directory, "1-generate.png")}\n`)
     expect(result.stderr.toString()).toContain(
       `1-edit: failed after request-recorded (controlled-transport-failure); evidence: ${path.join(directory, "report.json")}`,
@@ -84,12 +104,14 @@ test("the preflight runs every collector, stops at the controlled edit failure a
   }
 })
 
-test("explicit live invocation fails when the selected credential is unavailable", async () => {
+test("explicit live invocation fails when the selected credential is unavailable, even from a .env where it starts", async () => {
   const parent = await mkdtemp(path.join(os.tmpdir(), "nano-missing-"))
   try {
     const directory = path.join(parent, "missing")
-    const result = runner("--live", directory, parent, { OPENCODE_AUTH_CONTENT: "{}" })
+    await writeFile(path.join(parent, ".env"), "OC_MULTI_IMAGEGEN_NANOGPT_API_KEY=sk-nano-synthetic-dotenv-key\n")
+    const result = await runner("--live", directory, parent, { OPENCODE_AUTH_CONTENT: "{}" })
     expect(result.exitCode).toBe(1)
+    expect(await fetchAttempts(parent)).toBe(0)
     expect(result.stderr.toString()).toContain("1-generate: failed after permission-granted (missing-credential)")
     const report = JSON.parse(await readFile(path.join(directory, "report.json"), "utf8"))
     expect(report.cases).toHaveLength(1)

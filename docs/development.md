@@ -14,7 +14,7 @@ bun run build
 npm pack --dry-run
 ```
 
-`test` runs the mocked unit suite only. Bare `bun test` also discovers the live e2e file, which registers one skipped entry and does nothing else unless `bun run test:e2e` starts it (see "Live checks"); use the package script for routine work. `check` runs Biome without rewriting files. The build produces `dist/index.js`; rebuild and restart the loading OpenCode server after source changes.
+`test` runs the mocked unit suite only. Bare `bun test` also discovers the live e2e file. The file registers one skipped entry and does nothing else unless `OC_E2E_LIVE` equals `1`, which `bun run test:e2e` sets (see "Live checks"); bare `bun test` can also take that value from your shell or from a `.env` it loads. Use `bun run test` for routine work. `check` runs Biome without rewriting files. The build produces `dist/index.js`; rebuild and restart the loading OpenCode server after source changes.
 
 The executable commands live in `package.json` and `.github/workflows/ci.yml`. The GitHub workflow runs frozen dependency installation, typecheck, Biome, mocked tests, build and the package dry-run.
 
@@ -41,9 +41,9 @@ Neither host gets a copied user-directory file. If OpenCode 1 finds the same ski
 
 ## Live checks
 
-`bun run test:e2e` runs `tests/e2e/imagegen.test.ts` with `OC_E2E_LIVE=1`, the file's opt-in. It starts the `opencode` on your `PATH` with your OpenCode sign-in and makes real authenticated image calls through the Codex backend, so it uses account quota. Without `OC_E2E_LIVE=1`, as when a bare `bun test` discovers the file, the file stages nothing, creates no directory and starts no OpenCode process.
+`bun run test:e2e` runs `tests/e2e/imagegen.test.ts` with `OC_E2E_LIVE=1`, the file's opt-in. It starts the `opencode` on your `PATH` with your OpenCode sign-in and makes real authenticated image calls through the Codex backend, so it uses account quota. When `OC_E2E_LIVE` is not `1`, the file stages nothing, creates no directory and starts no OpenCode process.
 
-The file is one journey, so run it whole. Stage A saves `character.png`. Stage B asks for the same path and must get the versioned `character-v2.png`, and stage C composes both with an edit. Stage D, a transparent sticker, stands alone. Each stage checks its prerequisites first: when A did not pass, B and C fail with "not run" before they start OpenCode, and D still runs. Set `OPENCODE_MODEL` for the agent model or leave it unset for the host default.
+The file is one journey, so run it whole. Stage A saves `character.png`. Stage B asks for the same path and must get the versioned `character-v2.png`, and stage C composes both with an edit. Stage D, a transparent sticker, stands alone. Each stage checks its prerequisites first: when A did not pass, B and C fail with "not run" before they start OpenCode, and D still runs. Export `OPENCODE_MODEL` in the invoking shell for the agent model, or leave it unset for the host default. The test process disables automatic `.env` loading.
 
 Before the first stage, the run builds and packs a staged copy of the checkout with `scripts/stage-package.ts` (see "Package contents"), installs the tarball with its runtime dependencies under one temporary directory, and points a temporary OpenCode config at that copy. Your checkout's `dist/` is not rebuilt. OpenCode gets your environment, including `PATH`, `HOME` and `OPENCODE_AUTH_CONTENT`, without `OPENCODE` and the variables whose names start with `OPENCODE_` (apart from `OPENCODE_AUTH_CONTENT`), `OC_MULTI_IMAGEGEN_` or `OC_E2E_`. `XDG_CONFIG_HOME` is replaced by the temporary config directory and `OC_MULTI_IMAGEGEN_BACKEND` is set to `codex`; the config selects no autoupdate. A run that passes 10 minutes gets SIGTERM and, 10 seconds later, SIGKILL; the test reports that as a timeout, and any other exit status or signal as itself. The run prints the work directory, the config directory and `EVIDENCE_DIR`, which keeps each stage's JSON event output, and leaves them for review. Stage C passes only if that output shows a completed `imageedit` call with both earlier images as references.
 

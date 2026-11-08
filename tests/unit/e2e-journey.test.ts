@@ -18,8 +18,11 @@ import path from "node:path"
 const JOURNEY_TOOLS = ["bun", "node", "npm", "git", "tar", "gzip", "sh", "rm"]
 
 // The live journey in tests/e2e/imagegen.test.ts, run as a subprocess whose PATH is one directory: a fake `opencode`
-// that records each call and fails it, and links to JOURNEY_TOOLS found on `searchPath`. A real `opencode`, even one
-// beside those tools, is not reachable, so nothing here can reach a model or spend quota.
+// that records each call and the sign-in it was given and fails it, and links to JOURNEY_TOOLS found on `searchPath`.
+// A real `opencode`, even one beside those tools, is not reachable, so nothing here can reach a model or spend quota.
+// Bun loads a `.env` from the working directory of each Bun process, so the journey starts in a private project
+// instead of the checkout: the checkout's `tests/` linked in, the checkout's own `test:e2e` script, and a `.env` that
+// holds only a synthetic sign-in, which reaches OpenCode if the Bun process running the journey read it.
 describe("live e2e journey", () => {
   const repoRoot = path.resolve(import.meta.dir, "../..")
   const temporaryDirectories: string[] = []
@@ -32,19 +35,28 @@ describe("live e2e journey", () => {
     temporaryDirectories.push(root)
     const bin = path.join(root, "bin")
     const tmp = path.join(root, "tmp")
+    const project = path.join(root, "project")
     mkdirSync(bin)
     mkdirSync(tmp)
+    mkdirSync(project)
+    symlinkSync(path.join(repoRoot, "tests"), path.join(project, "tests"))
+    const { scripts } = JSON.parse(readFileSync(path.join(repoRoot, "package.json"), "utf-8"))
+    writeFileSync(path.join(project, "package.json"), JSON.stringify({ scripts: { "test:e2e": scripts["test:e2e"] } }))
+    writeFileSync(path.join(project, ".env"), "OPENCODE_AUTH_CONTENT=synthetic-dotenv-sign-in\n")
     const calls = path.join(root, "opencode-calls")
-    writeFileSync(path.join(bin, "opencode"), `#!/bin/sh\nprintf '%s\\n' "$2" >>"${calls}"\nexit 1\n`, {
-      mode: 0o755,
-    })
+    const signIns = path.join(root, "opencode-sign-ins")
+    writeFileSync(
+      path.join(bin, "opencode"),
+      `#!/bin/sh\nprintf '%s\\n' "$2" >>"${calls}"\nprintf '%s\\n' "\${OPENCODE_AUTH_CONTENT-unset}" >>"${signIns}"\nexit 1\n`,
+      { mode: 0o755 },
+    )
     for (const tool of JOURNEY_TOOLS) {
       const found = Bun.which(tool, { PATH: searchPath })
       if (!found) throw new Error(`${tool} is not on PATH`)
       symlinkSync(found, path.join(bin, tool))
     }
     const proc = Bun.spawn(command, {
-      cwd: repoRoot,
+      cwd: project,
       env: { PATH: bin, HOME: root, TMPDIR: tmp },
       stdout: "pipe",
       stderr: "pipe",
@@ -59,6 +71,7 @@ describe("live e2e journey", () => {
       code,
       output: stdout + stderr,
       prompts: existsSync(calls) ? readFileSync(calls, "utf-8").split("\n").filter(Boolean) : [],
+      signIns: existsSync(signIns) ? readFileSync(signIns, "utf-8").split("\n").filter(Boolean) : [],
       temporaryEntries: readdirSync(tmp),
     }
   }
@@ -91,6 +104,7 @@ describe("live e2e journey", () => {
     expect(existsSync(sharedCalls)).toBe(false)
     expect(result.code).not.toBe(0)
     expect(result.prompts).toHaveLength(2)
+    expect(result.signIns).toEqual(["unset", "unset"])
     expect(result.prompts[0]).toContain("generate an image at character.png")
     expect(result.prompts[1]).toContain("generate an image at sticker.png")
     expect(result.output).toContain("Stage B not run: it builds on stage A, which did not pass")
