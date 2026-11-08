@@ -1,14 +1,10 @@
 import type { Plugin } from "@opencode/plugin"
 import { selectBackend } from "./backend"
+import { type CredentialSpec, emptyEnvironmentError, environmentOverride, type ImageCredential } from "./credential"
+import { invokeTool } from "./invocation"
 import { resultSchema } from "./schema"
 import { loadPackagedSkill } from "./skill"
-import {
-  type CredentialSpec,
-  emptyEnvironmentError,
-  environmentOverride,
-  type ImageCredential,
-  type ProviderAccess,
-} from "./types"
+import type { ProviderAccess } from "./types"
 
 // The OpenAI integration methods whose OAuth credential the Codex images endpoint accepts.
 const CHATGPT_METHOD_IDS = new Set(["chatgpt-browser", "chatgpt-headless"])
@@ -132,44 +128,22 @@ export const setup: Plugin.Plugin["setup"] = async (ctx) => {
   })
   await ctx.tool.transform((editor) => {
     for (const tool of backend.tools) {
-      if (tool.kind === "info") {
-        editor.add({
-          name: tool.name,
-          description: tool.description,
-          input: tool.schema,
-          options: { codemode: false },
-          async execute(input) {
-            return { content: tool.run(input) }
-          },
-        })
-        continue
-      }
-      if (tool.kind === "lookup") {
-        editor.add({
-          name: tool.name,
-          description: tool.description,
-          input: tool.schema,
-          options: { codemode: false },
-          async execute(input, context) {
-            return { content: await tool.run(input, providerAccess(context)) }
-          },
-        })
-        continue
-      }
       editor.add({
         name: tool.name,
         description: tool.description,
         input: tool.schema,
-        output: resultSchema,
+        // Only a tool that saves an image declares the structured result.
+        ...(tool.kind === "image" ? { output: resultSchema } : {}),
         options: { codemode: false },
         async execute(input, context) {
-          const saved = await tool.run(input, {
-            ...providerAccess(context),
+          const result = await invokeTool(tool, input, {
+            providerAccess: () => providerAccess(context),
             // A session can run in a different directory than the one that loaded the plugin.
             resolveDirectory: async () => (await ctx.session.get({ sessionID: context.sessionID })).location.directory,
           })
-          const result = { out: saved.savedPath, versioned: saved.versioned }
-          return { output: result, content: saved.message, metadata: result }
+          return result.image
+            ? { output: result.image, content: result.text, metadata: result.image }
+            : { content: result.text }
         },
       })
     }

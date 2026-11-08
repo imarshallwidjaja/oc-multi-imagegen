@@ -83,7 +83,7 @@ Listing models needs the `api.model.read` scope: a restricted key needs the List
 
 ### Key precedence
 
-1. If `OC_MULTI_IMAGEGEN_OPENAI_API_KEY` is **present**, it is the credential. A present empty value or a value unsuitable for an HTTP header fails the call without consulting a saved key. A rejected key is reported once, without trying another credential.
+1. If `OC_MULTI_IMAGEGEN_OPENAI_API_KEY` is **present**, it is the credential. A present empty value or a value unsuitable for an HTTP header fails the call without consulting a saved key, before any reference image is read or request is sent. A saved key unsuitable for an HTTP header fails the same way. A rejected key is reported once, without trying another credential.
 2. Otherwise, the plugin uses the `openai-images` key saved in OpenCode.
 
 It never reads `OPENAI_API_KEY`, which might be a chat key, or loads a dotenv file.

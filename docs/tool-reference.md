@@ -96,7 +96,7 @@ An edit generates a new image guided by the prompt and references. It doesn't gu
 
 | Backend | Reference rules |
 | --- | --- |
-| Codex | Up to five local reference files. |
+| Codex | Up to five local files detected as images. The plugin applies no type or size rule of its own; the endpoint decides what it accepts. |
 | OpenAI API | Up to 16 PNG, JPEG or WebP files. Each encoded data URL must be at most 20,971,520 characters. |
 | NanoGPT | Local PNG, JPEG or WebP files. Counts depend on the model; the route limit is 31,457,280 bytes per file, with Seedream and Qwen Image 3 Pro restricted to 10,485,760 bytes. |
 
@@ -122,9 +122,9 @@ Unsupported types and unreadable or invalid sizes fail with a bounded diagnostic
 
 The extension follows the detected bytes: `.png`, `.jpg`, `.webp`, `.gif` or `.svg`. An already matching extension is preserved, including `.jpeg` for JPEG and case variants. A mismatching suffix of a format the tool saves is replaced; a missing or other suffix gets the actual extension appended. For example, JPEG returned for `scene.png` is saved to `scene.jpg`, JPEG returned for `scene.asset` is saved to `scene.asset.jpg`, and from the OpenAI Images API's `imagegen` an SVG returned for `logo.png` is saved to `logo.svg`. For a tool that saves only PNG, JPEG or WebP, a `.gif` or `.svg` suffix isn't one of its formats, so PNG returned for `scene.gif` is saved to `scene.gif.png`.
 
-If that format-adjusted target exists, it is kept and the next available `-v2`, `-v3`, up to `-v999` suffix is chosen before the extension. This is best-effort collision avoidance, not an atomic operation. Give parallel calls distinct output paths.
+The plugin creates the output file exclusively, so it never writes into an existing file or follows a symbolic link at the output path. If the format-adjusted target exists, including as a link or as a file a concurrent call created first, it is kept and the first free `-v2`, `-v3`, up to `-v999` suffix is used before the extension; when all of them are taken, the call fails. If writing fails after the file was created, the plugin tries to remove that file; when the removal also fails, the error names the path, where a partial file may remain. This relies on the file system honouring exclusive creation. A reader can see a partly written file while the write is in progress, and a crash during the write can leave one behind.
 
-Both hosts return `out` and `versioned` metadata. OpenCode 2 also returns structured output with that shape alongside the text. `out` is the actual absolute saved path: use it for reads and as the next `imageedit` call's `images` input, rather than assuming the requested path was used. A GIF or SVG can't be a reference image. `versioned` is true only for a collision suffix, not an extension adjustment alone. The message reports the actual format and size (pixels, GIF frame size or SVG vector geometry) and explains extension adjustment and collision versioning separately.
+Both hosts return `out` and `versioned` metadata. OpenCode 2 also returns structured output with that shape alongside the text. `out` is the actual absolute saved path: use it for reads and as the next `imageedit` call's `images` input, rather than assuming the requested path was used. An SVG can't be a reference image on any backend, because the plugin doesn't detect it as an image. The OpenAI Images API and NanoGPT refuse a GIF reference before sending anything. Codex sends any file detected as an image, including a GIF; whether its edits endpoint accepts a GIF hasn't been established. `versioned` is true only for a collision suffix, not an extension adjustment alone. The message reports the actual format and size (pixels, GIF frame size or SVG vector geometry) and explains extension adjustment and collision versioning separately.
 
 Relative `out` and reference paths follow the calling session's directory. On OpenCode 2 that can differ from the directory that loaded the plugin. Absolute paths are accepted, including outside the project; see [file access](permissions.md#file-access).
 

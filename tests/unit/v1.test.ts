@@ -247,14 +247,28 @@ describe("OpenCode 1 adapter", () => {
     globalThis.fetch = fetchMock as unknown as typeof fetch
     const tool = await loadTool(undefined, "openai-api", "imagegen_models")
     const { asks, ask } = recordAsks()
+    // A lookup needs no session directory.
+    const context = Object.defineProperty(v1ToolContext(dir, new AbortController().signal, ask), "directory", {
+      get: () => {
+        throw new Error("a lookup must not read the directory")
+      },
+    })
 
-    const result = await tool.execute({ query: "image" }, v1ToolContext(dir, new AbortController().signal, ask))
+    const result = await tool.execute({ query: "image" }, context)
 
     expect(asks).toEqual([
       { permission: "imagegen_models", patterns: ["openai-api"], always: ["openai-api"], metadata: { query: "image" } },
     ])
     expect(result).toEqual({ output: expect.stringContaining('that contain "image": 0 of 0 model IDs') })
     expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  test("runs NanoGPT's information tool without a call context", async () => {
+    const tool = await loadTool(undefined, "nano-gpt", "imagegen_models")
+
+    const result = await tool.execute({ operation: "edit" }, undefined as unknown as ToolContext)
+
+    expect(result).toEqual({ output: expect.stringContaining("9 of 17 shown") })
   })
 })
 

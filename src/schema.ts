@@ -1,5 +1,5 @@
 import { z } from "zod"
-import { listFormatNames, type OutputFormat } from "./output-image"
+import { listFormatNames, type OutputFormat } from "./image-format"
 
 // The public tool names. Every backend creates a new image from text with IMAGEGEN_TOOL and changes or combines
 // existing images with IMAGEEDIT_TOOL; argument errors point from one to the other.
@@ -25,11 +25,13 @@ export const GENERATION_MOVED_ARGUMENTS: Readonly<Record<string, string>> = {
   images: `${IMAGEGEN_TOOL} creates a new image from text; use ${IMAGEEDIT_TOOL} to change or combine existing images.`,
 }
 
-export function outField(savedFormats: readonly OutputFormat[]) {
+// The destination argument of an image tool, naming the formats it saves: pass the same list as the tool's
+// `outputFormats`.
+export function outField(outputFormats: readonly OutputFormat[]) {
   return z
     .string()
     .describe(
-      `Destination path, relative to the project directory unless absolute. Saves native ${listFormatNames(savedFormats)} bytes without conversion, adjusting the extension to match. An existing target is kept and the new image gets a -vN suffix. Use the returned out path for subsequent reads or edits.`,
+      `Destination path, relative to the project directory unless absolute. Saves native ${listFormatNames(outputFormats)} bytes without conversion, adjusting the extension to match. An existing target is kept and the new image gets a -vN suffix. Use the returned out path for subsequent reads or edits.`,
     )
 }
 
@@ -60,8 +62,8 @@ export type ArgsSpec = {
   size: z.ZodType<string>
   model: string
   quality: string
-  // The formats the tool saves, which `out` describes; the same list the tool passes to the save.
-  savedFormats: readonly OutputFormat[]
+  // The formats the tool saves, which `out` describes; the tool declares the same list as its `outputFormats`.
+  outputFormats: readonly OutputFormat[]
   // Guidance for `background`; omitted, the opaque-default guidance shared by Codex and the OpenAI Images API.
   background?: string
 }
@@ -87,7 +89,7 @@ function controlFields(spec: ArgsSpec) {
 export function generationShape(spec: ArgsSpec) {
   return {
     prompt: z.string().describe(PROMPT_DESCRIPTION.generate),
-    out: outField(spec.savedFormats),
+    out: outField(spec.outputFormats),
     size: spec.size,
     ...controlFields(spec),
   }
@@ -98,7 +100,7 @@ export function generationShape(spec: ArgsSpec) {
 export function editShape(spec: EditArgsSpec) {
   return {
     prompt: z.string().describe(PROMPT_DESCRIPTION.edit),
-    out: outField(spec.savedFormats),
+    out: outField(spec.outputFormats),
     size: spec.size,
     images: z
       .array(z.string().min(1), {

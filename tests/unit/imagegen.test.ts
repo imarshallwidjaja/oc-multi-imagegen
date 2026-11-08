@@ -360,6 +360,43 @@ describe.each(matrix)("%s with the %s backend calling %s", (_host, _backend, _to
     expect(await listed()).toEqual([])
   })
 
+  test("keeps the cancellation reason when the call is cancelled while a failed response is read", async () => {
+    const controller = new AbortController()
+    const fetchMock = stubFetch(
+      (_url, init) =>
+        new Response(
+          new ReadableStream({
+            start(stream) {
+              init.signal?.addEventListener("abort", () => stream.error(init.signal?.reason))
+              controller.abort(new Error("stopped while reading the failure"))
+            },
+          }),
+          { status: 500 },
+        ),
+    )
+    const harness = await createHarness(dir)
+
+    await expect(harness.execute(args, controller.signal)).rejects.toThrow("stopped while reading the failure")
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(await listed()).toEqual([])
+  })
+
+  test("refuses a successful response that is not JSON, once, without quoting it", async () => {
+    // The runtime's JSON parser quotes an unexpected identifier such as SECRET in its own message.
+    const fetchMock = stubFetch(() => new Response("SECRET sk-secret https://secret.example/?sig=1"))
+    const harness = await createHarness(dir)
+
+    const error = (await harness.execute(args).catch((caught: Error) => caught)) as Error
+
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).toContain("not JSON")
+    expect(error.message.length).toBeLessThan(400)
+    expect(error.message).not.toMatch(/secret|SECRET|https:/)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(await listed()).toEqual([])
+  })
+
   const zeroWidthPng = Buffer.from(PNG_BUFFER)
   zeroWidthPng.writeUInt32BE(0, 16)
   const rasterOnly: Array<[string, Buffer, string]> = operation.savesGifAndSvg
@@ -538,6 +575,21 @@ describe.each(keyRows)("API key source through %s with the %s backend", (_host, 
     expect(error).toBeInstanceOf(Error)
     expect((error as Error).message).toContain(message)
     expect((error as Error).message).not.toContain("sk bad")
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  test("a key that cannot be an HTTP header value fails before any reference image is read", async () => {
+    const fetchMock = stubFetch()
+    const edit = flavour.operations[1]
+    const harness = await create(dir, flavour, edit.tool)
+    process.env[variable] = "sk bad\nkey"
+
+    // The reference does not exist: reading it first would fail with a different error.
+    const error = await harness.execute({ ...edit.args, images: ["missing.png"] }).catch((caught: Error) => caught)
+
+    expect((error as Error).message).toBe(
+      `The ${(flavour.key as NonNullable<Flavour["key"]>).label} key contains characters that cannot be sent in an HTTP header.`,
+    )
     expect(fetchMock).not.toHaveBeenCalled()
   })
 

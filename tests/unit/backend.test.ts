@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { z } from "zod"
 import { selectBackend } from "../../src/backend"
 import plugin from "../../src/index"
 import { isolateEnvironment } from "./fixtures"
@@ -45,6 +46,27 @@ describe("selectBackend", () => {
     expect(names("codex")).toEqual(["imagegen", "imageedit"])
     expect(names("openai-api")).toEqual(["imagegen", "imageedit", "imagegen_models"])
     expect(names("nano-gpt")).toEqual(["imagegen", "imageedit", "imagegen_models"])
+  })
+
+  // The out argument names the formats each tool saves; imagegen.test.ts checks through both hosts that saving accepts
+  // and refuses the same ones.
+  test.each([
+    ["codex", { imagegen: "PNG, JPEG or WebP", imageedit: "PNG, JPEG or WebP" }],
+    ["openai-api", { imagegen: "PNG, JPEG, WebP, GIF or SVG", imageedit: "PNG, JPEG or WebP" }],
+    ["nano-gpt", { imagegen: "PNG, JPEG or WebP", imageedit: "PNG, JPEG or WebP" }],
+  ])("each %s image tool's out argument names the formats it saves", (backend, expected) => {
+    process.env.OC_MULTI_IMAGEGEN_BACKEND = backend
+    const images = selectBackend(undefined).tools.filter((tool) => tool.kind === "image")
+
+    const described = Object.fromEntries(
+      images.map((tool) => {
+        const schema = z.toJSONSchema(tool.schema, { io: "input" }) as unknown as {
+          properties: { out: { description: string } }
+        }
+        return [tool.name, /Saves native (.+?) bytes/.exec(schema.properties.out.description)?.[1]]
+      }),
+    )
+    expect(described).toEqual(expected)
   })
 
   test.each([

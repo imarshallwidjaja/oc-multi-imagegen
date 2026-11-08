@@ -1,17 +1,19 @@
 import type { z } from "zod"
-import { defineImageTool } from "./imagegen"
+import type { CredentialSpec, KeyCredential } from "./credential"
+import { defineImageTool, type EditToolSpec, type GenerationToolSpec } from "./imagegen"
 import {
   controlFields,
   describeNanoImageTool,
   editSchema,
   findModel,
   generateSchema,
+  NANO_OUTPUT_FORMATS,
   type NanoModel,
   nanoModelsTool,
   referenceRules,
 } from "./nano-gpt-models"
 import { IMAGEEDIT_TOOL, IMAGEGEN_TOOL, type Operation } from "./schema"
-import { type Backend, type CredentialSpec, expectHeaderSafeKey, type ImageCredential } from "./types"
+import type { Backend } from "./types"
 
 // NanoGPT's normalized Image API. One endpoint serves generation and editing; the tool selects the operation, and
 // reference images go in `input_references` as data URLs. Legacy image aliases are not sent.
@@ -95,7 +97,7 @@ function describeFailure(call: Call, status: number, text: string, key: string):
   return `${label(call)} request failed: HTTP ${status}${code ? ` ${code}` : ""}${message ? `: ${message}` : ""}.${hint}`
 }
 
-type ImagePayload = { inline: string } | { url: string }
+type ImagePayload = { inline: Uint8Array } | { url: string }
 
 // Fields that name a pending job rather than an image.
 const JOB_FIELDS = [
@@ -139,7 +141,7 @@ function readImagePayload(call: Call, body: unknown, key: string): ImagePayload 
   // Only a non-empty string is base64 text: Buffer.from also accepts arrays and serialized Buffer objects.
   if (hasInline) {
     if (typeof inline !== "string" || inline === "") throw fail("data[0].b64_json is not a non-empty string.")
-    return { inline }
+    return { inline: Buffer.from(inline, "base64") }
   }
   if (hasUrl) {
     if (typeof url !== "string" || url === "") throw fail("data[0].url is not a non-empty string.")
@@ -175,8 +177,8 @@ function parseDownloadUrl(call: Call, raw: string): URL {
   return url
 }
 
-// Downloads the image without credentials and without following redirects, up to MAX_DOWNLOAD_BYTES. Returns base64.
-async function downloadImage(call: Call, raw: string, signal: AbortSignal): Promise<string> {
+// Downloads the image without credentials and without following redirects, up to MAX_DOWNLOAD_BYTES.
+async function downloadImage(call: Call, raw: string, signal: AbortSignal): Promise<Uint8Array> {
   const url = parseDownloadUrl(call, raw)
   const fail = (reason: string) => new Error(`${label(call)} image download failed: ${reason} ${NOTHING_SAVED}`)
   const res = await networkStep(call, signal, "downloading the image", () =>
@@ -214,22 +216,21 @@ async function downloadImage(call: Call, raw: string, signal: AbortSignal): Prom
   if (exactLength !== undefined && received !== exactLength) {
     throw fail(`${received} bytes arrived but the response declared ${exactLength}.`)
   }
-  return Buffer.concat(chunks).toString("base64")
+  return Buffer.concat(chunks)
 }
 
 // The arguments a request needs, as the generation schema validates them. Editing validates the same fields against
 // its own model IDs and adds its references, which arrive separately.
 type NanoArgs = Omit<z.output<typeof generateSchema>, "model" | "out"> & { model: string }
 
-// Sends one request and returns the image as base64. Nothing is retried and no other model is tried.
+// Sends one request and returns the image bytes. Nothing is retried and no other model is tried.
 async function requestImage(
   operation: Operation,
-  credential: ImageCredential,
+  { key }: KeyCredential,
   args: NanoArgs,
   referenceDataUrls: string[],
   signal: AbortSignal,
-): Promise<string> {
-  const key = expectHeaderSafeKey(credential, nanoGptCredential.label)
+): Promise<Uint8Array> {
   const model = requireModel(operation, args.model)
   const call = { operation, model }
   const body = JSON.stringify({
@@ -265,26 +266,25 @@ const requires = (sent: string) =>
 const SAVE_FAILURE_NOTE = `The image was not saved. ${CHARGE_NOTE}`
 
 export const nanoGptImagegen = {
-  name: IMAGEGEN_TOOL,
+  operation: "generate",
   description: describeNanoImageTool("generate", requires("The prompt is")),
   schema: generateSchema,
-  generate: (credential: ImageCredential, args: NanoArgs, _references: string[], signal: AbortSignal) =>
-    requestImage("generate", credential, args, [], signal),
+  credential: nanoGptCredential,
+  outputFormats: NANO_OUTPUT_FORMATS,
+  request: (credential, args, signal) => requestImage("generate", credential, args, [], signal),
   saveFailureNote: SAVE_FAILURE_NOTE,
-}
+} satisfies GenerationToolSpec<typeof generateSchema, typeof nanoGptCredential>
 
 export const nanoGptImageedit = {
-  name: IMAGEEDIT_TOOL,
+  operation: "edit",
   description: describeNanoImageTool("edit", requires("The prompt and reference images are")),
   schema: editSchema,
-  references: (args: { model: string; images: string[] }) => ({
-    paths: args.images,
-    rules: referenceRules(requireModel("edit", args.model)),
-  }),
-  generate: (credential: ImageCredential, args: NanoArgs, references: string[], signal: AbortSignal) =>
-    requestImage("edit", credential, args, references, signal),
+  credential: nanoGptCredential,
+  outputFormats: NANO_OUTPUT_FORMATS,
+  referenceRules: (args) => referenceRules(requireModel("edit", args.model)),
+  request: (credential, args, references, signal) => requestImage("edit", credential, args, references, signal),
   saveFailureNote: SAVE_FAILURE_NOTE,
-}
+} satisfies EditToolSpec<typeof editSchema, typeof nanoGptCredential>
 
 export const nanoGptBackend = {
   id: "nano-gpt",

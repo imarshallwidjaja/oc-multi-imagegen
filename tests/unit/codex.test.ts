@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, mock, test } from "bun:test"
 import { z } from "zod"
-import { type CodexArgs, codexImageedit, codexImagegen } from "../../src/codex"
-import type { ImageCredential } from "../../src/types"
+import { type CodexArgs, codexBackend, codexImageedit, codexImagegen } from "../../src/codex"
+import type { ImageCredential, OAuthCredential } from "../../src/credential"
+import { PNG_BASE64, PNG_BUFFER } from "./fixtures"
 
 function imagesResponse(data: Array<{ b64_json: string }>): Response {
   return new Response(JSON.stringify({ created: 0, data }))
@@ -12,10 +13,10 @@ function generateArgs(overrides: Partial<CodexArgs> = {}): CodexArgs {
 }
 
 const signal = new AbortController().signal
-const auth: ImageCredential = { type: "oauth", access: "tok" }
+const auth: OAuthCredential = { type: "oauth", access: "tok" }
 
-function callCodex(args: CodexArgs, credential: ImageCredential = auth) {
-  return codexImagegen.generate(credential, args, [], signal)
+function callCodex(args: CodexArgs, credential: OAuthCredential = auth) {
+  return codexImagegen.request(credential, args, signal)
 }
 
 describe("Codex backend request", () => {
@@ -24,13 +25,13 @@ describe("Codex backend request", () => {
     globalThis.fetch = originalFetch
   })
 
-  function stubImage(image = "BASE64IMAGE") {
+  function stubImage(image = PNG_BASE64) {
     const fetchMock = mock(async (_url: string, _init: RequestInit) => imagesResponse([{ b64_json: image }]))
     globalThis.fetch = fetchMock as unknown as typeof fetch
     return fetchMock
   }
 
-  test("imagegen posts the Codex request body to the generations endpoint and returns the image", async () => {
+  test("imagegen posts the Codex request body to the generations endpoint and returns the decoded image", async () => {
     const fetchMock = stubImage()
     const prompt = "a mountain lake"
 
@@ -40,7 +41,7 @@ describe("Codex backend request", () => {
       accountId: "acct",
     })
 
-    expect(result).toBe("BASE64IMAGE")
+    expect(Buffer.from(result)).toEqual(PNG_BUFFER)
     expect(fetchMock).toHaveBeenCalledTimes(1)
     const [url, init] = fetchMock.mock.calls[0]
     expect(url).toBe("https://chatgpt.com/backend-api/codex/images/generations")
@@ -65,7 +66,12 @@ describe("Codex backend request", () => {
     const prompt = "put both characters together"
     const dataUrls = ["data:image/png;base64,AAA", "data:image/jpeg;base64,BBB"]
 
-    await codexImageedit.generate(auth, generateArgs({ prompt, size: "1672x941" }), dataUrls, signal)
+    await codexImageedit.request(
+      auth,
+      { ...generateArgs({ prompt, size: "1672x941" }), images: ["ref.png"] },
+      dataUrls,
+      signal,
+    )
 
     const [url, init] = fetchMock.mock.calls[0]
     expect(url).toBe("https://chatgpt.com/backend-api/codex/images/edits")
@@ -119,8 +125,16 @@ describe("Codex backend request", () => {
 
   test("refuses a credential of another kind before any request", async () => {
     const fetchMock = stubImage()
+    const key: ImageCredential = { type: "key", key: "sk-test" }
+    const tool = codexBackend.tools[0]
+    const host = {
+      signal,
+      authorize: async () => {},
+      resolveDirectory: async () => "/nonexistent",
+      resolveCredential: async () => key,
+    }
 
-    await expect(callCodex(generateArgs(), { type: "key", key: "sk-test" })).rejects.toThrow(
+    await expect(tool.run(generateArgs(), host)).rejects.toThrow(
       "The backend needs a oauth credential but received key.",
     )
 

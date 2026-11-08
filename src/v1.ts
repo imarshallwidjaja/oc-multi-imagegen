@@ -1,6 +1,7 @@
 import type { Hooks, Plugin, ToolContext, ToolDefinition, ToolResult } from "@opencode-ai/plugin"
 import { loadCredential } from "./auth"
 import { selectBackend } from "./backend"
+import { invokeTool } from "./invocation"
 import { loadPackagedSkill, SKILLS_DIRECTORY } from "./skill"
 import type { Backend, BackendTool, ProviderAccess } from "./types"
 
@@ -27,28 +28,18 @@ function providerAccess(backend: Backend, ctx: ToolContext): ProviderAccess {
   }
 }
 
-// A plain tool definition, so the module needs no runtime import from the OpenCode 1 SDK.
+// A plain tool definition, so the module needs no runtime import from the OpenCode 1 SDK. The call context is read
+// only by a tool that needs it, so an information tool also runs without one.
 function createTool(backend: Backend, tool: BackendTool) {
-  const definition = { description: tool.description, args: tool.schema.shape }
-  if (tool.kind === "info") {
-    return { ...definition, execute: async (rawArgs: unknown): Promise<ToolResult> => ({ output: tool.run(rawArgs) }) }
-  }
-  if (tool.kind === "lookup") {
-    return {
-      ...definition,
-      execute: async (rawArgs: unknown, ctx: ToolContext): Promise<ToolResult> => ({
-        output: await tool.run(rawArgs, providerAccess(backend, ctx)),
-      }),
-    }
-  }
   return {
-    ...definition,
+    description: tool.description,
+    args: tool.schema.shape,
     async execute(rawArgs: unknown, ctx: ToolContext): Promise<ToolResult> {
-      const saved = await tool.run(rawArgs, {
-        ...providerAccess(backend, ctx),
+      const result = await invokeTool(tool, rawArgs, {
+        providerAccess: () => providerAccess(backend, ctx),
         resolveDirectory: async () => ctx.directory,
       })
-      return { output: saved.message, metadata: { out: saved.savedPath, versioned: saved.versioned } }
+      return result.image ? { output: result.text, metadata: result.image } : { output: result.text }
     },
   }
 }

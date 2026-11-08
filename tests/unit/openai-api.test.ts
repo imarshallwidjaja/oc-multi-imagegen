@@ -3,11 +3,11 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { z } from "zod"
+import type { ImageCredential, KeyCredential } from "../../src/credential"
 import { readReferenceImages } from "../../src/input-image"
-import { openaiApiImageedit, openaiApiImagegen, openaiApiModels } from "../../src/openai-api"
+import { openaiApiBackend, openaiApiImageedit, openaiApiImagegen, openaiApiModels } from "../../src/openai-api"
 import { lookUpOpenAiModels } from "../../src/openai-models"
-import type { ImageCredential } from "../../src/types"
-import { PNG_BUFFER } from "./fixtures"
+import { PNG_BASE64, PNG_BUFFER } from "./fixtures"
 
 type GenerateArgs = z.output<typeof openaiApiImagegen.schema>
 type EditArgs = z.output<typeof openaiApiImageedit.schema>
@@ -25,14 +25,26 @@ function editArgs(overrides: Partial<EditArgs> = {}): EditArgs {
 }
 
 const signal = new AbortController().signal
-const key: ImageCredential = { type: "key", key: "sk-images" }
+const key: KeyCredential = { type: "key", key: "sk-images" }
 
-function callApi(args: GenerateArgs, credential: ImageCredential = key) {
-  return openaiApiImagegen.generate(credential, args, [], signal)
+function callApi(args: GenerateArgs) {
+  return openaiApiImagegen.request(key, args, signal)
 }
 
 function callEdit(args: EditArgs, dataUrls: string[]) {
-  return openaiApiImageedit.generate(key, args, dataUrls, signal)
+  return openaiApiImageedit.request(key, args, dataUrls, signal)
+}
+
+// Runs imagegen through the shared flow, which checks the credential, with a host that allows everything.
+function runImagegen(credential: ImageCredential) {
+  const tool = openaiApiBackend.tools.find((candidate) => candidate.name === "imagegen")
+  if (tool?.kind !== "image") throw new Error("imagegen is not an image tool")
+  return tool.run(generateArgs(), {
+    signal,
+    authorize: async () => {},
+    resolveDirectory: async () => "/nonexistent",
+    resolveCredential: async () => credential,
+  })
 }
 
 const originalFetch = globalThis.fetch
@@ -40,19 +52,19 @@ afterEach(() => {
   globalThis.fetch = originalFetch
 })
 
-function stubImage(image = "BASE64IMAGE") {
+function stubImage(image = PNG_BASE64) {
   const fetchMock = mock(async (_url: string, _init: RequestInit) => imagesResponse([{ b64_json: image }]))
   globalThis.fetch = fetchMock as unknown as typeof fetch
   return fetchMock
 }
 
 describe("OpenAI Images API backend request", () => {
-  test("imagegen posts the documented generation body with the key as a bearer token", async () => {
+  test("imagegen posts the documented generation body with the key as a bearer token and decodes the image", async () => {
     const fetchMock = stubImage()
 
     const result = await callApi(generateArgs({ prompt: "a mountain lake" }))
 
-    expect(result).toBe("BASE64IMAGE")
+    expect(Buffer.from(result)).toEqual(PNG_BUFFER)
     expect(fetchMock).toHaveBeenCalledTimes(1)
     const [url, init] = fetchMock.mock.calls[0]
     expect(url).toBe("https://api.openai.com/v1/images/generations")
@@ -159,7 +171,7 @@ describe("OpenAI Images API backend request", () => {
   test("refuses a credential of another kind before any request", async () => {
     const fetchMock = stubImage()
 
-    await expect(callApi(generateArgs(), { type: "oauth", access: "tok" })).rejects.toThrow(
+    await expect(runImagegen({ type: "oauth", access: "tok" })).rejects.toThrow(
       "The backend needs a key credential but received oauth.",
     )
 
@@ -171,7 +183,7 @@ describe("OpenAI Images API backend request", () => {
     async (bad) => {
       const fetchMock = stubImage()
 
-      const error = await callApi(generateArgs(), { type: "key", key: bad }).catch((caught: Error) => caught)
+      const error = await runImagegen({ type: "key", key: bad }).catch((caught: Error) => caught)
 
       expect(error).toBeInstanceOf(Error)
       expect((error as Error).message).toBe(
@@ -491,7 +503,7 @@ describe("OpenAI Images API reference images", () => {
   ])("accepts %s", async (_name, mime, bytes) => {
     const where = await reference("ref", bytes)
 
-    expect(await readReferenceImages(["ref"], where, openaiApiImageedit.references(editArgs()).rules)).toEqual([
+    expect(await readReferenceImages(["ref"], where, openaiApiImageedit.referenceRules())).toEqual([
       `data:${mime};base64,${bytes.toString("base64")}`,
     ])
   })
@@ -499,9 +511,7 @@ describe("OpenAI Images API reference images", () => {
   test("rejects a GIF, which the API does not take", async () => {
     const where = await reference("ref.gif", Buffer.from("GIF89a"))
 
-    await expect(
-      readReferenceImages(["ref.gif"], where, openaiApiImageedit.references(editArgs()).rules),
-    ).rejects.toThrow(
+    await expect(readReferenceImages(["ref.gif"], where, openaiApiImageedit.referenceRules())).rejects.toThrow(
       `unsupported reference image type image/gif: ${path.join(where, "ref.gif")}. Use image/png, image/jpeg, image/webp.`,
     )
   })
@@ -510,15 +520,15 @@ describe("OpenAI Images API reference images", () => {
     // 15,728,640 bytes encode to 20,971,520 base64 characters; the data URL prefix pushes it over the limit.
     const where = await reference("big.png", Buffer.concat([PNG_BUFFER, Buffer.alloc(15_728_640 - PNG_BUFFER.length)]))
 
-    await expect(
-      readReferenceImages(["big.png"], where, openaiApiImageedit.references(editArgs()).rules),
-    ).rejects.toThrow("reference image is too large")
+    await expect(readReferenceImages(["big.png"], where, openaiApiImageedit.referenceRules())).rejects.toThrow(
+      "reference image is too large",
+    )
   })
 
   test("accepts a reference whose data URL is just under the documented length", async () => {
     const where = await reference("max.png", Buffer.concat([PNG_BUFFER, Buffer.alloc(15_728_610 - PNG_BUFFER.length)]))
 
-    const [dataUrl] = await readReferenceImages(["max.png"], where, openaiApiImageedit.references(editArgs()).rules)
+    const [dataUrl] = await readReferenceImages(["max.png"], where, openaiApiImageedit.referenceRules())
 
     expect(dataUrl.length).toBeLessThanOrEqual(20_971_520)
     expect(dataUrl.length).toBeGreaterThan(20_971_480)

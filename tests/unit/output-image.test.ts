@@ -1,8 +1,10 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
+import type { FileHandle } from "node:fs/promises"
+import { chmod, lstat, mkdir, mkdtemp, open, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { pickNonOverwritePath } from "../../src/output-image"
+import { RASTER_FORMATS } from "../../src/image-format"
+import { saveGeneratedImage } from "../../src/output-image"
 import { inspectSvg } from "../../src/svg"
 import { PNG_BUFFER, SVG_BUFFER } from "./fixtures"
 
@@ -13,47 +15,140 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  await chmod(dir, 0o700)
   await rm(dir, { recursive: true, force: true })
 })
 
-// Place a real PNG at the path so it is occupied; pickNonOverwritePath only checks existence.
-function occupy(p: string): Promise<void> {
-  return writeFile(p, PNG_BUFFER)
-}
+// Saving through both hosts, extension handling and refusals that create nothing are covered in imagegen.test.ts.
+// These cases own how a file name is claimed and written.
+const save = (out: string, bytes: Uint8Array = PNG_BUFFER) => saveGeneratedImage(out, dir, bytes, RASTER_FORMATS)
+// Distinct PNG payloads: trailing bytes keep the header, so each is still a 1x1 PNG.
+const pngWith = (marker: string) => Buffer.concat([PNG_BUFFER, Buffer.from(marker)])
 
-describe("pickNonOverwritePath", () => {
-  test("returns the requested path when nothing exists", async () => {
-    const requested = path.join(dir, "image.png")
-    expect(await pickNonOverwritePath(requested)).toBe(requested)
+describe("saveGeneratedImage", () => {
+  test("keeps existing files and saves under the first free -vN suffix, before the extension", async () => {
+    await writeFile(path.join(dir, "my.photo.png"), "first")
+    await writeFile(path.join(dir, "my.photo-v2.png"), "second")
+
+    const saved = await save("my.photo.png")
+
+    expect(saved).toMatchObject({ savedPath: path.join(dir, "my.photo-v3.png"), versioned: true })
+    expect(await readFile(saved.savedPath)).toEqual(PNG_BUFFER)
+    expect(await readFile(path.join(dir, "my.photo.png"), "utf8")).toBe("first")
+    expect(await readFile(path.join(dir, "my.photo-v2.png"), "utf8")).toBe("second")
   })
 
-  test("appends -v2 when the requested path exists", async () => {
-    const requested = path.join(dir, "image.png")
-    await occupy(requested)
-    expect(await pickNonOverwritePath(requested)).toBe(path.join(dir, "image-v2.png"))
-  })
+  test("gives each concurrent save of one target its own file with its own bytes", async () => {
+    const payloads = Array.from({ length: 8 }, (_, index) => pngWith(`payload ${index}`))
 
-  test("skips to the first free suffix when earlier versions exist", async () => {
-    const requested = path.join(dir, "image.png")
-    await occupy(requested)
-    await occupy(path.join(dir, "image-v2.png"))
-    expect(await pickNonOverwritePath(requested)).toBe(path.join(dir, "image-v3.png"))
-  })
+    const saved = await Promise.all(payloads.map((bytes) => save("cat.png", bytes)))
 
-  test("preserves the extension and stem in the versioned name", async () => {
-    const requested = path.join(dir, "my.photo.jpeg")
-    await occupy(requested)
-    expect(await pickNonOverwritePath(requested)).toBe(path.join(dir, "my.photo-v2.jpeg"))
-  })
-
-  test("throws once every version up to the limit is taken", async () => {
-    // maxVersion is lowered to 2 so we can fill the suffix space without writing 999 files.
-    const requested = path.join(dir, "image.png")
-    await occupy(requested)
-    await occupy(path.join(dir, "image-v2.png"))
-    expect(pickNonOverwritePath(requested, 2)).rejects.toThrow(
-      `could not find a non-conflicting filename under ${dir}/image-vN.png (tried up to v2)`,
+    const names = saved.map((result) => path.basename(result.savedPath))
+    expect([...names].sort()).toEqual(
+      ["cat.png", ...Array.from({ length: 7 }, (_, index) => `cat-v${index + 2}.png`)].sort(),
     )
+    expect(saved.filter((result) => !result.versioned)).toHaveLength(1)
+    for (const [index, result] of saved.entries()) expect(await readFile(result.savedPath)).toEqual(payloads[index])
+  })
+
+  test("does not follow a dangling symbolic link at the target", async () => {
+    await mkdir(path.join(dir, "elsewhere"))
+    await symlink(path.join(dir, "elsewhere", "victim.png"), path.join(dir, "cat.png"))
+
+    const saved = await save("cat.png")
+
+    expect(saved).toMatchObject({ savedPath: path.join(dir, "cat-v2.png"), versioned: true })
+    expect(await readdir(path.join(dir, "elsewhere"))).toEqual([])
+    expect((await lstat(path.join(dir, "cat.png"))).isSymbolicLink()).toBe(true)
+  })
+
+  test("fails once every suffix up to -v999 is taken, creating nothing", async () => {
+    await writeFile(path.join(dir, "cat.png"), "taken")
+    for (let version = 2; version <= 999; version++) await writeFile(path.join(dir, `cat-v${version}.png`), "taken")
+
+    await expect(save("cat.png")).rejects.toThrow(
+      `could not find a non-conflicting filename under ${dir}/cat-vN.png (tried up to v999)`,
+    )
+    expect(await readdir(dir)).toHaveLength(999)
+  })
+
+  test("stops at a failure other than an existing name, leaving existing files alone", async () => {
+    await writeFile(path.join(dir, "cat.png"), "first")
+    await chmod(dir, 0o500)
+
+    const error = (await save("cat.png").catch((caught: NodeJS.ErrnoException) => caught)) as NodeJS.ErrnoException
+
+    expect(error.code).toBe("EACCES")
+    await chmod(dir, 0o700)
+    expect(await readdir(dir)).toEqual(["cat.png"])
+    expect(await readFile(path.join(dir, "cat.png"), "utf8")).toBe("first")
+  })
+
+  // A real write or close failure needs a full disk or a failing device, so these cases fail the call's file handle
+  // after the file was created, keeping the file system's own behavior for creation and removal.
+  const handlePrototype = async () => {
+    const probe = await open(os.devNull)
+    await probe.close()
+    return Object.getPrototypeOf(probe) as FileHandle
+  }
+  // Writes the first 8 bytes, runs `afterPartialWrite`, then rejects with `failure`.
+  const failWrite = async (failure: Error, afterPartialWrite = async () => {}) =>
+    spyOn(await handlePrototype(), "writeFile").mockImplementationOnce(async function (this: FileHandle, data) {
+      await this.write((data as Uint8Array).subarray(0, 8))
+      await afterPartialWrite()
+      throw failure
+    })
+
+  test("removes the file it created when the write fails, and rejects with that failure", async () => {
+    await writeFile(path.join(dir, "cat.png"), "first")
+    const failure = new Error("disk full")
+    const failing = await failWrite(failure)
+
+    try {
+      await expect(save("cat.png")).rejects.toBe(failure)
+    } finally {
+      failing.mockRestore()
+    }
+
+    expect(await readdir(dir)).toEqual(["cat.png"])
+    expect(await readFile(path.join(dir, "cat.png"), "utf8")).toBe("first")
+  })
+
+  test("removes the file it created when closing it fails, and rejects with that failure", async () => {
+    const failure = new Error("close failed")
+    const prototype = await handlePrototype()
+    const close = prototype.close
+    // The handle is really closed, then the close reports a failure.
+    const failing = spyOn(prototype, "close").mockImplementationOnce(async function (this: FileHandle) {
+      await close.call(this)
+      throw failure
+    })
+
+    try {
+      await expect(save("cat.png")).rejects.toBe(failure)
+    } finally {
+      failing.mockRestore()
+    }
+
+    expect(await readdir(dir)).toEqual([])
+  })
+
+  test("reports a failed removal with the write failure and the path where a partial file may remain", async () => {
+    const failure = new Error("disk full")
+    // Removing the file then fails, because its directory no longer allows changes.
+    const failing = await failWrite(failure, () => chmod(dir, 0o500))
+
+    const error = (await save("cat.png")
+      .catch((caught: AggregateError) => caught)
+      .finally(() => failing.mockRestore())) as AggregateError
+
+    const savedPath = path.join(dir, "cat.png")
+    expect(error.message).toContain(`could not write ${savedPath}: disk full`)
+    expect(error.message).toContain("a partial file may remain there")
+    expect(error.errors[0]).toBe(failure)
+    expect((error.errors.at(-1) as NodeJS.ErrnoException).code).toBe("EACCES")
+    await chmod(dir, 0o700)
+    expect(await readFile(savedPath)).toEqual(PNG_BUFFER.subarray(0, 8))
   })
 })
 

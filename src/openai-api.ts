@@ -1,8 +1,16 @@
 import { z } from "zod"
-import { defineImageTool, defineLookupTool, describeEditTool, describeGenerationTool } from "./imagegen"
+import type { CredentialSpec, KeyCredential } from "./credential"
+import { listFormatNames, type OutputFormat, RASTER_FORMATS } from "./image-format"
+import {
+  defineImageTool,
+  defineLookupTool,
+  describeEditTool,
+  describeGenerationTool,
+  type EditToolSpec,
+  type GenerationToolSpec,
+} from "./imagegen"
 import { postImagesRequest } from "./images-request"
 import { lookUpOpenAiModels, openaiModelsSchema } from "./openai-models"
-import type { OutputFormat } from "./output-image"
 import {
   type ArgsSpec,
   editShape,
@@ -13,7 +21,7 @@ import {
   MODELS_TOOL,
   strictArgs,
 } from "./schema"
-import { type Backend, type CredentialSpec, expectHeaderSafeKey, type ImageCredential } from "./types"
+import type { Backend } from "./types"
 
 // Official OpenAI Images API: generations for imagegen, edits for imageedit. The documented JSON body for edits takes
 // references as images[].image_url data URLs.
@@ -26,15 +34,24 @@ const EDITS_ENDPOINT = "https://api.openai.com/v1/images/edits"
 const DEFAULT_MODEL = "gpt-image-2.6-sunburst"
 const DEFAULT_QUALITY = "auto"
 
-// The documented output formats. GIF and SVG come from the generations endpoint only, so imageedit saves the raster
-// formats alone, and a transparent background needs PNG or WebP.
+// The documented output formats, each requested with output_format and saved as returned. GIF and SVG come from the
+// generations endpoint only, so imageedit saves the raster formats alone, and only the raster formats keep the opaque
+// background default. A transparent background needs PNG or WebP.
 // https://developers.openai.com/api/docs/guides/image-generation#generate-svg-output
 // https://developers.openai.com/api/docs/guides/image-generation#generate-animated-gif-output
-const OUTPUT_FORMATS = ["png", "jpeg", "webp", "gif", "svg"] as const satisfies readonly OutputFormat[]
-const EDIT_OUTPUT_FORMATS = ["png", "jpeg", "webp"] as const satisfies readonly OutputFormat[]
+const EDIT_OUTPUT_FORMATS = RASTER_FORMATS
+const GENERATION_ONLY_FORMATS = ["gif", "svg"] as const satisfies readonly OutputFormat[]
+const OUTPUT_FORMATS = [...EDIT_OUTPUT_FORMATS, ...GENERATION_ONLY_FORMATS] as const
 const DEFAULT_OUTPUT_FORMAT = "png"
-const GENERATION_ONLY_FORMATS: readonly OutputFormat[] = ["gif", "svg"]
 const TRANSPARENT_FORMATS: readonly OutputFormat[] = ["png", "webp"]
+const generationOnlyFormats: readonly string[] = GENERATION_ONLY_FORMATS
+const isGenerationOnly = (format: string) => generationOnlyFormats.includes(format)
+
+// "png (default), jpeg or webp": the output_format values, as an agent passes them.
+function outputFormatValues(formats: readonly OutputFormat[]): string {
+  const values = formats.map((format) => (format === DEFAULT_OUTPUT_FORMAT ? `${format} (default)` : format))
+  return `${values.slice(0, -1).join(", ")} or ${values[values.length - 1]}`
+}
 
 // GIF frame controls. The guide documents 2 to 64 frames and the API reference 2 to 16; the reference caps the encoded
 // delay far above the guide's 2000 ms. These are the tool's limits, the range both sources share, not proven provider
@@ -83,7 +100,7 @@ const QUALITY = `Optional quality value, sent to the API unchanged. Defaults to 
 
 const generationArgs: ArgsSpec = {
   size: sizeField(" For gif it is the size of each frame."),
-  savedFormats: OUTPUT_FORMATS,
+  outputFormats: OUTPUT_FORMATS,
   background:
     "Optional background. For png, jpeg and webp it defaults to opaque, and transparent needs output_format png or webp; use it for a cut-out instead of asking for one in the prompt. For gif and svg it is sent only when set, and only opaque is accepted. The returned alpha can be soft, and the tool does not check or clean it up.",
   model: MODEL,
@@ -92,7 +109,7 @@ const generationArgs: ArgsSpec = {
 
 const editArgs: ArgsSpec = {
   size: sizeField(),
-  savedFormats: EDIT_OUTPUT_FORMATS,
+  outputFormats: EDIT_OUTPUT_FORMATS,
   background:
     "Optional background; defaults to opaque, and transparent needs output_format png or webp. Use it for a cut-out instead of asking for one in the prompt. The returned alpha can be soft, and the tool does not check or clean it up.",
   model: MODEL,
@@ -119,7 +136,7 @@ const generateSchema = strictArgs(
       .enum(OUTPUT_FORMATS)
       .nullish()
       .describe(
-        "Optional output format: png (default), jpeg, webp, gif or svg. gif is an animated GIF and svg a static vector document authored from a generated reference image. The bytes are saved as returned.",
+        `Optional output format: ${outputFormatValues(OUTPUT_FORMATS)}. gif is an animated GIF and svg a static vector document authored from a generated reference image. The bytes are saved as returned.`,
       ),
     frame_count: z
       .number()
@@ -162,7 +179,7 @@ const generateSchema = strictArgs(
 })
 
 // GIF and SVG come only from the generations endpoint, so the edit tool refuses their controls instead of dropping them.
-const GENERATION_ONLY = `GIF and SVG output come only from ${IMAGEGEN_TOOL} without reference images; ${IMAGEEDIT_TOOL} saves PNG, JPEG or WebP.`
+const GENERATION_ONLY = `GIF and SVG output come only from ${IMAGEGEN_TOOL} without reference images; ${IMAGEEDIT_TOOL} saves ${listFormatNames(EDIT_OUTPUT_FORMATS)}.`
 const EDIT_MOVED_ARGUMENTS = {
   frame_count: GENERATION_ONLY,
   frame_duration_ms: GENERATION_ONLY,
@@ -180,12 +197,12 @@ const editSchema = strictArgs(
     output_format: z
       .enum(EDIT_OUTPUT_FORMATS, {
         error: (issue) =>
-          typeof issue.input === "string" && (GENERATION_ONLY_FORMATS as readonly string[]).includes(issue.input)
+          typeof issue.input === "string" && isGenerationOnly(issue.input)
             ? `output_format ${issue.input} is generation-only: the OpenAI edits endpoint does not return it. ${GENERATION_ONLY}`
             : undefined,
       })
       .nullish()
-      .describe("Optional output format: png (default), jpeg or webp. The bytes are saved as returned."),
+      .describe(`Optional output format: ${outputFormatValues(EDIT_OUTPUT_FORMATS)}. The bytes are saved as returned.`),
   },
   EDIT_MOVED_ARGUMENTS,
 ).superRefine((args, ctx) => checkBackground(args, args.output_format ?? DEFAULT_OUTPUT_FORMAT, issuer(ctx)))
@@ -204,7 +221,7 @@ const openaiApiCredential = {
 // only when the caller sets one.
 function sharedBody(args: GenerateArgs | EditArgs) {
   const format = args.output_format ?? DEFAULT_OUTPUT_FORMAT
-  const background = args.background ?? (GENERATION_ONLY_FORMATS.includes(format) ? undefined : "opaque")
+  const background = args.background ?? (isGenerationOnly(format) ? undefined : "opaque")
   return {
     model: args.model ?? DEFAULT_MODEL,
     prompt: args.prompt,
@@ -218,8 +235,7 @@ function sharedBody(args: GenerateArgs | EditArgs) {
 }
 
 // Sends one request to the endpoint of the invoked tool.
-async function post(url: string, credential: ImageCredential, body: Record<string, unknown>, signal: AbortSignal) {
-  const key = expectHeaderSafeKey(credential, openaiApiCredential.label)
+async function post(url: string, { key }: KeyCredential, body: Record<string, unknown>, signal: AbortSignal) {
   return postImagesRequest({
     label: "openai-api",
     url,
@@ -234,7 +250,7 @@ const REQUIRES = `Requires an OpenAI Images API key: the ${openaiApiCredential.e
 const MODEL_CHOICE = `Call ${MODELS_TOOL} first to see which image models this key lists, then choose model, or omit it to send ${DEFAULT_MODEL}; model and quality (default ${DEFAULT_QUALITY}) are passed to the API unchanged. Size is a native WIDTHxHEIGHT sent to the API unchanged.`
 
 export const openaiApiImagegen = {
-  name: IMAGEGEN_TOOL,
+  operation: "generate",
   description: describeGenerationTool({
     subject: "the OpenAI Images API",
     requires: `${REQUIRES} The prompt is sent to OpenAI.`,
@@ -242,13 +258,14 @@ export const openaiApiImagegen = {
       what: "one image (a raster, an animated GIF or a static SVG)",
       medium:
         "Rasters suit photos, illustrations, textures and concepts. For an icon, logo or simple illustration that must scale or stay editable, output_format svg returns a static vector document; charts, diagrams and exact layouts are still better built as SVG or code directly.",
-      saves:
-        "Saves the native PNG, JPEG, WebP, GIF or SVG bytes and returns the actual absolute path and format: pixel dimensions for rasters, the header's frame size for GIF (frames and animation are not checked), and the viewBox or width and height for SVG, which are vector units. An SVG is refused unless it is a static vector document without scripts, external resources or embedded rasters. The extension is adjusted to match; use the returned out path for reads or subsequent edits. Size is a request, so check the dimensions when they matter.",
+      saves: `Saves the native ${listFormatNames(OUTPUT_FORMATS)} bytes and returns the actual absolute path and format: pixel dimensions for rasters, the header's frame size for GIF (frames and animation are not checked), and the viewBox or width and height for SVG, which are vector units. An SVG is refused unless it is a static vector document without scripts, external resources or embedded rasters. The extension is adjusted to match; use the returned out path for reads or subsequent edits. Size is a request, so check the dimensions when they matter.`,
     },
-    controls: `${MODEL_CHOICE} output_format is png (default), jpeg, webp, gif or svg. For gif, size is each frame, frame_count (${FRAME_COUNT.min} to ${FRAME_COUNT.max}) and frame_duration_ms (${FRAME_DURATION_MS.min} to ${FRAME_DURATION_MS.max}) are optional tool limits, and all frames must fit the model's pixel budget: if the API rejects the request, use a smaller size or fewer frames. For svg, the API renders a reference image and an author model turns it into vectors; set svg_model only when the operator names one or the API asks for it, never a guessed one, and do not repeat a rejected call unchanged. A transparent background needs png or webp. There is no image-count control.`,
+    controls: `${MODEL_CHOICE} output_format is ${outputFormatValues(OUTPUT_FORMATS)}. For gif, size is each frame, frame_count (${FRAME_COUNT.min} to ${FRAME_COUNT.max}) and frame_duration_ms (${FRAME_DURATION_MS.min} to ${FRAME_DURATION_MS.max}) are optional tool limits, and all frames must fit the model's pixel budget: if the API rejects the request, use a smaller size or fewer frames. For svg, the API renders a reference image and an author model turns it into vectors; set svg_model only when the operator names one or the API asks for it, never a guessed one, and do not repeat a rejected call unchanged. A transparent background needs png or webp. There is no image-count control.`,
   }),
   schema: generateSchema,
-  generate: (credential: ImageCredential, args: GenerateArgs, _references: string[], signal: AbortSignal) =>
+  credential: openaiApiCredential,
+  outputFormats: OUTPUT_FORMATS,
+  request: (credential, args, signal) =>
     post(
       GENERATIONS_ENDPOINT,
       credential,
@@ -260,31 +277,28 @@ export const openaiApiImagegen = {
       },
       signal,
     ),
-  outputFormats: OUTPUT_FORMATS,
-}
+} satisfies GenerationToolSpec<typeof generateSchema, typeof openaiApiCredential>
 
 export const openaiApiImageedit = {
-  name: IMAGEEDIT_TOOL,
+  operation: "edit",
   description: describeEditTool({
     subject: "the OpenAI Images API",
     requires: `${REQUIRES} The prompt and reference images are sent to OpenAI.`,
     references: `Required images: 1 to ${MAX_REFERENCE_IMAGES} local PNG, JPEG or WebP paths.`,
-    controls: `${MODEL_CHOICE} output_format is png (default), jpeg or webp; GIF and SVG come only from ${IMAGEGEN_TOOL}. A transparent background needs png or webp. There is no image-count control.`,
+    controls: `${MODEL_CHOICE} output_format is ${outputFormatValues(EDIT_OUTPUT_FORMATS)}; GIF and SVG come only from ${IMAGEGEN_TOOL}. A transparent background needs png or webp. There is no image-count control.`,
   }),
   schema: editSchema,
-  references: (args: EditArgs) => ({
-    paths: args.images,
-    rules: { mimeTypes: REFERENCE_MIME_TYPES, maxDataUrlLength: MAX_DATA_URL_LENGTH },
-  }),
-  generate: (credential: ImageCredential, args: EditArgs, references: string[], signal: AbortSignal) =>
+  credential: openaiApiCredential,
+  outputFormats: EDIT_OUTPUT_FORMATS,
+  referenceRules: () => ({ mimeTypes: REFERENCE_MIME_TYPES, maxDataUrlLength: MAX_DATA_URL_LENGTH }),
+  request: (credential, args, references, signal) =>
     post(
       EDITS_ENDPOINT,
       credential,
       { ...sharedBody(args), images: references.map((dataUrl) => ({ image_url: dataUrl })) },
       signal,
     ),
-  outputFormats: EDIT_OUTPUT_FORMATS,
-}
+} satisfies EditToolSpec<typeof editSchema, typeof openaiApiCredential>
 
 export const openaiApiModels = defineLookupTool({
   name: MODELS_TOOL,
@@ -295,8 +309,8 @@ export const openaiApiModels = defineLookupTool({
     `The API reports only each ID, creation date, owner and shutdown date: a listed model is not proof that it supports SVG, GIF, a size or any other feature, and both image tools still send any model ID unchanged.`,
   ].join(" "),
   schema: openaiModelsSchema,
-  lookup: (credential, args, signal) =>
-    lookUpOpenAiModels(expectHeaderSafeKey(credential, openaiApiCredential.label), args, signal, DEFAULT_MODEL),
+  credential: openaiApiCredential,
+  lookup: ({ key }, args, signal) => lookUpOpenAiModels(key, args, signal, DEFAULT_MODEL),
 })
 
 export const openaiApiBackend = {

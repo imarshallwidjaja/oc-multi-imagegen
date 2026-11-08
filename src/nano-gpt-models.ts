@@ -1,6 +1,6 @@
 import { z } from "zod"
-import { defineInfoTool, SKILL_SENTENCE } from "./imagegen"
-import { RASTER_FORMATS } from "./output-image"
+import { listFormatNames, RASTER_FORMATS } from "./image-format"
+import { defineInfoTool, SKILL_SENTENCE, VERSIONING } from "./imagegen"
 import {
   GENERATION_MOVED_ARGUMENTS,
   IMAGEEDIT_TOOL,
@@ -293,6 +293,10 @@ export const MODELS: readonly NanoModel[] = [
 
 export const FAMILIES = [...new Set(MODELS.map((model) => model.family))]
 
+// Both tools save the native raster formats NanoGPT returns.
+export const NANO_OUTPUT_FORMATS = RASTER_FORMATS
+const SAVED_FORMATS = listFormatNames(NANO_OUTPUT_FORMATS)
+
 // NanoGPT's route-level limits for every reference image (formats and file size).
 export const REFERENCE_MIME_TYPES = ["image/png", "image/jpeg", "image/webp"] as const
 export const ROUTE_REFERENCE_MAX_BYTES = 31457280
@@ -352,18 +356,25 @@ export function controlFields(
   return fields
 }
 
+// "a, b or c"
+function listOr(values: readonly string[]): string {
+  return values.length < 2 ? values.join("") : `${values.slice(0, -1).join(", ")} or ${values[values.length - 1]}`
+}
+
+// The names of the models that take a control, and the values any of them lists, for guidance that names them.
+function modelsWith(name: ControlName): string {
+  return [...new Set(MODELS.filter((model) => controlsOf(model).some((c) => c.name === name)).map((m) => m.name))].join(
+    ", ",
+  )
+}
+function valuesOf(name: ControlName): string {
+  return listOr([...new Set(MODELS.flatMap((model) => controlsOf(model).find((c) => c.name === name)?.values ?? []))])
+}
+
 const codePoints = (text: string) => [...text.trim()].length
 
-type CheckedArgs = {
-  model: string
-  prompt: string
-  resolution?: string | null
-  aspect_ratio?: string | null
-  quality?: string | null
-  background?: string | null
-  seed?: number | null
-  images?: string[]
-}
+// The arguments both tools share, as commonShape validates them, and the edit tool's references.
+type CheckedArgs = z.output<z.ZodObject<ReturnType<typeof commonShape>>> & { images?: string[] }
 
 // Everything the model-independent schema cannot say: which controls and values the chosen model takes, the prompt
 // length and the reference count. It runs on every call, before anything is paid for.
@@ -433,7 +444,7 @@ function commonShape(operation: Operation) {
         `Required exact model ID. Nothing is chosen for you and a failure is never retried with another model. Call ${MODELS_TOOL} for each model's purpose, controls and limits.`,
       ),
     prompt: z.string().min(1).describe(PROMPT_DESCRIPTION[operation]),
-    out: outField(RASTER_FORMATS),
+    out: outField(NANO_OUTPUT_FORMATS),
     resolution: optionalControl(
       "Optional output resolution tier, a value from the chosen model's list in " +
         `${MODELS_TOOL}. Omit it to let NanoGPT use the model's default.`,
@@ -442,10 +453,10 @@ function commonShape(operation: Operation) {
       `Optional aspect ratio such as 16:9, only for models that list it in ${MODELS_TOOL}. Omit it to let NanoGPT use the model's default.`,
     ),
     quality: optionalControl(
-      `Optional quality tier, only for models that list it in ${MODELS_TOOL} (GPT Image 2.5 Flare). Omit it to use the provider default.`,
+      `Optional quality tier, only for models that list it in ${MODELS_TOOL} (${modelsWith("quality")}). Omit it to use the provider default.`,
     ),
     background: optionalControl(
-      `Optional background (auto, opaque or transparent), only for models that list it in ${MODELS_TOOL} (GPT Image 2.5 Flare). Use transparent for a cut-out instead of asking in the prompt; the returned alpha can be soft and the tool does not check it.`,
+      `Optional background (${valuesOf("background")}), only for models that list it in ${MODELS_TOOL} (${modelsWith("background")}). Use transparent for a cut-out instead of asking in the prompt; the returned alpha can be soft and the tool does not check it.`,
     ),
     seed: z
       .number()
@@ -523,7 +534,7 @@ function describeDetail(model: NanoModel, includeSchema = true): string {
     "Omitted controls are not sent, so NanoGPT applies its own defaults.",
     model.requestsPng
       ? "The request asks for PNG output."
-      : "The request does not set an output format; native PNG, JPEG or WebP responses are saved.",
+      : `The request does not set an output format; native ${SAVED_FORMATS} responses are saved.`,
     ...(model.maxPromptCodePoints ? [`Prompt: at most ${model.maxPromptCodePoints} characters.`] : []),
     ...(model.operation === "edit"
       ? [
@@ -631,28 +642,33 @@ function modelMenu(operation: Operation): string {
     .join("; ")
 }
 
-const ALPHA_GUIDANCE =
-  "For a cut-out, among the supported families only GPT Image 2.5 Flare supports the background control; for other families request transparency in the prompt without that control. Inspect actual alpha and content: a filename, RGBA channel or painted checkerboard does not prove transparency."
+const ALPHA_GUIDANCE = `For a cut-out, among the supported families the background control exists only for ${modelsWith("background")}; for other families request transparency in the prompt without that control. Inspect actual alpha and content: a filename, RGBA channel or painted checkerboard does not prove transparency.`
+
+// The sentences both tools share about controls and the saved result.
+const CONTROLS = `Optional controls (${CONTROL_NAMES.join(", ")}) each exist only for some models; ${MODELS_TOOL} lists them locally without a key, and an unsupported control or value is rejected before any request.`
+const ONE_IMAGE = `Exactly one image is requested; native ${SAVED_FORMATS} responses are saved.`
+const RESULT =
+  "Returns the actual saved absolute path, format and pixel dimensions. The extension is adjusted to match the bytes; use the returned out path for reads or subsequent edits."
 
 export function describeNanoImageTool(operation: Operation, requires: string): string {
   return operation === "generate"
     ? [
         `Generate one new raster image from a text prompt through NanoGPT. To change or combine existing images use ${IMAGEEDIT_TOOL} instead. ${SKILL_SENTENCE}`,
         requires,
-        `Required model, one of: ${modelMenu("generate")}. Optional controls (resolution, aspect_ratio, quality, background, seed) each exist only for some models; ${MODELS_TOOL} lists them locally without a key, and an unsupported control or value is rejected before any request. Omitted controls are not sent, so NanoGPT's defaults apply. Exactly one image is requested; native PNG, JPEG or WebP responses are saved.`,
+        `Required model, one of: ${modelMenu("generate")}. ${CONTROLS} Omitted controls are not sent, so NanoGPT's defaults apply. ${ONE_IMAGE}`,
         "Best for photos, illustrations, textures and concepts; build icons, logos, charts and anything that must scale or stay editable as SVG or code.",
         ALPHA_GUIDANCE,
         MODEL_CHOICE_GUIDANCE,
-        "Returns the actual saved absolute path, format and pixel dimensions. The extension is adjusted to match the bytes; use the returned out path for reads or subsequent edits. The requested size is not enforced, so check the dimensions when they matter. Existing target paths are versioned on a best-effort basis; concurrent writes are not protected.",
+        `${RESULT} The requested size is not enforced, so check the dimensions when they matter. ${VERSIONING}`,
       ].join(" ")
     : [
         `Edit or combine existing local images into one new raster image through NanoGPT, guided by a prompt. To create an image from text alone use ${IMAGEGEN_TOOL}. ${SKILL_SENTENCE}`,
         requires,
-        `Required images (local PNG, JPEG or WebP paths) and model, one of: ${modelMenu("edit")}. The count limit depends on the model. Optional controls (resolution, aspect_ratio, quality, background, seed) each exist only for some models; ${MODELS_TOOL} lists them locally without a key, and an unsupported control or value is rejected before any request. Omitted controls are not sent. Exactly one image is requested; native PNG, JPEG or WebP responses are saved.`,
+        `Required images (local PNG, JPEG or WebP paths) and model, one of: ${modelMenu("edit")}. The count limit depends on the model. ${CONTROLS} Omitted controls are not sent. ${ONE_IMAGE}`,
         "The result is a newly generated image, so areas the prompt does not mention can change; use an image editor when pixels must stay identical. Name each reference's role in the prompt and what to keep.",
         ALPHA_GUIDANCE,
         MODEL_CHOICE_GUIDANCE,
-        "Returns the actual saved absolute path, format and pixel dimensions. The extension is adjusted to match the bytes; use the returned out path for reads or subsequent edits. Existing target paths are versioned on a best-effort basis; concurrent writes are not protected.",
+        `${RESULT} ${VERSIONING}`,
       ].join(" ")
 }
 

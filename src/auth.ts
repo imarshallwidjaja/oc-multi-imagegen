@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import { xdgData } from "xdg-basedir"
-import { type CredentialSpec, emptyEnvironmentError, environmentOverride, type ImageCredential } from "./types"
+import { type CredentialSpec, emptyEnvironmentError, environmentOverride, type ImageCredential } from "./credential"
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)

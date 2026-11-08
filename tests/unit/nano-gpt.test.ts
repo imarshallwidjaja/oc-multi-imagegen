@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import type { ImageCredential } from "../../src/credential"
 import plugin from "../../src/index"
 import { readReferenceImages } from "../../src/input-image"
 import { nanoGptBackend } from "../../src/nano-gpt"
@@ -15,7 +16,7 @@ import {
   type NanoModel,
   referenceRules,
 } from "../../src/nano-gpt-models"
-import type { ImageCredential, ImageTool, ImageToolHost } from "../../src/types"
+import type { ImageTool, ImageToolHost } from "../../src/types"
 import { isolateEnvironment, JPEG_BUFFER, PNG_BASE64, PNG_BUFFER, WEBP_BUFFER } from "./fixtures"
 import { loadV2Tool, STORED_CREDENTIALS, selectBackendVariable, v1Harness, v1ToolContext, v2Harness } from "./hosts"
 
