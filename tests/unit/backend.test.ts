@@ -21,23 +21,8 @@ describe("selectBackend", () => {
     expect(selectBackend(undefined).id).toBe("nano-gpt")
   })
 
-  test("gives each backend its own credential, so a credential for one is never read for the other", () => {
-    expect(selectBackend(undefined).credential).toMatchObject({ type: "oauth", provider: "openai" })
-    process.env.OC_MULTI_IMAGEGEN_BACKEND = "openai-api"
-    expect(selectBackend(undefined).credential).toMatchObject({
-      type: "key",
-      provider: "openai-images",
-      environmentVariable: "OC_MULTI_IMAGEGEN_OPENAI_API_KEY",
-    })
-    process.env.OC_MULTI_IMAGEGEN_BACKEND = "nano-gpt"
-    expect(selectBackend(undefined).credential).toMatchObject({
-      type: "key",
-      provider: "nano-gpt-images",
-      environmentVariable: "OC_MULTI_IMAGEGEN_NANOGPT_API_KEY",
-    })
-  })
-
-  test("registers the tools each backend declares, and only those", () => {
+  // The host tests check that each host registers exactly these tools by name.
+  test("declares the tools of each backend", () => {
     const names = (backend: string) => {
       process.env.OC_MULTI_IMAGEGEN_BACKEND = backend
       return selectBackend(undefined).tools.map((tool) => tool.name)
@@ -120,7 +105,8 @@ const hosts: Array<[string, (options?: Record<string, unknown>) => Promise<{ des
   ],
   ["OpenCode 2", async (options) => ({ description: (await loadV2Tool({ pluginOptions: options })).tool.description })],
 ]
-const codexDescription = () => selectBackend(undefined).tools[0].description
+const codexDescription = () =>
+  selectBackend(undefined).tools.find((tool) => tool.name === "imagegen")?.description ?? ""
 
 describe.each(hosts)("%s backend selection", (_host, load) => {
   test("loads Codex without a variable, whether or not the host passes empty options", async () => {

@@ -284,23 +284,11 @@ describe.each(matrix)("%s with the %s backend calling %s", (_host, _backend, _to
 
     // The reference image does not exist: reading it first would fail with a different error. A tool that takes no
     // references has none to read.
-    const act = harness.execute(
-      operation.tool === flavour.operations[1].tool ? { ...args, images: ["missing.png"] } : args,
-    )
+    const act = harness.execute(operation.tool === "imageedit" ? { ...args, images: ["missing.png"] } : args)
 
     await expect(act).rejects.toThrow("denied by the host")
     expect(fetchMock).not.toHaveBeenCalled()
     expect(existsSync(path.join(dir, "cat.png"))).toBe(false)
-  })
-
-  test("forwards the cancellation signal to the provider request", async () => {
-    const fetchMock = stubFetch()
-    const harness = await createHarness(dir)
-    const controller = new AbortController()
-
-    await harness.execute(args, controller.signal)
-
-    expect(fetchMock.mock.calls[0][1].signal).toBe(controller.signal)
   })
 
   test("does nothing when the call is cancelled before it starts", async () => {
@@ -331,6 +319,8 @@ describe.each(matrix)("%s with the %s backend calling %s", (_host, _backend, _to
 
     await expect(act).rejects.toThrow("stopped during request")
     expect(fetchMock).toHaveBeenCalledTimes(1)
+    // The cancellation reaches the request itself, so the transport stops too.
+    expect(fetchMock.mock.calls[0][1].signal?.aborted).toBe(true)
     expect(await listed()).toEqual([])
   })
 
@@ -739,7 +729,7 @@ describe.each(hosts)("the OpenAI model lookup through %s", (_host, create) => {
     await expect(harness.execute({}, controller.signal)).rejects.toThrow("stopped during request")
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect(fetchMock.mock.calls[0][1].signal).toBe(controller.signal)
+    expect(fetchMock.mock.calls[0][1].signal?.aborted).toBe(true)
   })
 
   test("does not answer when the list arrived after cancellation", async () => {

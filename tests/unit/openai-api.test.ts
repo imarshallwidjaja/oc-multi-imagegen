@@ -36,13 +36,13 @@ function callEdit(args: EditArgs, dataUrls: string[]) {
 }
 
 // Runs imagegen through the shared flow, which checks the credential, with a host that allows everything.
-function runImagegen(credential: ImageCredential) {
+function runImagegen(credential: ImageCredential, args = generateArgs(), directory = "/nonexistent") {
   const tool = openaiApiBackend.tools.find((candidate) => candidate.name === "imagegen")
   if (tool?.kind !== "image") throw new Error("imagegen is not an image tool")
-  return tool.run(generateArgs(), {
+  return tool.run(args, {
     signal,
     authorize: async () => {},
-    resolveDirectory: async () => "/nonexistent",
+    resolveDirectory: async () => directory,
     resolveCredential: async () => credential,
   })
 }
@@ -286,7 +286,6 @@ describe("OpenAI Images API backend arguments", () => {
     expect(edit.properties.output_format.anyOf?.[0].enum).toEqual(["png", "jpeg", "webp"])
     expect(edit.properties.out.description).toContain("PNG, JPEG or WebP bytes")
     expect(openaiApiImageedit.description).toContain("GIF and SVG come only from imagegen")
-    expect(openaiApiImageedit.outputFormats).toEqual(["png", "jpeg", "webp"])
   })
 
   test("accepts every documented output format and the GIF limits at both ends", () => {
@@ -317,9 +316,16 @@ describe("OpenAI Images API backend arguments", () => {
     expect(schema.properties.background.description).toContain("transparent needs output_format png or webp")
   })
 
-  test("adds no note to the result text", () => {
-    expect(openaiApiImagegen).not.toHaveProperty("resultNote")
-    expect(openaiApiImageedit).not.toHaveProperty("resultNote")
+  test("reports only the saved image in the result text, even with an explicit model and quality", async () => {
+    stubImage()
+    const dir = await mkdtemp(path.join(os.tmpdir(), "api-result-"))
+    try {
+      const saved = await runImagegen(key, generateArgs({ model: "gpt-image-3-preview", quality: "high" }), dir)
+
+      expect(saved.message).toBe(`Generated image saved to ${path.join(dir, "cat.png")}. The image is PNG, 1x1 pixels.`)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })
 

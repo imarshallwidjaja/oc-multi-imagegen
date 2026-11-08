@@ -101,7 +101,6 @@ function describeModel(model: ListedModel, defaultModel: string): string {
   return `- ${model.id}${model.id === defaultModel ? " (default)" : ""}${facts.length > 0 ? `: ${facts.join(", ")}` : ""}`
 }
 
-// Newest first, then by ID.
 function listLines(models: readonly ListedModel[], defaultModel: string): string[] {
   const sorted = [...models].sort((a, b) => (b.created ?? 0) - (a.created ?? 0) || a.id.localeCompare(b.id))
   const lines = sorted.slice(0, MAX_LISTED).map((model) => describeModel(model, defaultModel))

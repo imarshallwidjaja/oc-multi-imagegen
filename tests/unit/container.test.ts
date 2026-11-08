@@ -17,8 +17,8 @@ import os from "node:os"
 import path from "node:path"
 
 // The container runbook's scripts, run as subprocesses against synthetic credentials, a fake `docker` and, for the
-// in-container skill probe, a fake `opencode` and `wget`. Nothing here needs Docker, OpenCode, a real credential or
-// the network.
+// in-container probes, a fake `opencode` and `wget`. Nothing here needs Docker, OpenCode, a real credential or the
+// network.
 
 const repoRoot = path.resolve(import.meta.dir, "../..")
 const helper = path.join(repoRoot, "scripts/opencode-container.sh")
@@ -41,8 +41,22 @@ function temporaryDirectory() {
   return directory
 }
 
+// Every subprocess here starts through spawn, which gives it this environment and nothing else of the shell that
+// launched the tests: PATH to find Bash, Bun and the coreutils, a synthetic HOME, and what the test passes. A
+// launching shell's credentials, its OC_IMAGE_KEY_ENV_FILE, OC_SANDBOX or OC_TIMEOUT, OpenCode and plugin settings,
+// XDG directories and the fakes' FAKE_* and PROBE_* switches therefore cannot change what a script does.
+const LAUNCH_PATH = process.env.PATH ?? "/usr/bin:/bin"
+function spawn(command: string[], env: Record<string, string>) {
+  return Bun.spawn(command, {
+    env: { PATH: LAUNCH_PATH, HOME: env.HOME ?? temporaryDirectory(), ...env },
+    stdout: "pipe",
+    stderr: "pipe",
+    stdin: "ignore",
+  })
+}
+
 async function exec(command: string[], env: Record<string, string>) {
-  const proc = Bun.spawn(command, { env: { ...process.env, ...env }, stdout: "pipe", stderr: "pipe", stdin: "ignore" })
+  const proc = spawn(command, env)
   const [stdout, stderr, code] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
@@ -435,7 +449,8 @@ function container() {
   const log = path.join(root, "docker.log")
   const { dataHome } = hostDataHome(root)
   const env = {
-    PATH: `${bin}:${path.dirname(process.execPath)}:${process.env.PATH}`,
+    PATH: `${bin}:${path.dirname(process.execPath)}:${LAUNCH_PATH}`,
+    HOME: root,
     FAKE_DOCKER_LOG: log,
     XDG_DATA_HOME: dataHome,
     TMPDIR: root,
@@ -444,14 +459,10 @@ function container() {
     exec(["bash", helper, ...args], { ...env, ...extra })
   return {
     root,
+    bin,
     run,
     start: (args: string[], extra: Record<string, string> = {}) =>
-      Bun.spawn(["bash", helper, ...args], {
-        env: { ...process.env, ...env, ...extra },
-        stdout: "pipe",
-        stderr: "pipe",
-        stdin: "ignore",
-      }),
+      spawn(["bash", helper, ...args], { ...env, ...extra }),
     calls: () => (existsSync(log) ? readFileSync(log, "utf-8").split("\n").filter(Boolean) : []),
     async sandbox() {
       const result = await run(["init"])
@@ -471,6 +482,15 @@ function container() {
 async function until(condition: () => boolean) {
   for (let i = 0; i < 100 && !condition(); i++) await Bun.sleep(50)
   expect(condition()).toBe(true)
+}
+
+function isRunning(pid: number) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
 }
 
 describe("opencode-container.sh sandbox", () => {
@@ -545,6 +565,37 @@ describe("opencode-container.sh sandbox", () => {
     expect(c.calls()).toEqual([])
   })
 
+  test("pack builds and packs a copy of the checkout in the sandbox, records its identity and leaves dist/ alone", async () => {
+    const c = container()
+    // npm install would fetch the runtime dependencies; the fake records it and passes every other command on.
+    writeFileSync(
+      path.join(c.bin, "npm"),
+      `#!/bin/sh\n[ "$1" != install ] || { echo "npm $*" >>"$FAKE_DOCKER_LOG"; exit 0; }\nexec ${Bun.which("npm")} "$@"\n`,
+      { mode: 0o755 },
+    )
+    const sandbox = await c.sandbox()
+    const checkoutBuild = () => statSync(path.join(repoRoot, "dist"), { throwIfNoEntry: false })?.mtimeMs ?? "absent"
+    const buildBefore = checkoutBuild()
+
+    const result = await c.run(["pack"], { OC_SANDBOX: sandbox })
+
+    expect(result.code).toBe(0)
+    const [tarball] = readdirSync(path.join(sandbox, "pack")).filter((name) => name.endsWith(".tgz"))
+    const staged = path.join(sandbox, "pack/source/dist/index.js")
+    const sha256 = (file: string) => new Bun.CryptoHasher("sha256").update(readFileSync(file)).digest("hex")
+    // The extracted package holds the staged build, and the identity names both files by hash.
+    expect(sha256(path.join(sandbox, "pkg/package/dist/index.js"))).toBe(sha256(staged))
+    const identity = readFileSync(path.join(sandbox, "identity.txt"), "utf-8").split("\n")
+    expect(identity[0]).toMatch(/^commit: [0-9a-f]{40}$/)
+    expect(identity[1]).toMatch(/^uncommitted paths: \d+$/)
+    expect(identity.slice(2, 4)).toEqual([
+      `${sha256(staged)}  ${staged}`,
+      `${sha256(path.join(sandbox, "pack", tarball))}  ${path.join(sandbox, "pack", tarball)}`,
+    ])
+    expect(c.calls()).toEqual(["npm install --omit=dev --ignore-scripts --no-audit --no-fund"])
+    expect(checkoutBuild()).toBe(buildBefore)
+  }, 60_000)
+
   test("pack refuses a sandbox that already holds a package", async () => {
     const c = container()
     const sandbox = await c.sandbox()
@@ -587,6 +638,60 @@ describe("opencode-container.sh sandbox", () => {
     expect(existsSync(path.join(sandbox, "seed"))).toBe(false)
     expect(readFileSync(path.join(sandbox, "v1/work/character.png"), "utf-8")).toBe("image")
     expect(readFileSync(path.join(sandbox, "logs/v1-case-A.out"), "utf-8")).toBe("log")
+  })
+})
+
+describe("test subprocesses", () => {
+  // Settings a launching shell may hold, each of which would change a run if it leaked: an image key file and its
+  // key, another sandbox, an unusable timeout, plugin and OpenCode settings, and the fake docker's failure switches.
+  test("no launch path passes the launching shell's environment to a script", async () => {
+    const c = container()
+    const sandbox = await c.ready("v1", "v2")
+    const probe = backendProbeRunner()
+    const elsewhere = temporaryDirectory()
+    const keyFile = path.join(elsewhere, "image.env")
+    writeFileSync(keyFile, "OPENAI_API_KEY=sk-LAUNCH-SHELL-SENTINEL\n", { mode: 0o600 })
+    const launching: Record<string, string> = {
+      OC_IMAGE_KEY_ENV_FILE: keyFile,
+      OC_SANDBOX: elsewhere,
+      OC_TIMEOUT: "not-a-number",
+      OC_MULTI_IMAGEGEN_BACKEND: "launch-shell-backend",
+      OC_MULTI_IMAGEGEN_OPENAI_API_KEY: "sk-LAUNCH-SHELL-SENTINEL",
+      OPENCODE_AUTH_CONTENT: "{}",
+      XDG_CONFIG_HOME: elsewhere,
+      FAKE_DOCKER_MODE: "fail",
+      FAKE_DOCKER_DAEMON_DOWN: "1",
+      FAKE_VERSION_EXIT: "3",
+      FAKE_TOOL_IDS: "down",
+      PROBE_TMP: elsewhere,
+    }
+    const saved = Object.keys(launching).map((name) => [name, process.env[name]] as const)
+    Object.assign(process.env, launching)
+    try {
+      const listed = await exec(["env"], {})
+      // The helper through exec and through spawn directly, and a probe started directly.
+      const seeded = await c.run(["seed", "v1"], { OC_SANDBOX: sandbox })
+      const startedCode = await c.start(["seed", "v2"], { OC_SANDBOX: sandbox }).exited
+      const probed = probe.start(["v1", "tools"])
+      const [probedOutput, probedCode] = await Promise.all([new Response(probed.stdout).text(), probed.exited])
+
+      expect(Object.keys(launching).filter((name) => listed.stdout.includes(`${name}=`))).toEqual([])
+      expect(seeded.code).toBe(0)
+      expect(startedCode).toBe(0)
+      expect({ probedCode, probedOutput }).toEqual({
+        probedCode: 0,
+        probedOutput: '0.0.0-fake\n["invalid","bash","imagegen","imageedit"]\n',
+      })
+      expect(existsSync(path.join(sandbox, "v1/image-key.env"))).toBe(false)
+      expect(existsSync(path.join(sandbox, "v2/image-key.env"))).toBe(false)
+      expect(c.calls().join("\n")).not.toMatch(/SENTINEL|launch-shell-backend/)
+      expect(readdirSync(elsewhere)).toEqual(["image.env"])
+    } finally {
+      for (const [name, value] of saved) {
+        if (value === undefined) delete process.env[name]
+        else process.env[name] = value
+      }
+    }
   })
 })
 
@@ -716,6 +821,28 @@ describe("opencode-container.sh container lifecycle", () => {
     expect(c.calls().filter((line) => line.startsWith("run "))).toHaveLength(1)
     expect(c.calls().filter((line) => line.startsWith("stop "))).toEqual([`stop id-${name}`])
   }, 30_000)
+
+  // container_run itself refuses, so a caller that goes on after a failed run still cannot start a second container.
+  test("after a container that cannot be confirmed gone, container_run starts no other container", async () => {
+    const c = container()
+    const script = `source "$1"
+for name in first second; do
+  cidfile=$2/$name.cid
+  ARGS=(run --name "$name" --cidfile "$cidfile")
+  container_run || echo "$name=$?"
+done`
+
+    const result = await exec(["bash", "-c", script, "bash", helper, c.root], {
+      PATH: `${c.bin}:${LAUNCH_PATH}`,
+      FAKE_DOCKER_LOG: path.join(c.root, "docker.log"),
+      FAKE_DOCKER_STUCK: "1",
+    })
+
+    expect(result.stdout).toBe("first=1\nsecond=1\n")
+    expect(c.calls().filter((line) => line.startsWith("run "))).toEqual([expect.stringMatching(/^run first /)])
+    expect(result.stderr).toContain("Could not confirm that container id-first is gone")
+    expect(result.stderr).toContain("Not starting another container: container id-first could not be confirmed gone.")
+  })
 
   test("a container name collision stops nothing", async () => {
     const c = container()
@@ -976,7 +1103,7 @@ describe("opencode-container.sh host configuration", () => {
       expect(readFileSync(path.join(sandbox, host, "backend"), "utf-8").trim()).toBe("openai-api")
     }
 
-    // The backend is never an option of the plugin entry, so the configuration holds no setting to migrate.
+    // The backend reaches the containers through the environment, so the plugin entries stay plain.
     expect(configOf(sandbox, "v1").plugin).toEqual(["file:///pluginpkg"])
     expect(configOf(sandbox, "v1-floor").plugin).toEqual(["file:///pluginpkg"])
     expect(configOf(sandbox, "v2").plugins).toEqual(["/pluginpkg"])
@@ -1107,12 +1234,32 @@ describe("opencode-container.sh host configuration", () => {
     expect(runs[1]).toEndWith(" /probe.sh v2 codex")
   })
 
-  test("skills and lifecycle fail when the probe in the container fails", async () => {
+  test("tools runs the tool-list probe on an OpenCode 1 host, and refuses OpenCode 2", async () => {
     const c = container()
-    const sandbox = await c.ready("v2")
+    const sandbox = await c.ready("v1", "v1-floor", "v2")
 
-    for (const mode of ["skills", "lifecycle"]) {
-      const result = await c.run([mode, "v2"], { OC_SANDBOX: sandbox, FAKE_DOCKER_MODE: "fail", FAKE_DOCKER_EXIT: "1" })
+    expect((await c.run(["tools", "v1"], { OC_SANDBOX: sandbox })).code).toBe(0)
+    expect((await c.run(["tools", "v1-floor"], { OC_SANDBOX: sandbox })).code).toBe(0)
+    expect((await c.run(["tools", "v2"], { OC_SANDBOX: sandbox })).code).toBe(2)
+
+    const runs = c.calls().filter((line) => line.startsWith("run "))
+    expect(runs).toHaveLength(2)
+    for (const run of runs) {
+      expect(run).toContain(`${backendProbe}:/probe.sh:ro`)
+      expect(run).toEndWith(" /probe.sh v1 tools")
+    }
+  })
+
+  test("skills, lifecycle and tools fail when the probe in the container fails", async () => {
+    const c = container()
+    const sandbox = await c.ready("v1", "v2")
+
+    for (const [mode, host] of [
+      ["skills", "v2"],
+      ["lifecycle", "v2"],
+      ["tools", "v1"],
+    ]) {
+      const result = await c.run([mode, host], { OC_SANDBOX: sandbox, FAKE_DOCKER_MODE: "fail", FAKE_DOCKER_EXIT: "1" })
       expect({ mode, code: result.code }).toEqual({ mode, code: 1 })
     }
   })
@@ -1121,13 +1268,45 @@ describe("opencode-container.sh host configuration", () => {
 // scripts/container-skill-probe.sh runs `opencode serve` and `wget` inside the OpenCode 2 container. Here both are
 // fakes: `opencode` only stays alive and logs, and `wget` answers /api/skill from the state the probe edits (the
 // package's SKILL.md and the config's plugin list) unless FAKE_SKILLS picks a failure.
+//
+// FAKE_ORDER fixes which side goes first. With client-first the server starts only after a request was refused, and
+// later requests wait for the server; with server-first the first request waits for the server. A wait gives up after
+// about three seconds, so a broken order fails instead of hanging.
+const FAKE_AWAIT = `await_file() {
+  i=0
+  until [ -s "$1" ]; do
+    i=$((i + 1))
+    [ "$i" -le 300 ] || { echo "fake: gave up waiting for $1" >&2; exit 1; }
+    /bin/sleep 0.01
+  done
+}`
+
 const FAKE_OPENCODE = `#!/bin/sh
+[ "$1" != --version ] || { echo "0.0.0-fake"; exit "\${FAKE_VERSION_EXIT:-0}"; }
+${FAKE_AWAIT}
+[ "\${FAKE_ORDER:-}" != client-first ] || await_file "$PROBE_TMP/refused"
 echo "fake opencode serve started"
 echo $$ >"$PROBE_TMP/server.pid"
 exec /bin/sleep 600
 `
 
+// A real server refuses connections until it listens and once it stops, so a probe that got a reply knows its server
+// had started. The fake `wget` keeps that order: it refuses unless the fake server has written its pid and still runs,
+// and records the refusal.
+const FAKE_CONNECT = `${FAKE_AWAIT}
+case \${FAKE_ORDER:-} in
+  server-first) await_file "$PROBE_TMP/server.pid" ;;
+  client-first) [ ! -s "$PROBE_TMP/refused" ] || await_file "$PROBE_TMP/server.pid" ;;
+esac
+pid=$(cat "$PROBE_TMP/server.pid" 2>/dev/null)
+[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || {
+  echo refused >>"$PROBE_TMP/refused"
+  echo "wget: can't connect to remote host (127.0.0.1): Connection refused" >&2
+  exit 1
+}`
+
 const FAKE_WGET = `#!/bin/sh
+${FAKE_CONNECT}
 for last; do :; done
 own() {
   printf '{"id":"oc-multi-imagegen","name":"oc-multi-imagegen","path":"/pluginpkg/skills/oc-multi-imagegen/SKILL.md","content":"%s"}' "$1"
@@ -1177,22 +1356,14 @@ function skillProbe() {
   const tmp = privateDirectory(root, "tmp")
   const configText = `{\n  "plugins": ["/pluginpkg"],\n  "update": "disable"\n}\n`
   writeFileSync(config, configText)
-  const env = { PATH: `${bin}:${process.env.PATH}`, PROBE_PKG: pkg, PROBE_CONFIG: config, PROBE_TMP: tmp }
+  const env = { PATH: `${bin}:${LAUNCH_PATH}`, PROBE_PKG: pkg, PROBE_CONFIG: config, PROBE_TMP: tmp }
   return {
     pkg,
     config,
     configText,
     run: (mode: string, extra: Record<string, string> = {}) => exec(["sh", probe, mode], { ...env, ...extra }),
     skillText: () => readFileSync(path.join(pkg, "skills/oc-multi-imagegen/SKILL.md"), "utf-8"),
-    serverStopped: () => {
-      const pid = Number(readFileSync(path.join(tmp, "server.pid"), "utf-8"))
-      try {
-        process.kill(pid, 0)
-        return false
-      } catch {
-        return true
-      }
-    },
+    serverStopped: () => !isRunning(Number(readFileSync(path.join(tmp, "server.pid"), "utf-8"))),
   }
 }
 
@@ -1328,12 +1499,35 @@ describe("container-skill-probe.sh", () => {
 // scripts/container-backend-probe.sh runs `opencode serve` and `wget` inside a container. Here `wget` answers from
 // what FAKE_REGISTERED and FAKE_PROVIDER_ENTRY say the host registered, with the openai-images methods in FAKE_METHODS.
 // Like OpenCode 2, it lists a connection for the plugin's variable when a registered env method names it and the
-// probe's own environment sets it.
+// probe's own environment sets it. FAKE_PLUGIN picks OpenCode 2's plugin list entry for /pluginpkg, in the shape the
+// pinned host returns: active, failed, a failed entry without an id (unidentified), or missing (setup has not
+// returned). FAKE_PLUGIN_UNLOADED leaves the plugin's skill out of OpenCode 2's skill list, and FAKE_TOOL_IDS picks
+// OpenCode 1's tool id reply: listed, empty (as before the location boots), html or down.
 const FAKE_BACKEND_WGET = `#!/bin/sh
+${FAKE_CONNECT}
 for last; do :; done
 registered() { [ -n "$FAKE_REGISTERED" ]; }
 case $last in
-  */api/location | */path) echo '{"directory":"/work"}' ;;
+  */api/plugin)
+    builtin='{"id":"opencode.tool.input.repair","source":{"type":"builtin"},"features":{"server":true},"state":{"status":"active"}}'
+    own='{"id":"oc-multi-imagegen","source":{"type":"local","path":"/pluginpkg/server.js"},"features":{"server":true}'
+    case \${FAKE_PLUGIN:-active} in
+      active) entries="$builtin,$own"',"state":{"status":"active"}}' ;;
+      failed) entries="$builtin,$own"',"state":{"status":"failed","error":"Error: OC_MULTI_IMAGEGEN_BACKEND is empty"}}' ;;
+      unidentified) entries="$builtin"',{"source":{"type":"local","path":"/pluginpkg/server.js"},"features":{},"state":{"status":"failed","error":"Cannot find module"}}' ;;
+      missing) entries="$builtin" ;;
+    esac
+    echo '{"location":{"directory":"/work"},"data":['"$entries"']}' ;;
+  */experimental/tool/ids*)
+    case \${FAKE_TOOL_IDS:-listed} in
+      listed) echo '["invalid","bash","imagegen","imageedit"]' ;;
+      empty) echo '[]' ;;
+      html) echo '<html>502 Bad Gateway for "imagegen"</html>' ;;
+      down) echo "wget: server returned error: HTTP/1.1 500 Internal Server Error" >&2; exit 1 ;;
+    esac ;;
+  */api/skill)
+    if [ -n "$FAKE_PLUGIN_UNLOADED" ]; then echo '{"location":{},"data":[{"id":"opencode","name":"OpenCode"}]}'
+    else echo '{"location":{},"data":[{"id":"opencode","name":"OpenCode"},{"id":"oc-multi-imagegen","name":"oc-multi-imagegen"}]}'; fi ;;
   */provider/auth*)
     if registered; then echo '{"openai":[{"type":"api","label":"Manually enter API Key"}],"openai-images":'"$FAKE_METHODS"'}'
     else echo '{"openai":[{"type":"api","label":"Manually enter API Key"}]}'; fi ;;
@@ -1359,26 +1553,36 @@ const REAL_METHODS = {
   v2: '[{"type":"key"},{"type":"env","names":["OC_MULTI_IMAGEGEN_OPENAI_API_KEY"]}]',
 }
 
-describe("container-backend-probe.sh", () => {
-  function backendProbeRunner() {
-    const root = temporaryDirectory()
-    const bin = path.join(root, "bin")
-    mkdirSync(bin)
-    writeFileSync(path.join(bin, "opencode"), FAKE_OPENCODE, { mode: 0o755 })
-    writeFileSync(path.join(bin, "wget"), FAKE_BACKEND_WGET, { mode: 0o755 })
-    writeFileSync(path.join(bin, "sleep"), "#!/bin/sh\nexec /bin/sleep 0.01\n", { mode: 0o755 })
-    const tmp = privateDirectory(root, "tmp")
-    const env = { PATH: `${bin}:${process.env.PATH}`, PROBE_TMP: tmp }
-    return (args: string[], extra: Record<string, string> = {}) =>
-      exec(["sh", backendProbe, ...args], {
-        FAKE_REGISTERED: "",
-        FAKE_PROVIDER_ENTRY: "",
-        FAKE_METHODS: REAL_METHODS[args[0] as "v1" | "v2"] ?? "[]",
-        ...env,
-        ...extra,
-      })
-  }
+function backendProbeRunner() {
+  const root = temporaryDirectory()
+  const bin = path.join(root, "bin")
+  mkdirSync(bin)
+  writeFileSync(path.join(bin, "opencode"), FAKE_OPENCODE, { mode: 0o755 })
+  writeFileSync(path.join(bin, "wget"), FAKE_BACKEND_WGET, { mode: 0o755 })
+  // Polls are fast unless a test sets FAKE_SLEEP higher.
+  writeFileSync(path.join(bin, "sleep"), '#!/bin/sh\nexec /bin/sleep "$FAKE_SLEEP"\n', { mode: 0o755 })
+  const tmp = privateDirectory(root, "tmp")
+  const environment = (args: string[], extra: Record<string, string>) => ({
+    FAKE_SLEEP: "0.01",
+    FAKE_REGISTERED: "",
+    FAKE_PROVIDER_ENTRY: "",
+    FAKE_METHODS: REAL_METHODS[args[0] as "v1" | "v2"] ?? "[]",
+    PATH: `${bin}:${LAUNCH_PATH}`,
+    PROBE_TMP: tmp,
+    ...extra,
+  })
+  const run = (args: string[], extra: Record<string, string> = {}) =>
+    exec(["sh", backendProbe, ...args], environment(args, extra))
+  return Object.assign(run, {
+    start: (args: string[], extra: Record<string, string> = {}) =>
+      spawn(["sh", backendProbe, ...args], environment(args, extra)),
+    serverPid: path.join(tmp, "server.pid"),
+    refused: path.join(tmp, "refused"),
+    serverStopped: () => !isRunning(Number(readFileSync(path.join(tmp, "server.pid"), "utf-8"))),
+  })
+}
 
+describe("container-backend-probe.sh", () => {
   test("OpenCode 1 with openai-api shows the key sign-in and the tool, and no provider entry", async () => {
     const result = await backendProbeRunner()(["v1", "openai-api"], { FAKE_REGISTERED: "1" })
 
@@ -1394,6 +1598,7 @@ describe("container-backend-probe.sh", () => {
     const result = await backendProbeRunner()(["v2", "openai-api"], { FAKE_REGISTERED: "1" })
 
     expect(result.code).toBe(0)
+    expect(result.stdout).toStartWith("plugin: active\n")
     expect(result.stdout).toContain(
       'integration: {"id":"openai-images","name":"OpenAI Images API","methods":[{"type":"key"},{"type":"env","names":["OC_MULTI_IMAGEGEN_OPENAI_API_KEY"]}]',
     )
@@ -1495,18 +1700,101 @@ describe("container-backend-probe.sh", () => {
     expect(result.stderr).toContain("edit tool is missing")
   })
 
-  test("the OpenCode 1 tool check fails on a reply that has no imagegen entry", async () => {
-    const result = await backendProbeRunner()(["v1", "openai-api"], {
-      FAKE_REGISTERED: "1",
-      FAKE_TOOLS: '{"error":"x"}',
-    })
+  // A plugin that never loads registers nothing, which a codex check would otherwise read as the expected absence.
+  // On OpenCode 2 a skill with the plugin's id is not enough: the host must list the plugin itself as active.
+  test.each([
+    ["v1", "codex", { FAKE_TOOLS: '{"error":"x"}' }, "the plugin's imagegen tool", ""],
+    ["v1", "openai-api", { FAKE_REGISTERED: "1", FAKE_TOOLS: '{"error":"x"}' }, "the plugin's imagegen tool", ""],
+    ["v2", "codex", { FAKE_PLUGIN: "missing" }, "the plugin's status", ""],
+    ["v2", "openai-api", { FAKE_REGISTERED: "1", FAKE_PLUGIN: "missing" }, "the plugin's status", ""],
+    ["v2", "codex", { FAKE_PLUGIN_UNLOADED: "1" }, "the plugin's skill", "plugin: active\n"],
+  ])("fails for %s with %s when the plugin never shows it loaded (%j)", async (host, backend, extra, awaited, out) => {
+    const probe = backendProbeRunner()
+
+    const result = await probe([host, backend], extra)
 
     expect(result.code).toBe(1)
-    expect(result.stderr).toContain("tool is missing")
+    expect(result.stdout).toBe(out)
+    expect(result.stderr).toContain(`Probe failed: timed out waiting for ${awaited}`)
+    expect(result.stderr).toContain("Last poll: the reply did not show it")
+    expect(result.stderr).toContain("Server log (last 30 lines):")
+    await until(probe.serverStopped)
   })
+
+  // A failed setup is final for that plugin revision, so the probe reports the host's error instead of polling on.
+  test.each([
+    ["with its id", "failed", "OC_MULTI_IMAGEGEN_BACKEND is empty"],
+    ["without an id, after an active entry", "unidentified", "Cannot find module"],
+  ])("fails at once on v2 when the host lists the plugin as failed %s", async (_name, plugin, error) => {
+    const probe = backendProbeRunner()
+
+    const result = await probe(["v2", "codex"], { FAKE_PLUGIN: plugin })
+
+    expect(result.code).toBe(1)
+    expect(result.stdout).toBe("")
+    expect(result.stderr).toContain("Probe failed: the plugin did not load:")
+    expect(result.stderr).toContain(error)
+    expect(result.stderr).not.toContain("timed out")
+    await until(probe.serverStopped)
+  })
+
+  test.each([
+    ["after a refused connection, when the probe asks before its server is up", "client-first", true],
+    ["when its server is up before the first request", "server-first", false],
+  ])("tools prints the version and the tool id list, then stops its server, %s", async (_name, order, refused) => {
+    const probe = backendProbeRunner()
+
+    const result = await probe(["v1", "tools"], { FAKE_ORDER: order })
+
+    expect(result.code).toBe(0)
+    expect(result.stdout).toBe('0.0.0-fake\n["invalid","bash","imagegen","imageedit"]\n')
+    expect(existsSync(probe.refused)).toBe(refused)
+    await until(probe.serverStopped)
+  })
+
+  // The listing is the whole result, so a failed request or a reply that is not a tool id list fails the command
+  // instead of printing nothing or an error page.
+  test.each([
+    ["a request that keeps failing", "down", "Last poll: request failed: wget: server returned error"],
+    ["an empty list, as before the location boots", "empty", "Last poll: the reply did not show it: []"],
+    ["an error page", "html", "Last poll: the reply did not show it: <html>"],
+  ])("tools fails on %s, with the server log", async (_name, ids, seen) => {
+    const probe = backendProbeRunner()
+
+    const result = await probe(["v1", "tools"], { FAKE_TOOL_IDS: ids })
+
+    expect(result.code).toBe(1)
+    expect(result.stdout).toBe("0.0.0-fake\n")
+    expect(result.stderr).toContain("Probe failed: timed out waiting for a tool id list")
+    expect(result.stderr).toContain(seen)
+    expect(result.stderr).toContain("fake opencode serve started")
+    await until(probe.serverStopped)
+  })
+
+  test("tools fails before it starts a server when opencode cannot report its version", async () => {
+    const probe = backendProbeRunner()
+
+    const result = await probe(["v1", "tools"], { FAKE_VERSION_EXIT: "3" })
+
+    expect(result.code).toBe(1)
+    expect(result.stderr).toContain("opencode --version exited 3")
+    expect(existsSync(probe.serverPid)).toBe(false)
+  })
+
+  test("a signal while the probe waits stops its server", async () => {
+    const probe = backendProbeRunner()
+    const proc = probe.start(["v1", "tools"], { FAKE_TOOL_IDS: "empty", FAKE_SLEEP: "1" })
+
+    await until(() => existsSync(probe.serverPid))
+    proc.kill("SIGTERM")
+
+    expect(await proc.exited).toBe(143)
+    await until(probe.serverStopped)
+  }, 15_000)
 
   test("an unknown host or backend is a usage error", async () => {
     expect((await backendProbeRunner()(["v3", "codex"])).code).toBe(2)
     expect((await backendProbeRunner()(["v1", "dall-e"])).code).toBe(2)
+    expect((await backendProbeRunner()(["v2", "tools"])).code).toBe(2)
   })
 })

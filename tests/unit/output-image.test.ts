@@ -91,7 +91,6 @@ describe("saveGeneratedImage", () => {
     await probe.close()
     return Object.getPrototypeOf(probe) as FileHandle
   }
-  // Writes the first 8 bytes, runs `afterPartialWrite`, then rejects with `failure`.
   const failWrite = async (failure: Error, afterPartialWrite = async () => {}) =>
     spyOn(await handlePrototype(), "writeFile").mockImplementationOnce(async function (this: FileHandle, data) {
       await this.write((data as Uint8Array).subarray(0, 8))
@@ -118,7 +117,6 @@ describe("saveGeneratedImage", () => {
     const failure = new Error("close failed")
     const prototype = await handlePrototype()
     const close = prototype.close
-    // The handle is really closed, then the close reports a failure.
     const failing = spyOn(prototype, "close").mockImplementationOnce(async function (this: FileHandle) {
       await close.call(this)
       throw failure

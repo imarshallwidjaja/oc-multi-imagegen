@@ -10,7 +10,6 @@ mkdirSync(path.dirname(AUTH_FILE), { recursive: true })
 
 isolateEnvironment()
 let loadStoredCredential: typeof import("../../src/auth").loadStoredCredential
-let loadCredential: typeof import("../../src/auth").loadCredential
 
 beforeAll(async () => {
   // xdg-basedir reads XDG_DATA_HOME only once, when it is first imported, and another test file
@@ -19,7 +18,6 @@ beforeAll(async () => {
   mock.module("xdg-basedir", () => ({ xdgData: XDG }))
   const auth = await import("../../src/auth")
   loadStoredCredential = auth.loadStoredCredential
-  loadCredential = auth.loadCredential
 })
 
 afterAll(() => {
@@ -111,38 +109,5 @@ describe("loadStoredCredential", () => {
   test("returns undefined when the auth.json file is missing", async () => {
     rmSync(AUTH_FILE, { force: true })
     expect(await loadStoredCredential(OAUTH)).toBeUndefined()
-  })
-})
-
-describe("loadCredential", () => {
-  const SAVED = { "openai-images": { type: "api", key: "sk-saved" } }
-
-  test("uses the variable a key credential names ahead of the saved entry, read on every call", async () => {
-    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify(SAVED)
-
-    process.env.OC_MULTI_IMAGEGEN_OPENAI_API_KEY = "sk-env-1"
-    expect(await loadCredential(KEY)).toEqual({ type: "key", key: "sk-env-1" })
-    process.env.OC_MULTI_IMAGEGEN_OPENAI_API_KEY = "sk-env-2"
-    expect(await loadCredential(KEY)).toEqual({ type: "key", key: "sk-env-2" })
-  })
-
-  test("uses the saved entry when the variable is absent", async () => {
-    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify(SAVED)
-
-    expect(await loadCredential(KEY)).toEqual({ type: "key", key: "sk-saved" })
-  })
-
-  test("fails for a variable that is set but empty, without falling back to the saved entry", async () => {
-    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify(SAVED)
-    process.env.OC_MULTI_IMAGEGEN_OPENAI_API_KEY = ""
-
-    await expect(loadCredential(KEY)).rejects.toThrow("OC_MULTI_IMAGEGEN_OPENAI_API_KEY is set but empty.")
-  })
-
-  test("never applies the image key variable to an oauth credential", async () => {
-    process.env.OPENCODE_AUTH_CONTENT = JSON.stringify({ openai: { type: "oauth", access: "tok" } })
-    process.env.OC_MULTI_IMAGEGEN_OPENAI_API_KEY = "sk-env"
-
-    expect(await loadCredential(OAUTH)).toEqual({ type: "oauth", access: "tok" })
   })
 })

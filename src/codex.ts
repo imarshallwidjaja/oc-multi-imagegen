@@ -18,7 +18,6 @@ import {
   IMAGEGEN_TOOL,
   strictArgs,
 } from "./schema"
-import { appendSizeToPrompt, IMAGE_SIZES, type ImageSize, SIZE_CHOICES } from "./size"
 import type { Backend } from "./types"
 
 // Codex OAuth images endpoint URLs: generations for imagegen, edits for imageedit.
@@ -32,6 +31,31 @@ const CODEX_IMAGES_EDITS_ENDPOINT = "https://chatgpt.com/backend-api/codex/image
 // arguments replace the first two when given.
 // https://github.com/openai/codex/blob/a4ebc509f4cdff88a8e58e175541970a30a2d385/codex-rs/ext/image-generation/src/tool.rs#L414-L440
 const CODEX_REQUEST_DEFAULTS = { model: "gpt-image-2", quality: "auto", size: "auto" }
+
+// Accepted Codex size presets and their aspect ratios. The Codex backend takes the size only through the prompt
+// sentence below, so returned dimensions are not enforced; recorded runs have returned an edge 1px off.
+const IMAGE_SIZES = {
+  "1254x1254": "1:1",
+  "1536x1024": "3:2",
+  "1024x1536": "2:3",
+  "1448x1086": "4:3",
+  "1086x1448": "3:4",
+  "1672x941": "16:9",
+  "941x1672": "9:16",
+} as const
+
+type ImageSize = keyof typeof IMAGE_SIZES
+
+const SIZE_CHOICES = Object.entries(IMAGE_SIZES)
+  .map(([size, aspectRatio]) => `${size} (${aspectRatio})`)
+  .join(", ")
+
+function appendSizeToPrompt(prompt: string, size: string): string {
+  const aspectRatio = (IMAGE_SIZES as Record<string, string>)[size]
+  if (!aspectRatio) throw new Error(`"${size}" is not a Codex size preset.`)
+  const [width, height] = size.split("x")
+  return `${prompt} Generate the image with a width of ${width} pixels and a height of ${height} pixels (${aspectRatio} aspect ratio).`
+}
 
 // Same limit as Codex (MAX_EDIT_IMAGES).
 // https://github.com/openai/codex/blob/a4ebc509f4cdff88a8e58e175541970a30a2d385/codex-rs/ext/image-generation/src/tool.rs#L59

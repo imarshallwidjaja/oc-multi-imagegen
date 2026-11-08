@@ -112,6 +112,24 @@ const liveCases = [
   },
 ]
 
+// The preflight spends nothing and reads no credential. It answers the first generation with a synthetic image, so
+// the request, response and output collectors all run, then fails the first edit's transport once its request and
+// ordered references are recorded, so the run stops the way a live failure stops it. No request leaves the process.
+const preflightCases = liveCases.slice(0, 2)
+
+// The boundaries a case passes, in order. A case records the last one it completed, so a failure is reported as
+// "failed after <boundary>" and never names a step the runner did not observe.
+type Boundary =
+  | "started"
+  | "permission-granted"
+  | "credential-resolved"
+  | "request-recorded"
+  | "response-recorded"
+  | "output-saved"
+// Why a case failed, as far as the runner itself observed: provider and runtime error text can carry signed URLs or
+// payloads, so it is never recorded.
+type Failure = "missing-credential" | "controlled-transport-failure" | "unexpected-request" | "error"
+
 async function runLive(directory: string, preflight: boolean) {
   // An existing report is never overwritten: each invocation has its own evidence directory.
   await mkdir(directory, { recursive: false })
@@ -144,59 +162,68 @@ async function runLive(directory: string, preflight: boolean) {
   const persist = () => writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`)
   await persist()
   const realFetch = globalThis.fetch
-  let active: Record<string, unknown> = {}
+  let active: Record<string, unknown> & { lastCompleted?: Boundary; failure?: Failure } = {}
+  const reached = async (boundary: Boundary) => {
+    active.lastCompleted = boundary
+    await persist()
+  }
   globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-    if (init?.method === "POST") {
-      const request = JSON.parse(String(init.body))
-      active.request = {
-        model: request.model,
-        prompt: request.prompt,
-        n: request.n,
-        resolution: request.resolution,
-        aspect_ratio: request.aspect_ratio,
-        references: (request.input_references ?? []).map((value: string) => {
-          const [prefix, data] = value.split(",")
-          return { mime: prefix.slice(5).split(";")[0], ...describeBytes(Buffer.from(data, "base64")) }
-        }),
-      }
-      active.phase = "request"
-      await persist()
-      if (preflight) throw new Error("Controlled transport failure")
+    if (init?.method !== "POST") {
+      // A download of a URL the provider returned. The preflight's synthetic answer never names one.
+      if (!preflight) return realFetch(input, init)
+      active.failure = "unexpected-request"
+      throw new Error("The preflight sends no request beyond the image request")
     }
-    const response = await realFetch(input, init)
-    if (init?.method === "POST") {
-      active.httpStatus = response.status
-      const body: unknown = await response
-        .clone()
-        .json()
-        .catch(() => undefined)
-      if (body && typeof body === "object" && "data" in body && Array.isArray(body.data)) {
-        active.response = {
-          count: body.data.length,
-          images: body.data.map((entry) => ({
-            inline:
-              typeof entry?.b64_json === "string" ? describeBytes(Buffer.from(entry.b64_json, "base64")) : undefined,
-            url: typeof entry?.url === "string",
-          })),
-        }
-      }
-      active.phase = "response"
-      await persist()
+    const request = JSON.parse(String(init.body))
+    active.request = {
+      model: request.model,
+      prompt: request.prompt,
+      n: request.n,
+      resolution: request.resolution,
+      aspect_ratio: request.aspect_ratio,
+      references: (request.input_references ?? []).map((value: string) => {
+        const [prefix, data] = value.split(",")
+        return { mime: prefix.slice(5).split(";")[0], ...describeBytes(Buffer.from(data, "base64")) }
+      }),
     }
+    await reached("request-recorded")
+    let response: Response
+    if (!preflight) response = await realFetch(input, init)
+    else if (active.tool === "imageedit") {
+      active.failure = "controlled-transport-failure"
+      throw new Error("Controlled transport failure")
+    } else response = Response.json({ data: [{ b64_json: fixture(false).toString("base64") }] })
+    active.httpStatus = response.status
+    const body: unknown = await response
+      .clone()
+      .json()
+      .catch(() => undefined)
+    if (body && typeof body === "object" && "data" in body && Array.isArray(body.data)) {
+      active.response = {
+        count: body.data.length,
+        images: body.data.map((entry) => ({
+          inline:
+            typeof entry?.b64_json === "string" ? describeBytes(Buffer.from(entry.b64_json, "base64")) : undefined,
+          url: typeof entry?.url === "string",
+        })),
+      }
+    }
+    await reached("response-recorded")
     return response
   }) as typeof fetch
   try {
-    for (const spec of preflight ? liveCases.slice(0, 1) : liveCases) {
+    for (const spec of preflight ? preflightCases : liveCases) {
       const { name, tool: toolName, ...controls } = spec
-      active = { name, tool: toolName, controls, phase: "permission", status: "running" }
+      active = { name, tool: toolName, controls, status: "running" }
       report.cases.push(active)
-      await persist()
+      await reached("started")
       let authorized = false
       const host: ImageToolHost = {
         signal: AbortSignal.timeout(600000),
         authorize: async () => {
           authorized = true
           active.permission = "authorized explicit runner"
+          await reached("permission-granted")
         },
         resolveDirectory: async () => directory,
         resolveCredential: async () => {
@@ -205,9 +232,10 @@ async function runLive(directory: string, preflight: boolean) {
             ? { type: "key" as const, key: "synthetic-preflight-key" }
             : await loadCredential(nanoGptBackend.credential)
           if (!credential) {
-            active.phase = "missing-credential"
+            active.failure = "missing-credential"
             throw new Error("Missing NanoGPT credential")
           }
+          await reached("credential-resolved")
           return credential
         },
       }
@@ -233,14 +261,13 @@ async function runLive(directory: string, preflight: boolean) {
           ...describeBytes(bytes),
         }
         active.status = "saved; visual review required"
-        active.phase = "saved"
-        await persist()
+        await reached("output-saved")
         console.log(`${name}: saved ${result.savedPath}`)
       } catch {
-        // Runtime/provider errors can include signed URLs or payloads. Retain only our phase and observed HTTP status.
         active.status = "failed"
+        active.failure ??= "error"
         await persist()
-        console.error(`${name}: failed at ${active.phase}; evidence: ${reportPath}`)
+        console.error(`${name}: failed after ${active.lastCompleted} (${active.failure}); evidence: ${reportPath}`)
         return false
       }
     }
@@ -257,6 +284,8 @@ if (import.meta.main) {
     console.error("Usage: bun run scripts/nanogpt-live.ts --live|--preflight /absolute/new-evidence-directory")
     process.exitCode = 2
   } else {
+    // The preflight's designed stop is a failure, so it exits 1 like any stopped run; its last line names the case,
+    // the boundary it completed and the failure, and report.json holds the same.
     const passed = await runLive(directory, mode === "--preflight")
     process.exitCode = passed ? 0 : 1
   }

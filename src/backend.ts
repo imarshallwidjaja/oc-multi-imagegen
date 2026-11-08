@@ -33,9 +33,7 @@ function rejectPluginOptions(options: unknown): void {
   )
 }
 
-// Returns the backend that OC_MULTI_IMAGEGEN_BACKEND selects. The variable is read once, when the plugin loads. An unset variable
-// selects Codex; a variable that is set but empty or unknown fails the load instead of silently falling back, and
-// the error does not repeat the value.
+// Read once, when the plugin loads. The error never repeats the variable's value.
 export function selectBackend(options: unknown): Backend {
   rejectPluginOptions(options)
   const value = process.env[BACKEND_VARIABLE]

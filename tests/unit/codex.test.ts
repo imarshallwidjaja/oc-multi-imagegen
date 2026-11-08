@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, mock, test } from "bun:test"
+import { mkdtemp, rm } from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
 import { z } from "zod"
 import { type CodexArgs, codexBackend, codexImageedit, codexImagegen } from "../../src/codex"
 import type { ImageCredential, OAuthCredential } from "../../src/credential"
@@ -17,6 +20,18 @@ const auth: OAuthCredential = { type: "oauth", access: "tok" }
 
 function callCodex(args: CodexArgs, credential: OAuthCredential = auth) {
   return codexImagegen.request(credential, args, signal)
+}
+
+// Runs a Codex tool through the shared flow with a host that allows everything.
+function runTool(name: string, args: Record<string, unknown>, directory: string, credential: ImageCredential = auth) {
+  const tool = codexBackend.tools.find((candidate) => candidate.name === name)
+  if (tool?.kind !== "image") throw new Error(`${name} is not a Codex image tool`)
+  return tool.run(args, {
+    signal,
+    authorize: async () => {},
+    resolveDirectory: async () => directory,
+    resolveCredential: async () => credential,
+  })
 }
 
 describe("Codex backend request", () => {
@@ -126,15 +141,8 @@ describe("Codex backend request", () => {
   test("refuses a credential of another kind before any request", async () => {
     const fetchMock = stubImage()
     const key: ImageCredential = { type: "key", key: "sk-test" }
-    const tool = codexBackend.tools[0]
-    const host = {
-      signal,
-      authorize: async () => {},
-      resolveDirectory: async () => "/nonexistent",
-      resolveCredential: async () => key,
-    }
 
-    await expect(tool.run(generateArgs(), host)).rejects.toThrow(
+    await expect(runTool("imagegen", generateArgs(), "/nonexistent", key)).rejects.toThrow(
       "The backend needs a oauth credential but received key.",
     )
 
@@ -151,15 +159,43 @@ describe("Codex backend request", () => {
 
     await expect(act).rejects.toThrow("codex images request failed: 500 upstream boom for [redacted]")
   })
+
+  test.each([
+    ["imagegen", {}],
+    ["imageedit", { images: ["ref.png"] }],
+  ])(
+    "%s separates requested settings from verified ones in the result text only when they were given",
+    async (name, extra) => {
+      stubImage()
+      const dir = await mkdtemp(path.join(os.tmpdir(), "codex-note-"))
+      try {
+        await Bun.write(path.join(dir, "ref.png"), PNG_BUFFER)
+        const message = async (overrides: Partial<CodexArgs>, out: string) =>
+          (await runTool(name, { ...generateArgs({ ...overrides, out }), ...extra }, dir)).message
+        const saved = (out: string) => `Generated image saved to ${path.join(dir, out)}. The image is PNG, 1x1 pixels.`
+
+        expect(await message({}, "a.png")).toBe(saved("a.png"))
+        expect(await message({ model: null, quality: null }, "b.png")).toBe(saved("b.png"))
+        expect(await message({ model: "m1" }, "c.png")).toBe(
+          `${saved("c.png")} Requested model m1; the Codex response does not report which settings it applied, so they are unverified.`,
+        )
+        expect(await message({ model: "m1", quality: "low" }, "d.png")).toContain("Requested model m1 and quality low;")
+      } finally {
+        await rm(dir, { recursive: true, force: true })
+      }
+    },
+  )
 })
 
 describe("Codex backend arguments", () => {
   const parse = (value: Record<string, unknown>) => codexImagegen.schema.safeParse(value)
 
   test("accepts the size presets and nothing else", () => {
-    expect(parse({ prompt: "p", out: "o.png", size: "1672x941" }).success).toBe(true)
-    expect(parse({ prompt: "p", out: "o.png", size: "1280x720" }).error?.issues[0].message).toContain(
-      'Unsupported size "1280x720". Use one of: 1254x1254 (1:1)',
+    for (const size of ["1254x1254", "1536x1024", "1024x1536", "1448x1086", "1086x1448", "1672x941", "941x1672"]) {
+      expect(parse({ prompt: "p", out: "o.png", size }).success).toBe(true)
+    }
+    expect(parse({ prompt: "p", out: "o.png", size: "1280x720" }).error?.issues[0].message).toBe(
+      'Unsupported size "1280x720". Use one of: 1254x1254 (1:1), 1536x1024 (3:2), 1024x1536 (2:3), 1448x1086 (4:3), 1086x1448 (3:4), 1672x941 (16:9), 941x1672 (9:16).',
     )
   })
 
@@ -190,20 +226,4 @@ describe("Codex backend arguments", () => {
       expect(schema.properties[field].description).not.toMatch(/ignored|not supported|forbidden/i)
     }
   })
-
-  test.each([
-    ["imagegen", codexImagegen.resultNote, {}],
-    ["imageedit", codexImageedit.resultNote, { images: ["ref.png"] }],
-  ])(
-    "%s separates requested settings from verified ones in the result text only when they were given",
-    (_name, resultNote, extra) => {
-      const args = (overrides: Partial<CodexArgs> = {}) => ({ ...generateArgs(overrides), ...extra })
-      expect(resultNote(args())).toBeUndefined()
-      expect(resultNote(args({ model: null, quality: null }))).toBeUndefined()
-      expect(resultNote(args({ model: "m1" }))).toBe(
-        "Requested model m1; the Codex response does not report which settings it applied, so they are unverified.",
-      )
-      expect(resultNote(args({ model: "m1", quality: "low" }))).toContain("model m1 and quality low")
-    },
-  )
 })

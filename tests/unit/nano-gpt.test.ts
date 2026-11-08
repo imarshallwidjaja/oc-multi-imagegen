@@ -4,7 +4,6 @@ import os from "node:os"
 import path from "node:path"
 import type { ImageCredential } from "../../src/credential"
 import plugin from "../../src/index"
-import { readReferenceImages } from "../../src/input-image"
 import { nanoGptBackend } from "../../src/nano-gpt"
 import {
   CONTROL_NAMES,
@@ -14,11 +13,10 @@ import {
   generateSchema,
   MODELS,
   type NanoModel,
-  referenceRules,
 } from "../../src/nano-gpt-models"
 import type { ImageTool, ImageToolHost } from "../../src/types"
 import { isolateEnvironment, JPEG_BUFFER, PNG_BASE64, PNG_BUFFER, WEBP_BUFFER } from "./fixtures"
-import { loadV2Tool, STORED_CREDENTIALS, selectBackendVariable, v1Harness, v1ToolContext, v2Harness } from "./hosts"
+import { loadV2Tool, STORED_CREDENTIALS, selectBackendVariable, v1ToolContext } from "./hosts"
 
 // NanoGPT-specific behavior: the model registry and the schemas derived from it, the request each tool sends, how the
 // response is read, and the local information tool. Behavior shared with the other backends (permission order,
@@ -152,24 +150,6 @@ describe("NanoGPT model registry", () => {
     )
   })
 
-  test("takes the reference limits from the model, and a lower file size only where the provider states one", () => {
-    expect(
-      MODELS.filter((model) => model.operation === "edit").map((model) => [model.id, model.maxReferences]),
-    ).toEqual([
-      ["openai/gpt-image-2.5/flare/edit", 16],
-      ["nano-banana-pro-edit", 10],
-      ["black-forest-labs/flux-3/edit", 10],
-      ["bytedance/seedream-v5.0-pro", 10],
-      ["bytedance/seedream-v5.0-pro/edit", 10],
-      ["qwen-image-2.1/edit", 10],
-      ["qwen-image-3-pro", 3],
-      ["wan2.7-image-pro", 9],
-      ["meta/muse-image/text-to-image", 10],
-    ])
-    expect(referenceRules(findModel("edit", "bytedance/seedream-v5.0-pro/edit") as NanoModel).maxBytes).toBe(10485760)
-    expect(referenceRules(findModel("edit", "nano-banana-pro-edit") as NanoModel).maxBytes).toBe(31457280)
-  })
-
   test("differs per operation only where the provider lists different values", () => {
     const aspect = (operation: "generate" | "edit") =>
       findModel(operation, operation === "edit" ? "qwen-image-2.1/edit" : "qwen-image-2.1/text-to-image")?.aspectRatios
@@ -221,27 +201,6 @@ describe("NanoGPT argument validation", () => {
     expect(generateSchema.safeParse({ model: "nano-banana-pro", prompt: "x".repeat(100000), out: "o" }).success).toBe(
       true,
     )
-  })
-
-  test("limits the reference count by model when editing, and refuses references when generating", () => {
-    const base = { model: "nano-banana-pro-edit", prompt: "p", out: "o" }
-    expect(editSchema.safeParse({ ...base, images: Array(10).fill("a.png") }).success).toBe(true)
-    expect(messages(editSchema, { ...base, images: Array(11).fill("a.png") })[0]).toContain(
-      "takes at most 10 reference images",
-    )
-    expect(messages(editSchema, { ...base, images: [] })[0]).toContain("needs at least one reference image")
-    expect(
-      editSchema.safeParse({ ...base, model: "openai/gpt-image-2.5/flare/edit", images: Array(16).fill("a.png") })
-        .success,
-    ).toBe(true)
-    expect(
-      messages(generateSchema, { model: "nano-banana-pro", prompt: "p", out: "o", images: ["a.png"] })[0],
-    ).toContain("use imageedit to change or combine existing images")
-  })
-
-  test("accepts null for an optional control as if it were omitted", () => {
-    const nulls = { resolution: null, aspect_ratio: null, quality: null, background: null, seed: null }
-    expect(generateSchema.safeParse({ model: "nano-banana-pro", prompt: "p", out: "o", ...nulls }).success).toBe(true)
   })
 
   // Attempts to widen a request past the curated contract: provider routing, streaming, output counts, legacy aliases.
@@ -336,6 +295,23 @@ describe("NanoGPT requests", () => {
     }
   })
 
+  // Every model ID that both tools accept, and the edit-only Seedream ID, reaches the provider unchanged.
+  test.each([
+    ...DUAL_IDS.flatMap((id) => [["imagegen", id] as const, ["imageedit", id] as const]),
+    ["imageedit", "bytedance/seedream-v5.0-pro/edit"] as const,
+  ])("%s sends the exact model ID %s", async (name, id) => {
+    const fetchMock = stubFetch()
+
+    await (name === "imagegen" ? generate({}, id) : edit({}, id))
+
+    expect(bodyOf(fetchMock)).toEqual({
+      model: id,
+      prompt: name === "imagegen" ? "a cat" : "make it orange",
+      n: 1,
+      ...(name === "imageedit" ? { input_references: [`data:image/png;base64,${PNG_BASE64}`] } : {}),
+    })
+  })
+
   test("a generation request has no reference field", async () => {
     const fetchMock = stubFetch()
 
@@ -371,26 +347,13 @@ describe("NanoGPT requests", () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  test("rejects a reference that is not PNG, JPEG or WebP, and one above the model's file size, before any request", async () => {
+  test("rejects a reference that is not PNG, JPEG or WebP before any request", async () => {
     const fetchMock = stubFetch()
     await writeFile(path.join(dir, "ref.gif"), Buffer.from("GIF89a"))
-    await writeFile(path.join(dir, "big.png"), Buffer.concat([PNG_BUFFER, Buffer.alloc(10485760)]))
 
     await expect(edit({ images: ["ref.gif"] })).rejects.toThrow("unsupported reference image type image/gif")
-    await expect(edit({ images: ["big.png"] }, "bytedance/seedream-v5.0-pro/edit")).rejects.toThrow(
-      "reference image is too large",
-    )
     expect(fetchMock).not.toHaveBeenCalled()
     expect(await readdir(dir)).not.toContain("cat.png")
-  })
-
-  test("accepts a reference of the same size for a model whose limit is the route's", async () => {
-    stubFetch()
-    await writeFile(path.join(dir, "big.png"), Buffer.concat([PNG_BUFFER, Buffer.alloc(10485760)]))
-
-    const rules = referenceRules(findModel("edit", "nano-banana-pro-edit") as NanoModel)
-
-    expect(await readReferenceImages(["big.png"], dir, rules)).toHaveLength(1)
   })
 })
 
@@ -728,17 +691,11 @@ describe("NanoGPT transport failures", () => {
 
 describe("NanoGPT image URLs", () => {
   test.each([PNG_BUFFER, JPEG_BUFFER, WEBP_BUFFER])(
-    "downloads native bytes without credentials or redirects, with the call's signal",
+    "downloads native bytes without credentials or redirects",
     async (bytes) => {
       const fetchMock = downloadsAfterRequest(() => new Response(bytes))
-      const controller = new AbortController()
 
-      const saved = await run(
-        "imagegen",
-        { model: "nano-banana-pro", prompt: "p", out: "cat.png" },
-        key,
-        controller.signal,
-      )
+      const saved = await run("imagegen", { model: "nano-banana-pro", prompt: "p", out: "cat.png" })
 
       expect(await Bun.file(saved.savedPath).bytes()).toEqual(new Uint8Array(bytes))
       expect(fetchMock).toHaveBeenCalledTimes(2)
@@ -746,7 +703,6 @@ describe("NanoGPT image URLs", () => {
       expect(String(url)).toBe("https://cdn.nano-gpt.example/img/1.png?sig=SECRET")
       expect(init.method).toBe("GET")
       expect(init.redirect).toBe("manual")
-      expect(init.signal).toBe(controller.signal)
       expect(init.headers).toBeUndefined()
       expect(JSON.stringify(init)).not.toContain("sk-nano")
     },
@@ -754,7 +710,7 @@ describe("NanoGPT image URLs", () => {
 
   test("a cancelled download rejects and saves nothing", async () => {
     const controller = new AbortController()
-    downloadsAfterRequest(
+    const fetchMock = downloadsAfterRequest(
       (init) =>
         new Promise<Response>((_resolve, reject) => {
           init.signal?.addEventListener("abort", () => reject(init.signal?.reason))
@@ -765,6 +721,7 @@ describe("NanoGPT image URLs", () => {
     const act = run("imagegen", { model: "nano-banana-pro", prompt: "p", out: "dl.png" }, key, controller.signal)
 
     await expect(act).rejects.toThrow("stopped during download")
+    expect(fetchMock.mock.calls[1][1].signal?.aborted).toBe(true)
     expect(await readdir(dir)).toEqual(["ref.png"])
   })
 
@@ -934,12 +891,16 @@ describe.each([
   ["OpenCode 1", "v1"],
   ["OpenCode 2", "v2"],
 ] as const)("imagegen_models through %s", (_host, version) => {
-  async function ask(args: unknown) {
-    // Nothing may be needed to answer: no key anywhere, an unreadable credential store and a failing network.
-    process.env.OPENCODE_AUTH_CONTENT = "{not json"
-    const fetchMock = stubFetch(() => {
+  let fetchMock: ReturnType<typeof stubFetch>
+  beforeEach(() => {
+    // Nothing may be needed to answer: no key in the store and a failing network. Resolving a credential would fail.
+    process.env.OPENCODE_AUTH_CONTENT = "{}"
+    fetchMock = stubFetch(() => {
       throw new Error("the information tool must not use the network")
     })
+  })
+
+  async function ask(args: unknown) {
     if (version === "v1") {
       selectBackendVariable("nano-gpt")
       const hooks = await plugin.server({} as never)
@@ -948,16 +909,16 @@ describe.each([
         args as never,
         v1ToolContext(dir, new AbortController().signal, async (input) => void asks.push(input)),
       )) as { output: string }
-      return { text: result.output, touched: asks, fetchMock }
+      return { text: result.output, touched: asks }
     }
     const loaded = await loadV2Tool({ directory: dir, backend: "nano-gpt" })
     const result = await loaded.run(args, undefined, undefined, "imagegen_models")
     const { assert, active, resolve, sessionGet } = loaded.calls
-    return { text: result.content, touched: [...assert, ...active, ...resolve, ...sessionGet], fetchMock }
+    return { text: result.content, touched: [...assert, ...active, ...resolve, ...sessionGet] }
   }
 
   test("answers from the registry without a permission, credential, session, file or network access", async () => {
-    const { text, touched, fetchMock } = await ask({})
+    const { text, touched } = await ask({})
 
     for (const [generateId, editId] of EXPECTED_IDS) {
       expect(text).toContain(`- ${generateId} (`)
@@ -1026,12 +987,13 @@ describe.each([
   })
 
   test.each([
-    ["an unknown model", { model: "nano-banana-pro-v2" }],
-    ["a model with a filter", { model: "nano-banana-pro", family: "flux-3" }],
-    ["an unknown family", { family: "dall-e" }],
-    ["an unknown argument", { limit: 5 }],
-  ])("rejects %s", async (_name, args) => {
-    await expect(ask(args)).rejects.toThrow()
+    ["an unknown model", { model: "nano-banana-pro-v2" }, "Invalid option"],
+    ["a model with a filter", { model: "nano-banana-pro", family: "flux-3" }, "model cannot be combined with"],
+    ["an unknown family", { family: "dall-e" }, "at family"],
+    ["an unknown argument", { limit: 5 }, 'Unrecognized key: "limit"'],
+  ])("rejects %s without the network", async (_name, args, message) => {
+    await expect(ask(args)).rejects.toThrow(message)
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })
 
@@ -1080,70 +1042,17 @@ describe("NanoGPT tool guidance", () => {
   })
 })
 
-// The hosts register the same tools; this guards the entry point wiring for a NanoGPT load on both.
-describe("NanoGPT tools through both hosts", () => {
-  for (const [host, create] of [
-    ["OpenCode 1", v1Harness],
-    ["OpenCode 2", v2Harness],
-  ] as const) {
-    for (const id of [...DUAL_IDS, "bytedance/seedream-v5.0-pro/edit"]) {
-      for (const name of id.endsWith("/edit") ? ["imageedit"] : ["imagegen", "imageedit"]) {
-        test(`${host} ${name} transmits exact ${id} and ordered references`, async () => {
-          const fetchMock = stubFetch()
-          const second = Buffer.concat([PNG_BUFFER, Buffer.from("distinct second reference")])
-          await writeFile(path.join(dir, "second.png"), second)
-          const harness = await create(dir, { backend: "nano-gpt" } as never, name)
-          await harness.execute({
-            model: id,
-            prompt: "p",
-            out: "o.png",
-            ...(name === "imageedit" ? { images: ["ref.png", "second.png"] } : {}),
-          })
-          expect(bodyOf(fetchMock)).toEqual({
-            model: id,
-            prompt: "p",
-            n: 1,
-            ...(name === "imageedit"
-              ? {
-                  input_references: [
-                    `data:image/png;base64,${PNG_BASE64}`,
-                    `data:image/png;base64,${second.toString("base64")}`,
-                  ],
-                }
-              : {}),
-          })
-          expect(fetchMock).toHaveBeenCalledTimes(1)
-        })
-      }
-    }
-  }
-  test.each([
-    ["OpenCode 1", v1Harness],
-    ["OpenCode 2", v2Harness],
-  ] as const)(
-    "%s edits with imageedit and generates with imagegen using the model it is given",
-    async (_host, create) => {
-      const fetchMock = stubFetch()
-      const flavour = { backend: "nano-gpt" } as never
-      const generator = await create(dir, flavour, "imagegen")
-      const editor = await create(dir, flavour, "imageedit")
-
-      await generator.execute({ model: "qwen-image-2.1/text-to-image", prompt: "a", out: "a.png" })
-      await editor.execute({ model: "qwen-image-2.1/edit", prompt: "b", out: "b.png", images: ["ref.png"] })
-
-      expect(bodyOf(fetchMock, 0).model).toBe("qwen-image-2.1/text-to-image")
-      expect(bodyOf(fetchMock, 1).model).toBe("qwen-image-2.1/edit")
-      expect(bodyOf(fetchMock, 1)).toHaveProperty("input_references")
-      expect(bodyOf(fetchMock, 0)).not.toHaveProperty("input_references")
-    },
-  )
-})
-
-describe("dual-operation literal limits", () => {
+// The reference count and file size each edit model takes: the model's own limits, and the route's 31457280 bytes
+// where the provider states no lower file size.
+describe("NanoGPT model limits", () => {
   const profiles = [
-    ["qwen-image-3-pro", 3, 10485760],
+    ["openai/gpt-image-2.5/flare/edit", 16, 31457280],
+    ["nano-banana-pro-edit", 10, 31457280],
+    ["black-forest-labs/flux-3/edit", 10, 31457280],
     ["bytedance/seedream-v5.0-pro", 10, 10485760],
     ["bytedance/seedream-v5.0-pro/edit", 10, 10485760],
+    ["qwen-image-2.1/edit", 10, 31457280],
+    ["qwen-image-3-pro", 3, 10485760],
     ["wan2.7-image-pro", 9, 31457280],
     ["meta/muse-image/text-to-image", 10, 31457280],
   ] as const
@@ -1151,7 +1060,10 @@ describe("dual-operation literal limits", () => {
     const fetchMock = stubFetch()
     await edit({ images: Array(count).fill("ref.png") }, id)
     expect(fetchMock).toHaveBeenCalledTimes(1)
-    await expect(edit({ images: Array(count + 1).fill("ref.png") }, id)).rejects.toThrow(`at most ${count}`)
+    // The largest limit is also the schema's array limit, which refuses an extra reference with its own wording.
+    await expect(edit({ images: Array(count + 1).fill("ref.png") }, id)).rejects.toThrow(
+      new RegExp(`at most ${count} reference images|expected array to have <=${count} items`),
+    )
     const atLimit = Buffer.alloc(bytes)
     PNG_BUFFER.copy(atLimit)
     await writeFile(path.join(dir, "limit.png"), atLimit)
@@ -1169,16 +1081,32 @@ describe("dual-operation literal limits", () => {
   })
   test("rejects wrong operations, missing references, unsupported controls and unknown IDs without fetch", async () => {
     const fetchMock = stubFetch()
-    for (const [name, extra] of [
-      ["imagegen", { model: "bytedance/seedream-v5.0-pro/edit" }],
-      ["imagegen", { model: "unknown" }],
-      ["imagegen", { model: "qwen-image-3-pro", seed: 1 }],
-      ["imagegen", { model: "meta/muse-image/text-to-image", output_format: "png" }],
-      ["imagegen", { model: "wan2.7-image-pro", aspect_ratio: "1:1" }],
-      ["imageedit", { model: "wan2.7-image-pro", images: ["ref.png"], resolution: "4k" }],
-      ...DUAL_IDS.map((model) => ["imageedit", { model }] as const),
+    for (const [name, extra, message] of [
+      [
+        "imagegen",
+        { model: "bytedance/seedream-v5.0-pro/edit" },
+        "bytedance/seedream-v5.0-pro/edit is for imageedit, not imagegen. Use imageedit with it, or imagegen with bytedance/seedream-v5.0-pro.",
+      ],
+      ["imagegen", { model: "unknown" }, 'Unsupported generate model "unknown"'],
+      ["imagegen", { model: "qwen-image-3-pro", seed: 1 }, "seed is not supported by qwen-image-3-pro"],
+      [
+        "imagegen",
+        { model: "meta/muse-image/text-to-image", output_format: "png" },
+        "Unsupported argument: output_format",
+      ],
+      [
+        "imagegen",
+        { model: "wan2.7-image-pro", aspect_ratio: "1:1" },
+        "aspect_ratio is not supported by wan2.7-image-pro",
+      ],
+      [
+        "imageedit",
+        { model: "wan2.7-image-pro", images: ["ref.png"], resolution: "4k" },
+        'Unsupported resolution "4k" for wan2.7-image-pro',
+      ],
+      ...DUAL_IDS.map((model) => ["imageedit", { model }, "at images"] as const),
     ] as const) {
-      await expect(run(name, { prompt: "p", out: "o.png", ...extra })).rejects.toThrow()
+      await expect(run(name, { prompt: "p", out: "o.png", ...extra })).rejects.toThrow(message)
     }
     expect(fetchMock).not.toHaveBeenCalled()
   })

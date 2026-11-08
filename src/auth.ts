@@ -16,9 +16,7 @@ async function loadAuthData(): Promise<Record<string, unknown>> {
     try {
       const parsed: unknown = JSON.parse(process.env.OPENCODE_AUTH_CONTENT)
       return isRecord(parsed) ? parsed : {}
-    } catch {
-      // Falls through to the file, as OpenCode does.
-    }
+    } catch {}
   }
   if (!xdgData) return {}
   try {

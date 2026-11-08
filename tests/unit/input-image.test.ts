@@ -65,13 +65,14 @@ describe("readReferenceImages", () => {
   test("throws when a file is not a recognized image", async () => {
     const abs = path.join(dir, "notes.txt")
     await writeFile(abs, "this is plain text, not an image")
-    expect(readReferenceImages(["notes.txt"], dir)).rejects.toThrow(`unsupported image file type: ${abs}`)
+    await expect(readReferenceImages(["notes.txt"], dir)).rejects.toThrow(`unsupported image file type: ${abs}`)
   })
 
-  // Promise.all means one bad path fails the whole call — the opposite of auth.ts, which
-  // deliberately swallows read errors. Pin that contract so a future change can't silently drop a missing reference.
-  test("rejects the whole call when any path is missing", async () => {
+  test("rejects the whole call with the missing path when any path is missing", async () => {
     await writeFile(path.join(dir, "present.png"), PNG)
-    expect(readReferenceImages(["present.png", "missing.png"], dir)).rejects.toThrow()
+
+    const error = await readReferenceImages(["present.png", "missing.png"], dir).catch((caught: unknown) => caught)
+
+    expect(error).toMatchObject({ code: "ENOENT", path: path.join(dir, "missing.png") })
   })
 })

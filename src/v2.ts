@@ -132,7 +132,6 @@ export const setup: Plugin.Plugin["setup"] = async (ctx) => {
         name: tool.name,
         description: tool.description,
         input: tool.schema,
-        // Only a tool that saves an image declares the structured result.
         ...(tool.kind === "image" ? { output: resultSchema } : {}),
         options: { codemode: false },
         async execute(input, context) {

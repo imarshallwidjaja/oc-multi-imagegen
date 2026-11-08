@@ -48,6 +48,13 @@ export type Flavour = {
   key?: { variable: string; saved: string; label: string }
 }
 
+// The saved credentials both fake hosts hold: OpenCode 1's STORED_CREDENTIALS and OpenCode 2's connection store. The
+// expected Authorization headers use the same values; ENVIRONMENT_KEY differs from both keys, so a request still shows
+// which source it used.
+const SAVED_CHATGPT_ACCESS = "tok"
+const SAVED_IMAGES_KEY = "sk-images"
+const SAVED_NANO_KEY = "sk-nano"
+
 const imagesReferences = (body: Record<string, unknown>) =>
   (body.images as Array<{ image_url: string }> | undefined)?.map((image) => image.image_url) ?? []
 
@@ -182,7 +189,7 @@ export const NANO_EDIT_ARGS = {
 export const FLAVOURS: Flavour[] = [
   {
     backend: "codex",
-    authorization: "Bearer tok",
+    authorization: `Bearer ${SAVED_CHATGPT_ACCESS}`,
     resource: "codex",
     provider: "openai",
     operations: [
@@ -205,16 +212,16 @@ export const FLAVOURS: Flavour[] = [
   },
   {
     backend: "openai-api",
-    authorization: "Bearer sk-images",
+    authorization: `Bearer ${SAVED_IMAGES_KEY}`,
     resource: "openai-api",
     provider: "openai-images",
     operations: [openaiGeneration, openaiEdit],
     editReferences: imagesReferences,
-    key: { variable: "OC_MULTI_IMAGEGEN_OPENAI_API_KEY", saved: "sk-images", label: "OpenAI Images API" },
+    key: { variable: "OC_MULTI_IMAGEGEN_OPENAI_API_KEY", saved: SAVED_IMAGES_KEY, label: "OpenAI Images API" },
   },
   {
     backend: "nano-gpt",
-    authorization: "Bearer sk-nano",
+    authorization: `Bearer ${SAVED_NANO_KEY}`,
     resource: "nano-gpt",
     provider: "nano-gpt-images",
     operations: [
@@ -259,7 +266,7 @@ export const FLAVOURS: Flavour[] = [
       },
     ],
     editReferences: nanoReferences,
-    key: { variable: "OC_MULTI_IMAGEGEN_NANOGPT_API_KEY", saved: "sk-nano", label: "NanoGPT API" },
+    key: { variable: "OC_MULTI_IMAGEGEN_NANOGPT_API_KEY", saved: SAVED_NANO_KEY, label: "NanoGPT API" },
   },
 ]
 
@@ -270,15 +277,14 @@ export function selectBackendVariable(backend: Backend | undefined): void {
   else process.env.OC_MULTI_IMAGEGEN_BACKEND = backend
 }
 
-// The image API key as the environment variable carries it, distinct from the saved key in STORED_CREDENTIALS and
-// IMAGES_KEY_CREDENTIAL so a test can tell which source a request used.
+// The image API key as the environment variable carries it, distinct from every saved key.
 export const ENVIRONMENT_KEY = "sk-from-environment"
 
 // OpenCode 1's stored credentials for every backend: the chat provider's ChatGPT sign-in and the image keys.
 export const STORED_CREDENTIALS = {
-  openai: { type: "oauth", access: "tok", refresh: "refresh", expires: 4102444800000 },
-  "openai-images": { type: "api", key: "sk-images" },
-  "nano-gpt-images": { type: "api", key: "sk-nano" },
+  openai: { type: "oauth", access: SAVED_CHATGPT_ACCESS, refresh: "refresh", expires: 4102444800000 },
+  "openai-images": { type: "api", key: SAVED_IMAGES_KEY },
+  "nano-gpt-images": { type: "api", key: SAVED_NANO_KEY },
 }
 
 // An information tool saves nothing, so `out` and `versioned` are absent for it.
@@ -342,12 +348,9 @@ export const CHATGPT_BROWSER_CREDENTIAL = {
   type: "oauth",
   methodID: "chatgpt-browser",
   refresh: "refresh",
-  access: "tok",
+  access: SAVED_CHATGPT_ACCESS,
   expires: Number.MAX_SAFE_INTEGER,
 }
-
-export const IMAGES_KEY_CREDENTIAL = { type: "key", key: "sk-images" }
-export const NANO_KEY_CREDENTIAL = { type: "key", key: "sk-nano" }
 
 export function createV2Context(options: V2Options = {}) {
   const calls = {
@@ -364,11 +367,11 @@ export function createV2Context(options: V2Options = {}) {
     },
     "openai-images": {
       connection: { type: "credential", id: "cred_2", method: "key" },
-      credential: IMAGES_KEY_CREDENTIAL,
+      credential: { type: "key", key: SAVED_IMAGES_KEY },
     },
     "nano-gpt-images": {
       connection: { type: "credential", id: "cred_3", method: "key" },
-      credential: NANO_KEY_CREDENTIAL,
+      credential: { type: "key", key: SAVED_NANO_KEY },
     },
     ...options.integrations,
   }
@@ -482,7 +485,6 @@ export async function loadV2Tool(options: V2Options = {}) {
   if (options.backend) selectBackendVariable(options.backend)
   const fake = createV2Context(options)
   await plugin.setup(fake.context)
-  const tool = fake.registered[0]
   const toolNamed = (name: string) => {
     const found = fake.registered.find((candidate) => candidate.name === name)
     if (!found) throw new Error(`${name} is not registered`)
@@ -490,9 +492,10 @@ export async function loadV2Tool(options: V2Options = {}) {
   }
   return {
     ...fake,
-    tool,
+    // Every backend registers imagegen.
+    tool: toolNamed("imagegen"),
     toolNamed,
-    run: (rawArgs: unknown, signal = new AbortController().signal, sessionID?: string, name = tool.name) =>
+    run: (rawArgs: unknown, signal = new AbortController().signal, sessionID?: string, name = "imagegen") =>
       toolNamed(name).execute(rawArgs, v2ToolContext(signal, sessionID)),
   }
 }

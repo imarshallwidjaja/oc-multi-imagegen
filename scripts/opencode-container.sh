@@ -4,7 +4,8 @@
 # Usage and expected results: docs/container-testing.md.
 #
 #   export OC_SANDBOX=$(scripts/opencode-container.sh init)     one new private sandbox per attempt
-#   scripts/opencode-container.sh pack                          build, npm pack, extract, install runtime deps
+#   scripts/opencode-container.sh pack                          build and npm pack a copy of the checkout in the sandbox,
+#                                                               extract, install runtime deps
 #   scripts/opencode-container.sh prepare <host> [allow|tool-only|ask] [codex|openai-api]  the backend the container's
 #                                                               OC_MULTI_IMAGEGEN_BACKEND selects (codex: not set)
 #   scripts/opencode-container.sh seed <host> [min-hours]       credential seed (v1, v2); v1-floor needs none
@@ -117,8 +118,14 @@ trap 'exit 143' TERM
 
 # Runs `docker "${ARGS[@]}"` for at most $timeout_s seconds, then stops the container it started and returns
 # docker's status, or 124 after a timeout. If it cannot confirm the container is gone it fails too (status 1
-# when docker itself succeeded). Callers read the status explicitly: `set -e` does not reach into `||` and `if`.
+# when docker itself succeeded). Once a container is unsettled it refuses to start another and returns 1, whatever
+# the caller does with the earlier status. Callers read the status explicitly: `set -e` does not reach into `||`
+# and `if`.
 container_run() {
+  if [ -n "$unsettled" ]; then
+    echo "Not starting another container: container $unsettled could not be confirmed gone." >&3
+    return 1
+  fi
   local rc=0 started=$SECONDS
   timeout --kill-after=2 "$timeout_s" docker "${ARGS[@]}" &
   child=$!
@@ -192,6 +199,9 @@ case_prompt() {
   esac
 }
 
+# Sourced, the helper defines its functions and runs no command; the unit tests drive container_run that way.
+[ "${BASH_SOURCE[0]}" = "$0" ] || return 0
+
 cmd=${1:-}
 [ $# -gt 0 ] && shift
 case $cmd in
@@ -209,19 +219,21 @@ case $cmd in
   pack)
     use_sandbox
     [ ! -e "$sandbox/pkg" ] && [ -z "$(ls -A "$sandbox/pack")" ] || die "This sandbox already holds a package; make a new one with '$0 init'"
-    # A stale dist/ would pack old code, so the build is part of packing.
-    (cd "$repo" && bun run build)
-    (cd "$repo" && npm pack --pack-destination "$sandbox/pack")
-    tarballs=("$sandbox"/pack/*.tgz)
-    [ "${#tarballs[@]}" -eq 1 ] || die "Expected one tarball in $sandbox/pack"
+    # A stale dist/ would pack old code, so the build is part of packing. It runs the package's build script on a copy
+    # of the checkout's build and package inputs in $sandbox/pack/source, so the checkout's own dist/, which a running
+    # OpenCode may load, is neither rebuilt nor deleted. The script prints the tarball and the staged build it made.
+    staged=$(bun "$repo/scripts/stage-package.ts" "$sandbox/pack")
+    tarball=$(printf '%s\n' "$staged" | sed -n 's/^tarball: //p')
+    build=$(printf '%s\n' "$staged" | sed -n 's/^build: //p')
+    [ -f "$tarball" ] && [ -f "$build" ] || die "scripts/stage-package.ts did not report a tarball and a build: $staged"
     mkdir "$sandbox/pkg"
-    tar -xzf "${tarballs[0]}" -C "$sandbox/pkg"
+    tar -xzf "$tarball" -C "$sandbox/pkg"
     # Installs the runtime dependencies only, so the container sees what a consumer of the package would.
     (cd "$sandbox/pkg/package" && npm install --omit=dev --ignore-scripts --no-audit --no-fund)
     {
       echo "commit: $(git -C "$repo" rev-parse HEAD)"
       echo "uncommitted paths: $(git -C "$repo" status --porcelain | wc -l)"
-      sha256sum "$repo/dist/index.js" "${tarballs[0]}"
+      sha256sum "$build" "$tarball"
     } >"$sandbox/identity.txt"
     cat "$sandbox/identity.txt"
     ;;
@@ -330,16 +342,14 @@ EOF
 
   tools)
     # Lists the tool ids a v1 server registers: a load check that needs no model and no credential.
+    # scripts/container-backend-probe.sh runs in the container and fails, with the server log, unless it reads a
+    # non-empty tool id list.
     host=${1:?host}
     [ "$host" != v2 ] || die "OpenCode 2 has no tool listing; check its load log line instead (docs/container-testing.md)"
+    image_of "$host" >/dev/null
     use_sandbox
     base_args "$host" tools
-    ARGS+=(--entrypoint sh "$(image_of "$host")" -c '
-      opencode --version
-      opencode serve --port 4096 --hostname 127.0.0.1 >/tmp/serve.log 2>&1 &
-      i=0; until wget -T 2 -qO- http://127.0.0.1:4096/path >/dev/null 2>&1 || [ $i -ge 60 ]; do i=$((i+1)); sleep 1; done
-      wget -T 60 -qO- "http://127.0.0.1:4096/experimental/tool/ids?directory=/work"; echo
-      kill %1')
+    ARGS+=(-v "$repo/scripts/container-backend-probe.sh:/probe.sh:ro" --entrypoint sh "$(image_of "$host")" /probe.sh v1 tools)
     container_run
     ;;
 
@@ -432,7 +442,7 @@ EOF
     ;;
 
   *)
-    sed -n '2,24p' "${BASH_SOURCE[0]}" >&2
+    awk 'NR > 1 && !/^#/ { exit } NR > 1' "${BASH_SOURCE[0]}" >&2 # the header comment
     exit 2
     ;;
 esac

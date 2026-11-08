@@ -1,7 +1,6 @@
 // The credential rules every host shares. Reading a credential is each host's own work (auth.ts on OpenCode 1, the
 // host's integration store on OpenCode 2); this module reads no file and no variable's value.
 
-// The credential kinds an image backend can use.
 export type OAuthCredential = { type: "oauth"; access: string; accountId?: string }
 export type KeyCredential = { type: "key"; key: string }
 export type ImageCredential = OAuthCredential | KeyCredential

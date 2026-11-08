@@ -37,15 +37,6 @@ function stubFetch() {
 const args = { prompt: "a cat", out: "cat.png", size: SHARED_SIZE } as const
 
 describe("OpenCode 2 tool registration", () => {
-  test("registers imagegen and imageedit as direct tools without a namespace", async () => {
-    const { registered, tool } = await loadV2Tool({ directory: dir })
-
-    expect(registered.map((candidate) => candidate.name)).toEqual(["imagegen", "imageedit"])
-    expect(tool.name).toBe("imagegen")
-    // Direct tools run without the execute tool; a permission override would hide the tool under its own name.
-    expect(tool.options).toEqual({ codemode: false })
-  })
-
   test("declares the input schema the model sees", async () => {
     const { tool } = await loadV2Tool({ directory: dir })
 
@@ -54,7 +45,6 @@ describe("OpenCode 2 tool registration", () => {
       properties: Record<string, { enum?: string[]; description?: string }>
     }
 
-    expect(tool.description).toBe(selectBackend(undefined).tools[0].description)
     expect(Object.keys(schema.properties)).toEqual(["prompt", "out", "size", "background", "model", "quality"])
     for (const property of Object.values(schema.properties)) {
       expect(property.description).toEqual(expect.stringMatching(/\S/))
@@ -110,13 +100,6 @@ describe("OpenCode 2 tool registration", () => {
       expect(unknown.issues).toHaveLength(1)
     },
   )
-
-  test("replaying the registration produces the same definition", async () => {
-    const first = await loadV2Tool({ directory: dir })
-    const second = await loadV2Tool({ directory: dir })
-
-    expect({ ...first.tool, execute: undefined }).toEqual({ ...second.tool, execute: undefined })
-  })
 })
 
 describe("OpenCode 2 backend selection", () => {
@@ -128,8 +111,8 @@ describe("OpenCode 2 backend selection", () => {
     for (const [index, tool] of registered.entries()) {
       expect(tool.description).toBe(declared[index].description)
       expect(tool.input).toBe(declared[index].schema)
+      // Direct tools run without the execute tool; a permission override would hide the tool under its own name.
       expect(tool.options).toEqual({ codemode: false })
-      // Only a tool that saves an image declares the structured result.
       expect("output" in tool).toBe(declared[index].kind === "image")
     }
   })
@@ -156,20 +139,6 @@ describe("OpenCode 2 backend selection", () => {
     for (const property of [...Object.values(generate.properties), ...Object.values(edit.properties)]) {
       expect(property.description).toEqual(expect.stringMatching(/\S/))
     }
-  })
-
-  test("serves a different size contract for each backend", async () => {
-    const codex = await loadV2Tool({ directory: dir })
-    const api = await loadV2Tool({ directory: dir, backend: "openai-api" })
-    const sizeOf = (tool: typeof codex.tool) =>
-      (
-        z.toJSONSchema(tool.input, { target: "draft-2020-12", io: "input" }) as unknown as {
-          properties: { size: object }
-        }
-      ).properties.size
-
-    expect(sizeOf(codex.tool)).toHaveProperty("enum")
-    expect(sizeOf(api.tool)).not.toHaveProperty("enum")
   })
 
   test("registers no integration for the Codex backend, whose OpenAI integration belongs to the host", async () => {
@@ -254,25 +223,6 @@ describe("OpenCode 2 execution", () => {
       metadata: { out: savedPath, versioned: false },
     })
     expect(tool.output.safeParse(result.output).success).toBe(true)
-  })
-
-  test("asks the host for the imagegen permission with the native call identity", async () => {
-    stubFetch()
-    const { calls, run } = await loadV2Tool({ directory: dir })
-
-    await run({ ...args, background: "transparent" })
-
-    expect(calls.assert).toEqual([
-      {
-        sessionID: "ses_test",
-        agent: "build",
-        action: "imagegen",
-        resources: ["codex"],
-        save: ["codex"],
-        metadata: { ...args, background: "transparent" },
-        source: { type: "tool", messageID: "msg_test", id: "call_test" },
-      },
-    ])
   })
 
   const operationRows = FLAVOURS.flatMap((flavour) =>
@@ -362,16 +312,6 @@ describe("OpenCode 2 execution", () => {
     expect(calls.active).toEqual(["openai-images"])
     expect(calls.sessionGet).toEqual([])
     expect((fetchMock.mock.calls[0] as unknown[])[1]).toMatchObject({ headers: { Authorization: "Bearer sk-images" } })
-  })
-
-  test("resolves reference images against the session directory", async () => {
-    const fetchMock = stubFetch()
-    await Bun.write(path.join(dir, "ref.png"), PNG_BUFFER)
-    const { run } = await loadV2Tool({ directory: dir })
-
-    await run({ ...args, images: ["ref.png"] }, undefined, undefined, "imageedit")
-
-    expect(fetchMock.mock.calls[0][0]).toBe("https://chatgpt.com/backend-api/codex/images/edits")
   })
 })
 

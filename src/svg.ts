@@ -258,7 +258,6 @@ export function inspectSvg(bytes: Uint8Array): SvgInspection {
         if (!withoutLeadingUrlSpace(attribute.value).startsWith("#"))
           refuse("it links to an external resource or embedded data")
       }
-      // A base URL makes a fragment such as "#a" resolve against another document.
       if (attribute.uri === XML_NAMESPACE && attribute.local === "base") {
         refuse("it sets xml:base, which can point its references at another document")
       }

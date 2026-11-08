@@ -118,19 +118,15 @@ const operationRows = FLAVOURS.flatMap((flavour) =>
 const args = { prompt: "a cat", out: "cat.png", size: SHARED_SIZE }
 
 describe("OpenCode 1 adapter", () => {
-  test("registers imagegen for text and imageedit with required references for codex", async () => {
-    const hooks = await plugin.server({} as never)
-
-    expect(Object.keys(hooks.tool ?? {})).toEqual(["imagegen", "imageedit"])
+  test("exposes the codex imagegen arguments, and imageedit with required references", async () => {
     expect(Object.keys((await loadTool(undefined, "codex")).args)).toEqual(GENERATE_ARGUMENTS)
     expect(Object.keys((await loadTool(undefined, "codex", "imageedit")).args)).toEqual(EDIT_ARGUMENTS)
   })
 
-  test("registers imagegen with its output controls, imageedit and the imagegen_models lookup for openai-api", async () => {
+  test("exposes the openai-api imagegen output controls, imageedit and the imagegen_models lookup arguments", async () => {
     selectBackendVariable("openai-api")
     const hooks = await plugin.server({} as never)
 
-    expect(Object.keys(hooks.tool ?? {})).toEqual(["imagegen", "imageedit", "imagegen_models"])
     expect(Object.keys(hooks.tool?.imagegen.args ?? {})).toEqual([
       ...GENERATE_ARGUMENTS,
       "output_format",
@@ -142,29 +138,33 @@ describe("OpenCode 1 adapter", () => {
     expect(Object.keys(hooks.tool?.imagegen_models.args ?? {})).toEqual(["query", "model"])
   })
 
-  test("registers the NanoGPT generation, editing and model information tools", async () => {
+  test("exposes the NanoGPT generation, editing and model information arguments", async () => {
     selectBackendVariable("nano-gpt")
     const hooks = await plugin.server({} as never)
 
-    expect(Object.keys(hooks.tool ?? {})).toEqual(["imagegen", "imageedit", "imagegen_models"])
     expect(Object.keys(hooks.tool?.imagegen.args ?? {})).toEqual(NANO_ARGUMENTS)
     expect(Object.keys(hooks.tool?.imageedit.args ?? {})).toEqual([...NANO_ARGUMENTS, "images"])
     expect(Object.keys(hooks.tool?.imagegen_models.args ?? {})).toEqual(["operation", "family", "query", "model"])
   })
 
-  test.each(FLAVOURS)("exposes the $backend descriptions and a description for every argument", async (flavour) => {
-    selectBackendVariable(flavour.backend)
-    const hooks = await plugin.server({} as never)
+  test.each(FLAVOURS)(
+    "registers exactly the tools the $backend backend declares, with their descriptions and argument descriptions",
+    async (flavour) => {
+      selectBackendVariable(flavour.backend)
+      const hooks = await plugin.server({} as never)
 
-    for (const declared of selectBackend(undefined).tools) {
-      const tool = hooks.tool?.[declared.name]
-      expect(tool?.description).toBe(declared.description)
-      for (const arg of Object.values(tool?.args ?? {})) {
-        // The SDK types args with its own Zod core type, which does not declare the description getter.
-        expect((arg as { description?: string }).description).toEqual(expect.stringMatching(/\S/))
+      const declared = selectBackend(undefined).tools
+      expect(Object.keys(hooks.tool ?? {})).toEqual(declared.map((tool) => tool.name))
+      for (const { name, description } of declared) {
+        const tool = hooks.tool?.[name]
+        expect(tool?.description).toBe(description)
+        for (const arg of Object.values(tool?.args ?? {})) {
+          // The SDK types args with its own Zod core type, which does not declare the description getter.
+          expect((arg as { description?: string }).description).toEqual(expect.stringMatching(/\S/))
+        }
       }
-    }
-  })
+    },
+  )
 
   test("returns the saved path as output text and { out, versioned } metadata", async () => {
     stubFetch()
@@ -220,27 +220,16 @@ describe("OpenCode 1 adapter", () => {
 
       const act = tool.execute(operation.args, v1ToolContext(dir, new AbortController().signal, ask))
 
-      await expect(act).rejects.toThrow(`credentials not configured.`)
-      await expect(act).rejects.toThrow(`\`opencode auth login --provider ${flavour.provider}\``)
+      const login = `\`opencode auth login --provider ${flavour.provider}\``
+      await expect(act).rejects.toThrow(
+        flavour.key
+          ? `${flavour.key.label} credentials not configured. Set ${flavour.key.variable} in the environment of the OpenCode process, or run ${login}.`
+          : `OpenAI ChatGPT OAuth credentials not configured. Run ${login}.`,
+      )
       expect(asks).toHaveLength(1)
       expect(fetchMock).not.toHaveBeenCalled()
     },
   )
-
-  test("does not read credentials when the permission is denied", async () => {
-    // Reaching the credential loader would report missing credentials instead of the denial.
-    process.env.OPENCODE_AUTH_CONTENT = "{not json"
-    const fetchMock = stubFetch()
-    const tool = await loadTool()
-    const ask: ToolContext["ask"] = async () => {
-      throw new Error("denied by the host")
-    }
-
-    const act = tool.execute(args, v1ToolContext(dir, new AbortController().signal, ask))
-
-    await expect(act).rejects.toThrow("denied by the host")
-    expect(fetchMock).not.toHaveBeenCalled()
-  })
 
   test("asks for imagegen_models on the openai-api resource before the model list request, and returns the text", async () => {
     const fetchMock = mock(async () => new Response(JSON.stringify({ object: "list", data: [] })))
@@ -315,18 +304,6 @@ describe.each(keyFlavours)("OpenCode 1 image API key of the $backend backend", (
     await tool.execute(operation.args, v1ToolContext(dir, new AbortController().signal, ask))
 
     expect(authorizations(fetchMock)).toEqual([`Bearer ${ENVIRONMENT_KEY}`])
-  })
-
-  test("names the variable and the sign-in command when neither holds a key", async () => {
-    process.env.OPENCODE_AUTH_CONTENT = "{}"
-    const tool = await loadTool(undefined, flavour.backend)
-    const { ask } = recordAsks()
-
-    const act = tool.execute(operation.args, v1ToolContext(dir, new AbortController().signal, ask))
-
-    await expect(act).rejects.toThrow(
-      `${label} credentials not configured. Set ${variable} in the environment of the OpenCode process, or run \`opencode auth login --provider ${flavour.provider}\`.`,
-    )
   })
 
   test("never uses the OpenAI chat sign-in or another backend's key", async () => {

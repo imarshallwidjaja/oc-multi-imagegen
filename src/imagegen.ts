@@ -155,7 +155,6 @@ export type LookupToolSpec<S extends ToolSchema, C extends CredentialSpec> = {
   description: string
   schema: S
   credential: C
-  // Asks the provider and returns the answer text.
   lookup: (credential: CredentialFor<C>, args: z.output<S>, signal: AbortSignal) => Promise<string>
 }
 
