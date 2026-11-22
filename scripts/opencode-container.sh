@@ -32,7 +32,7 @@ exec 3>&2 # lifecycle warnings go here, so they reach the terminal even while a 
 # Pinned by digest; the tag in each comment is what the digest resolved to when the runbook was validated.
 V1_IMAGE=ghcr.io/anomalyco/opencode@sha256:6ebc13097f2381301220abe9d1b2a54f50cd1603a910dc1c66e93d8f2c4e8ebb      # 1.19.3
 V1_FLOOR_IMAGE=ghcr.io/anomalyco/opencode@sha256:ecc3bf96ee55dad226d9cde50d79aaa8a1215c47860c0fcdc71570461bf438b8 # 1.18.29
-V2_IMAGE=ghcr.io/anomalyco/opencode@sha256:02998f912cc8bf84ce20ff9d9faa33225406c52f9d13f8f86b376490f1e28813      # 2.0.32
+V2_IMAGE=ghcr.io/anomalyco/opencode@sha256:be07cc4afd6d668d91b77accf1bc4338c87b39fbacc0a61666eb003781015f5a      # 2.3.2
 
 MARKER=.oc-multi-imagegen-sandbox
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -243,6 +243,8 @@ case $cmd in
     # permitted. tool-only: the plugin's tools alone, so the skill is denied. ask: the plugin's tools ask and nothing
     # else is permitted. The tools are imagegen and imageedit on both backends, and imagegen_models, which only the
     # openai-api backend registers.
+    # Only v2 allow permits execute, so a default OpenCode 2 run calls the tools through Code Mode. tool-only and ask
+    # leave it denied: OpenCode 2 then offers the tools directly, which tool-only exercises and the ask probe needs.
     # Everything else is denied, so the agent has no shell and cannot read the credential.
     # The optional backend is recorded for the host and reaches its containers as OC_MULTI_IMAGEGEN_BACKEND (base_args):
     # codex, the plugin's default, sets nothing; openai-api selects the official API. The plugin entries stay plain.
@@ -261,6 +263,7 @@ case $cmd in
     if [ "$host" = v2 ]; then
       if [ "$perm" = allow ]; then
         extra=',
+    { "action": "execute", "resource": "*", "effect": "allow" },
     { "action": "skill", "resource": "oc-multi-imagegen", "effect": "allow" }'
         for ext in $readable; do
           extra="$extra,

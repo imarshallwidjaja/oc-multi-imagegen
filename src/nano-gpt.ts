@@ -260,14 +260,14 @@ async function requestImage(
   return "inline" in payload ? payload.inline : downloadImage(call, payload.url, signal)
 }
 
-const requires = (sent: string) =>
-  `Requires a NanoGPT API key: the ${nanoGptCredential.environmentVariable} environment variable of the OpenCode process, or else the ${nanoGptCredential.provider} credential saved in OpenCode. ${sent} sent to NanoGPT, which bills the key's account.`
+const requires = (sent: string) => `Needs a NanoGPT API key; ${sent} sent to NanoGPT, which bills the account.`
+const KEY_DETAIL = `The key is ${nanoGptCredential.environmentVariable} in the OpenCode process environment, else the saved ${nanoGptCredential.provider} credential.`
 
 const SAVE_FAILURE_NOTE = `The image was not saved. ${CHARGE_NOTE}`
 
 export const nanoGptImagegen = {
   operation: "generate",
-  description: describeNanoImageTool("generate", requires("The prompt is")),
+  description: describeNanoImageTool("generate", requires("the prompt is"), KEY_DETAIL),
   schema: generateSchema,
   credential: nanoGptCredential,
   outputFormats: NANO_OUTPUT_FORMATS,
@@ -277,7 +277,7 @@ export const nanoGptImagegen = {
 
 export const nanoGptImageedit = {
   operation: "edit",
-  description: describeNanoImageTool("edit", requires("The prompt and reference images are")),
+  description: describeNanoImageTool("edit", requires("the prompt and reference images are"), KEY_DETAIL),
   schema: editSchema,
   credential: nanoGptCredential,
   outputFormats: NANO_OUTPUT_FORMATS,

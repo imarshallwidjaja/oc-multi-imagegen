@@ -276,7 +276,7 @@ describe("OpenAI Images API backend arguments", () => {
     expect(text).not.toMatch(/Codex|unverified|1254x1254|in the prompt sentence/)
   })
 
-  test("imageedit describes raster output only, and the generation-only formats as imagegen's", () => {
+  test("imageedit schema describes raster output only", () => {
     const edit = z.toJSONSchema(openaiApiImageedit.schema, { io: "input" }) as {
       properties: Record<string, { anyOf?: Array<{ enum?: string[] }>; description: string }>
     }
@@ -285,7 +285,6 @@ describe("OpenAI Images API backend arguments", () => {
     expect(Object.keys(edit.properties)).not.toContain("svg_model")
     expect(edit.properties.output_format.anyOf?.[0].enum).toEqual(["png", "jpeg", "webp"])
     expect(edit.properties.out.description).toContain("PNG, JPEG or WebP bytes")
-    expect(openaiApiImageedit.description).toContain("GIF and SVG come only from imagegen")
   })
 
   test("accepts every documented output format and the GIF limits at both ends", () => {
@@ -301,14 +300,12 @@ describe("OpenAI Images API backend arguments", () => {
     expect(parse({ size: "1024x1024", output_format: "webp", background: "transparent" }).success).toBe(true)
   })
 
-  test("documents the discovery step, the output controls and the GIF limits as tool limits", () => {
+  test("documents the output controls and the GIF limits as tool limits", () => {
     const schema = z.toJSONSchema(openaiApiImagegen.schema, { io: "input" }) as {
       properties: Record<string, { description: string }>
     }
 
-    expect(openaiApiImagegen.description).toContain("Call imagegen_models first")
-    expect(openaiApiImageedit.description).toContain("Call imagegen_models first")
-    expect(openaiApiImagegen.description).toContain("never a guessed one")
+    expect(schema.properties.size.description).toContain("Check the returned dimensions when they matter.")
     expect(schema.properties.out.description).toContain("PNG, JPEG, WebP, GIF or SVG")
     expect(schema.properties.frame_count.description).toContain("not a proven provider maximum")
     expect(schema.properties.frame_duration_ms.description).toContain("not a proven provider maximum")
@@ -481,11 +478,8 @@ describe("OpenAI model lookup", () => {
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  test("describes itself as the expected first step and as no proof of capability", () => {
-    expect(openaiApiModels.description).toContain("expected first step")
-    expect(openaiApiModels.description).toContain("GET /v1/models")
+  test("describes a listed model as no proof of capability", () => {
     expect(openaiApiModels.description).toContain("not proof that it supports SVG, GIF")
-    expect(openaiApiModels.description).toContain("OC_MULTI_IMAGEGEN_OPENAI_API_KEY")
   })
 })
 

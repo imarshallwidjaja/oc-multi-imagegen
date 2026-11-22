@@ -32,7 +32,7 @@ Each host adapter selects the backend once and registers its declared tools. Eve
 
 ## Bundled skill
 
-There is one authored skill at `skills/oc-multi-imagegen/SKILL.md`. It teaches image technique; tool arguments and backend limits remain in the tool descriptions and model information.
+There is one authored skill at `skills/oc-multi-imagegen/SKILL.md`. It teaches image technique; tool arguments and backend limits remain in the tool descriptions, their argument descriptions and model information.
 
 - OpenCode 1's `config` hook adds the package's absolute `skills/` directory to `skills.paths` once, preserving existing paths and URLs.
 - OpenCode 2 registers the skill through its skill transform and leaves an existing skill with the same ID alone.

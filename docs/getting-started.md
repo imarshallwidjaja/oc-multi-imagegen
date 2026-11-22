@@ -8,7 +8,7 @@ The quickest path is the default Codex backend, which uses your ChatGPT sign-in 
 
 Add `oc-multi-imagegen` to your OpenCode configuration, keeping any existing plugins. OpenCode downloads the package and its dependencies from npm when the server starts.
 
-The support floors are OpenCode **1.18.29** and **2.0.32**; see [compatibility and recorded coverage](backends.md#compatibility-and-recorded-coverage) for what has actually been checked.
+The support floors are OpenCode **1.18.29** and **2.3.2**; see [compatibility and recorded coverage](backends.md#compatibility-and-recorded-coverage) for what has actually been checked.
 
 ### OpenCode 1
 

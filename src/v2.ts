@@ -78,8 +78,9 @@ type SkillEditor = Parameters<Parameters<Plugin.Context["skill"]["transform"]>[0
 type ToolEditor = Parameters<Parameters<Plugin.Context["tool"]["transform"]>[0]>[0]
 type ToolCallContext = Parameters<Parameters<ToolEditor["add"]>[0]["execute"]>[1]
 
-// OpenCode 2 entry point. Each tool is called directly (not through Code Mode, no namespace), so it is available to
-// agents that allow it without also allowing the execute tool.
+// OpenCode 2 entry point. Each tool is registered for Code Mode without a namespace: the host defers its schema behind
+// the execute tool as tools.imagegen, tools.imageedit or tools.imagegen_models, and the permission action stays the
+// bare tool name. When an agent's permissions deny execute, OpenCode 2.3.2 and later expose the tools directly instead.
 export const setup: Plugin.Plugin["setup"] = async (ctx) => {
   const backend = selectBackend(ctx.options)
   const { credential: spec } = backend
@@ -133,7 +134,7 @@ export const setup: Plugin.Plugin["setup"] = async (ctx) => {
         description: tool.description,
         input: tool.schema,
         ...(tool.kind === "image" ? { output: resultSchema } : {}),
-        options: { codemode: false },
+        options: { codemode: true },
         async execute(input, context) {
           const result = await invokeTool(tool, input, {
             providerAccess: () => providerAccess(context),
@@ -141,7 +142,7 @@ export const setup: Plugin.Plugin["setup"] = async (ctx) => {
             resolveDirectory: async () => (await ctx.session.get({ sessionID: context.sessionID })).location.directory,
           })
           return result.image
-            ? { output: result.image, content: result.text, metadata: result.image }
+            ? { output: { ...result.image, message: result.text }, content: result.text, metadata: result.image }
             : { content: result.text }
         },
       })

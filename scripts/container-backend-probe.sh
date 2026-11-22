@@ -88,12 +88,12 @@ lists_own_skill() { case $reply in *'{"id":"oc-multi-imagegen"'*) ;; *) return 1
 
 # OpenCode 2's plugin list (GET /api/plugin) holds one entry per configured plugin, and the host adds an entry only
 # after that plugin's setup has returned: state active when setup succeeded, failed with the error when it did not
-# (packages/core/src/plugin.ts at the pinned v2.0.32). Registrations made during setup are readable at once.
-# own_plugin prints the entry for the plugin this container configures, /pluginpkg, which the host lists by its entry
-# point, /pluginpkg/server.js. An entry may lack its id, so entries are split where an id or a source opens one.
+# (observed on the pinned v2.3.2). Registrations made during setup are readable at once. own_plugin prints the entry
+# for the plugin this container configures, which the host lists by its configured directory, /pluginpkg. An entry
+# may lack its id, as a failed one can, so entries are split where an id or a source opens one.
 own_plugin() {
   printf '%s' "$reply" | sed -e 's/{"id":"/\n&/g' -e 's/{"source":/\n&/g' |
-    grep '"source":{"type":"local","path":"/pluginpkg/server.js"}'
+    grep '"source":{"type":"local","path":"/pluginpkg"}'
 }
 plugin_settled() {
   case $reply in '{'*'"data":['*']}') ;; *) return 1 ;; esac

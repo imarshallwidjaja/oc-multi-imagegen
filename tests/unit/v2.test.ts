@@ -69,9 +69,10 @@ describe("OpenCode 2 tool registration", () => {
       properties: Record<string, { type: string }>
     }
 
-    expect(schema.required).toEqual(["out", "versioned"])
+    expect(schema.required).toEqual(["out", "versioned", "message"])
     expect(schema.properties.out.type).toBe("string")
     expect(schema.properties.versioned.type).toBe("boolean")
+    expect(schema.properties.message.type).toBe("string")
   })
 
   test("the host-validated input keeps null optional arguments", async () => {
@@ -111,8 +112,9 @@ describe("OpenCode 2 backend selection", () => {
     for (const [index, tool] of registered.entries()) {
       expect(tool.description).toBe(declared[index].description)
       expect(tool.input).toBe(declared[index].schema)
-      // Direct tools run without the execute tool; a permission override would hide the tool under its own name.
-      expect(tool.options).toEqual({ codemode: false })
+      // Code Mode without a namespace keeps the bare tool name as the call path and the permission action; a
+      // namespace or permission override would rename both.
+      expect(tool.options).toEqual({ codemode: true })
       expect("output" in tool).toBe(declared[index].kind === "image")
     }
   })
@@ -209,20 +211,34 @@ describe("OpenCode 2 skill registration", () => {
 })
 
 describe("OpenCode 2 execution", () => {
-  test("returns structured output, the human message as content, and { out, versioned } metadata", async () => {
+  // Code Mode returns only `output` when a tool declares one, so the report must travel inside it.
+  test("returns structured output with the report, the report as content, and { out, versioned } metadata", async () => {
     stubFetch()
     const { run, tool } = await loadV2Tool({ directory: dir })
 
     const result = await run(args)
 
     const savedPath = path.join(dir, "cat.png")
+    const message = `Generated image saved to ${savedPath}. The image is PNG, 1x1 pixels.`
     expect(await readFile(savedPath)).toEqual(PNG_BUFFER)
     expect(result).toEqual({
-      output: { out: savedPath, versioned: false },
-      content: `Generated image saved to ${savedPath}. The image is PNG, 1x1 pixels.`,
+      output: { out: savedPath, versioned: false, message },
+      content: message,
       metadata: { out: savedPath, versioned: false },
     })
     expect(tool.output.safeParse(result.output).success).toBe(true)
+  })
+
+  test("carries the Codex requested-settings disclosure in the structured output", async () => {
+    stubFetch()
+    const { run } = await loadV2Tool({ directory: dir })
+
+    const result = await run({ ...args, model: "gpt-image-2", quality: "high" })
+
+    expect(result.output.message).toContain(
+      "Requested model gpt-image-2 and quality high; the Codex response does not report which settings it applied, so they are unverified.",
+    )
+    expect(result.content).toBe(result.output.message)
   })
 
   const operationRows = FLAVOURS.flatMap((flavour) =>
@@ -292,11 +308,10 @@ describe("OpenCode 2 execution", () => {
   test("the imagegen_models lookup asks for its permission with the call identity, uses the image key and reads no session", async () => {
     const fetchMock = mock(async () => new Response(JSON.stringify({ object: "list", data: [] })))
     globalThis.fetch = fetchMock as unknown as typeof fetch
-    const { calls, run, toolNamed } = await loadV2Tool({ directory: dir, backend: "openai-api" })
+    const { calls, run } = await loadV2Tool({ directory: dir, backend: "openai-api" })
 
     const result = await run({ query: "image" }, undefined, undefined, "imagegen_models")
 
-    expect(toolNamed("imagegen_models").options).toEqual({ codemode: false })
     expect(result).toEqual({ content: expect.stringContaining('that contain "image": 0 of 0 model IDs') } as never)
     expect(calls.assert).toEqual([
       {

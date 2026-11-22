@@ -1,6 +1,6 @@
 import { z } from "zod"
 import { listFormatNames, RASTER_FORMATS } from "./image-format"
-import { defineInfoTool, SKILL_SENTENCE, VERSIONING } from "./imagegen"
+import { defineInfoTool, describeEditTool, describeGenerationTool, RASTER_MEDIUM } from "./imagegen"
 import {
   GENERATION_MOVED_ARGUMENTS,
   IMAGEEDIT_TOOL,
@@ -456,7 +456,7 @@ function commonShape(operation: Operation) {
       `Optional quality tier, only for models that list it in ${MODELS_TOOL} (${modelsWith("quality")}). Omit it to use the provider default.`,
     ),
     background: optionalControl(
-      `Optional background (${valuesOf("background")}), only for models that list it in ${MODELS_TOOL} (${modelsWith("background")}). Use transparent for a cut-out instead of asking in the prompt; the returned alpha can be soft and the tool does not check it.`,
+      `Optional background (${valuesOf("background")}), only for models that list it in ${MODELS_TOOL} (${modelsWith("background")}). With those models use transparent for a cut-out instead of asking in the prompt; with other models request transparency in the prompt. The returned alpha can be soft and the tool does not check it: a filename, RGBA channel or painted checkerboard does not prove transparency.`,
     ),
     seed: z
       .number()
@@ -631,9 +631,11 @@ function answerModels(args: z.output<typeof modelsSchema>): string {
   return describeList(matches, MODELS.length)
 }
 
+// The no-retry policy leads the description; the rest of the model-choice guidance follows the lead.
+const NO_SILENT_RETRY = "Never switch a requested model silently or repeat an unchanged call."
 const MODEL_CHOICE_GUIDANCE = [
   `Choose a model by the task: use the model the operator named when this tool supports it; otherwise pick the supported model that fits and give a short reason. Ask the operator only when required input is missing, or when the request conflicts with a model, capability, cost or requirement they gave. A model choice needs no approval of its own.`,
-  `If the provider returns an error, read its message and code, correct only an input that is demonstrably wrong, and do not repeat an unchanged call. Do not retry authentication, balance or rate-limit errors, and never switch a requested model silently: report what blocked the work and ask the operator to decide.`,
+  `If the provider returns an error, read its message and code, and correct only an input that is demonstrably wrong. Do not retry authentication, balance or rate-limit errors: report what blocked the work and ask the operator to decide.`,
 ].join(" ")
 
 function modelMenu(operation: Operation): string {
@@ -642,41 +644,37 @@ function modelMenu(operation: Operation): string {
     .join("; ")
 }
 
-const ALPHA_GUIDANCE = `For a cut-out, among the supported families the background control exists only for ${modelsWith("background")}; for other families request transparency in the prompt without that control. Inspect actual alpha and content: a filename, RGBA channel or painted checkerboard does not prove transparency.`
-
 // The sentences both tools share about controls and the saved result.
-const CONTROLS = `Optional controls (${CONTROL_NAMES.join(", ")}) each exist only for some models; ${MODELS_TOOL} lists them locally without a key, and an unsupported control or value is rejected before any request.`
+const CONTROLS =
+  "Each optional control exists only for some models; an omitted control is not sent, and an unsupported control or value is rejected before any request."
 const ONE_IMAGE = `Exactly one image is requested; native ${SAVED_FORMATS} responses are saved.`
-const RESULT =
-  "Returns the actual saved absolute path, format and pixel dimensions. The extension is adjusted to match the bytes; use the returned out path for reads or subsequent edits."
+const SIZE_NOT_ENFORCED =
+  "The requested size is not enforced; the result reports the actual format and pixel dimensions, so check them when they matter."
 
-export function describeNanoImageTool(operation: Operation, requires: string): string {
-  return operation === "generate"
-    ? [
-        `Generate one new raster image from a text prompt through NanoGPT. To change or combine existing images use ${IMAGEEDIT_TOOL} instead. ${SKILL_SENTENCE}`,
-        requires,
-        `Required model, one of: ${modelMenu("generate")}. ${CONTROLS} Omitted controls are not sent, so NanoGPT's defaults apply. ${ONE_IMAGE}`,
-        "Best for photos, illustrations, textures and concepts; build icons, logos, charts and anything that must scale or stay editable as SVG or code.",
-        ALPHA_GUIDANCE,
-        MODEL_CHOICE_GUIDANCE,
-        `${RESULT} The requested size is not enforced, so check the dimensions when they matter. ${VERSIONING}`,
-      ].join(" ")
-    : [
-        `Edit or combine existing local images into one new raster image through NanoGPT, guided by a prompt. To create an image from text alone use ${IMAGEGEN_TOOL}. ${SKILL_SENTENCE}`,
-        requires,
-        `Required images (local PNG, JPEG or WebP paths) and model, one of: ${modelMenu("edit")}. The count limit depends on the model. ${CONTROLS} Omitted controls are not sent. ${ONE_IMAGE}`,
-        "The result is a newly generated image, so areas the prompt does not mention can change; use an image editor when pixels must stay identical. Name each reference's role in the prompt and what to keep.",
-        ALPHA_GUIDANCE,
-        MODEL_CHOICE_GUIDANCE,
-        `${RESULT} ${VERSIONING}`,
-      ].join(" ")
+export function describeNanoImageTool(operation: Operation, requires: string, keyDetail: string): string {
+  const description = {
+    subject: "NanoGPT",
+    discovery: `Call ${MODELS_TOOL} first.`,
+    requires,
+    critical: NO_SILENT_RETRY,
+    details: [
+      keyDetail,
+      `Required model, one of: ${modelMenu(operation)}.`,
+      CONTROLS,
+      ONE_IMAGE,
+      ...(operation === "generate" ? [RASTER_MEDIUM] : []),
+      MODEL_CHOICE_GUIDANCE,
+      SIZE_NOT_ENFORCED,
+    ],
+  }
+  return operation === "generate" ? describeGenerationTool(description) : describeEditTool(description)
 }
 
 export const nanoModelsTool = defineInfoTool({
   name: MODELS_TOOL,
   description: [
     `List the NanoGPT image models this plugin supports, or describe one exactly. It answers from a table inside the plugin: no key, permission prompt, file access or network request, and no cost. Use it before choosing a model for ${IMAGEGEN_TOOL} or ${IMAGEEDIT_TOOL}.`,
-    "Without model it lists the supported models, filtered by operation, family or query words; with an exact model ID it returns that model's purpose, control values, limits and argument schema. Controls come from provider documentation and public model metadata. Sampled live workflow coverage: https://github.com/imarshallwidjaja/oc-multi-imagegen/blob/main/docs/backends.md#nanogpt-live-workflow-coverage.",
+    "Without model it lists the supported models, filtered by operation, family or query words; with an exact model ID it returns that model's purpose, control values, limits, sources and argument schema.",
   ].join(" "),
   schema: modelsSchema,
   answer: answerModels,

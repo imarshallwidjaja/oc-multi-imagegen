@@ -31,7 +31,7 @@ export function outField(outputFormats: readonly OutputFormat[]) {
   return z
     .string()
     .describe(
-      `Destination path, relative to the project directory unless absolute. Saves native ${listFormatNames(outputFormats)} bytes without conversion, adjusting the extension to match. An existing target is kept and the new image gets a -vN suffix. Use the returned out path for subsequent reads or edits.`,
+      `Destination path, relative to the project directory unless absolute. Saves native ${listFormatNames(outputFormats)} bytes without conversion, adjusting the extension to match. An existing file, even one a concurrent call created first, is kept and the image gets the first free -vN suffix, up to -v999.`,
     )
 }
 
@@ -77,7 +77,7 @@ function controlFields(spec: ArgsSpec) {
       .nullish()
       .describe(
         spec.background ??
-          "Optional background requested from the backend; defaults to opaque. Use transparent for a cut-out instead of asking for one in the prompt. The returned alpha can be soft, and the tool does not check or clean it up.",
+          "Optional background; defaults to opaque. Use transparent for a cut-out instead of asking for one in the prompt. The returned alpha can be soft, and the tool does not check or clean it up.",
       ),
     model: z.string().min(1).nullish().describe(spec.model),
     quality: z.string().min(1).nullish().describe(spec.quality),
@@ -112,7 +112,7 @@ export function editShape(spec: EditArgsSpec) {
         [
           `Required local reference image paths, 1 to ${spec.maxImages}, relative to the project directory unless absolute; they are sent in order, so call them Image 1, Image 2 in the prompt.`,
           spec.imagesNote,
-          "Their contents are uploaded to the provider. The result is a generative edit: areas the prompt does not mention can still change, so pixel-exact edits belong in an image editor.",
+          "Their contents are uploaded to the provider.",
         ]
           .filter(Boolean)
           .join(" "),
@@ -121,12 +121,18 @@ export function editShape(spec: EditArgsSpec) {
   }
 }
 
-// Structured result of a saved image. It matches the metadata both hosts report.
+// Structured result of a saved image on OpenCode 2: the { out, versioned } metadata both hosts report, plus the report
+// text. Code Mode returns only this output when a tool declares one, so the report must be part of it.
 export const resultSchema = z.object({
   out: z.string().describe("Actual absolute path of the saved image file. Use this path for reads or edits."),
   versioned: z
     .boolean()
     .describe("True only when the format-adjusted target existed and a -vN collision suffix was used."),
+  message: z
+    .string()
+    .describe(
+      "Human-readable report with the saved path, format, dimensions and any requested-vs-verified settings note.",
+    ),
 })
 
 // Hosts can call execute without validating arguments first, so execution parses them again with the complete schema.

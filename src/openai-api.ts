@@ -91,11 +91,11 @@ function sizeField(note = "") {
       if (problem) ctx.addIssue({ code: "custom", message: `Unsupported size "${size}". ${problem}` })
     })
     .describe(
-      `Requested image size as ${SIZE_RULE}, for example 1536x864. It is sent to the API unchanged; choose it by aspect ratio. Larger sizes cost more, resolutions above 2560x1440 are experimental, and the API rejects sizes the model does not support.${note}`,
+      `Requested image size as ${SIZE_RULE}, for example 1536x864. It is sent to the API unchanged; choose it by aspect ratio. Larger sizes cost more, resolutions above 2560x1440 are experimental, and the API rejects sizes the model does not support. Check the returned dimensions when they matter.${note}`,
     )
 }
 
-const MODEL = `Optional model name, sent to the API unchanged. Defaults to ${DEFAULT_MODEL}. Call ${MODELS_TOOL} first to see the image models this key lists.`
+const MODEL = `Optional model name, sent to the API unchanged. Defaults to ${DEFAULT_MODEL}; ${MODELS_TOOL} lists the image models this key can use.`
 const QUALITY = `Optional quality value, sent to the API unchanged. Defaults to ${DEFAULT_QUALITY}.`
 
 const generationArgs: ArgsSpec = {
@@ -145,7 +145,7 @@ const generateSchema = strictArgs(
       .max(FRAME_COUNT.max)
       .nullish()
       .describe(
-        `Optional number of GIF frames, ${FRAME_COUNT.min} to ${FRAME_COUNT.max}; only with output_format gif. Omitted, the API chooses (documented default 9). This is the tool's limit, not a proven provider maximum.`,
+        `Optional number of GIF frames, ${FRAME_COUNT.min} to ${FRAME_COUNT.max}; only with output_format gif. Omitted, the API chooses (documented default 9). This is the tool's limit, not a proven provider maximum. All frames must fit the model's pixel budget: if the API rejects the request, use a smaller size or fewer frames.`,
       ),
     frame_duration_ms: z
       .number()
@@ -246,21 +246,29 @@ async function post(url: string, { key }: KeyCredential, body: Record<string, un
   })
 }
 
-const REQUIRES = `Requires an OpenAI Images API key: the ${openaiApiCredential.environmentVariable} environment variable of the OpenCode process, or else the ${openaiApiCredential.provider} credential saved in OpenCode.`
-const MODEL_CHOICE = `Call ${MODELS_TOOL} first to see which image models this key lists, then choose model, or omit it to send ${DEFAULT_MODEL}; model and quality (default ${DEFAULT_QUALITY}) are passed to the API unchanged. Size is a native WIDTHxHEIGHT sent to the API unchanged.`
+const KEY_SOURCE = `${openaiApiCredential.environmentVariable} in the OpenCode process environment, else the saved ${openaiApiCredential.provider} credential`
+const REQUIRES = `Requires an OpenAI Images API key: ${KEY_SOURCE}.`
+const DISCOVERY = `Call ${MODELS_TOOL} first.`
+const KEY_DETAIL = `The key is ${KEY_SOURCE}.`
+const SIZE_IS_REQUESTED = "Size is a request, so check the returned dimensions when they matter."
+const ONE_IMAGE = "Each call makes one image."
+const NO_REPEAT = "Do not repeat a rejected call unchanged."
 
 export const openaiApiImagegen = {
   operation: "generate",
   description: describeGenerationTool({
     subject: "the OpenAI Images API",
-    requires: `${REQUIRES} The prompt is sent to OpenAI.`,
-    media: {
-      what: "one image (a raster, an animated GIF or a static SVG)",
-      medium:
-        "Rasters suit photos, illustrations, textures and concepts. For an icon, logo or simple illustration that must scale or stay editable, output_format svg returns a static vector document; charts, diagrams and exact layouts are still better built as SVG or code directly.",
-      saves: `Saves the native ${listFormatNames(OUTPUT_FORMATS)} bytes and returns the actual absolute path and format: pixel dimensions for rasters, the header's frame size for GIF (frames and animation are not checked), and the viewBox or width and height for SVG, which are vector units. An SVG is refused unless it is a static vector document without scripts, external resources or embedded rasters. The extension is adjusted to match; use the returned out path for reads or subsequent edits. Size is a request, so check the dimensions when they matter.`,
-    },
-    controls: `${MODEL_CHOICE} output_format is ${outputFormatValues(OUTPUT_FORMATS)}. For gif, size is each frame, frame_count (${FRAME_COUNT.min} to ${FRAME_COUNT.max}) and frame_duration_ms (${FRAME_DURATION_MS.min} to ${FRAME_DURATION_MS.max}) are optional tool limits, and all frames must fit the model's pixel budget: if the API rejects the request, use a smaller size or fewer frames. For svg, the API renders a reference image and an author model turns it into vectors; set svg_model only when the operator names one or the API asks for it, never a guessed one, and do not repeat a rejected call unchanged. A transparent background needs png or webp. There is no image-count control.`,
+    what: "one image (raster, animated GIF or static SVG)",
+    discovery: DISCOVERY,
+    requires: "Needs an OpenAI Images API key; the prompt is sent to OpenAI.",
+    critical: NO_REPEAT,
+    details: [
+      KEY_DETAIL,
+      "Rasters suit photos, illustrations, textures and concepts. For an icon, logo or simple illustration that must scale or stay editable, output_format svg returns a static vector document; charts, diagrams and exact layouts are still better built as SVG or code directly.",
+      "The result reports pixel dimensions for rasters, the header's frame size for GIF (frames and animation are not checked), and the viewBox or width and height for SVG, in vector units. An SVG is refused unless it is a static vector document without scripts, external resources or embedded rasters.",
+      SIZE_IS_REQUESTED,
+      ONE_IMAGE,
+    ],
   }),
   schema: generateSchema,
   credential: openaiApiCredential,
@@ -283,9 +291,10 @@ export const openaiApiImageedit = {
   operation: "edit",
   description: describeEditTool({
     subject: "the OpenAI Images API",
-    requires: `${REQUIRES} The prompt and reference images are sent to OpenAI.`,
-    references: `Required images: 1 to ${MAX_REFERENCE_IMAGES} local PNG, JPEG or WebP paths.`,
-    controls: `${MODEL_CHOICE} output_format is ${outputFormatValues(EDIT_OUTPUT_FORMATS)}; GIF and SVG come only from ${IMAGEGEN_TOOL}. A transparent background needs png or webp. There is no image-count control.`,
+    discovery: DISCOVERY,
+    requires: "Needs an OpenAI Images API key; the prompt and images are sent to OpenAI.",
+    critical: `GIF and SVG come only from ${IMAGEGEN_TOOL}. ${NO_REPEAT}`,
+    details: [KEY_DETAIL, SIZE_IS_REQUESTED, ONE_IMAGE],
   }),
   schema: editSchema,
   credential: openaiApiCredential,
@@ -303,9 +312,9 @@ export const openaiApiImageedit = {
 export const openaiApiModels = defineLookupTool({
   name: MODELS_TOOL,
   description: [
-    `List the OpenAI image models this key can use now, from OpenAI's GET /v1/models, or check one exact model ID. Call it before choosing a model for ${IMAGEGEN_TOOL} or ${IMAGEEDIT_TOOL}: it is the expected first step of OpenAI image work.`,
-    `Without arguments it lists the gpt-image-* and chatgpt-image-* IDs and marks the default, ${DEFAULT_MODEL}; query searches every listed ID with words that must all appear, for example to find an author model for svg_model; model checks one ID.`,
+    `List the OpenAI image models this key can use now, from OpenAI's GET /v1/models, or check one exact model ID. Call it first, before choosing a model for ${IMAGEGEN_TOOL} or ${IMAGEEDIT_TOOL}.`,
     `${REQUIRES} Each call asks for permission and sends one GET request with the key; it generates nothing, and the answer is not cached or retried.`,
+    `Without arguments it lists the gpt-image-* and chatgpt-image-* IDs and marks the default, ${DEFAULT_MODEL}.`,
     `The API reports only each ID, creation date, owner and shutdown date: a listed model is not proof that it supports SVG, GIF, a size or any other feature, and both image tools still send any model ID unchanged.`,
   ].join(" "),
   schema: openaiModelsSchema,

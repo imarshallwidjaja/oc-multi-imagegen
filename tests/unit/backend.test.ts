@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { z } from "zod"
 import { selectBackend } from "../../src/backend"
 import plugin from "../../src/index"
+import { SKILL_NAME } from "../../src/skill"
 import { isolateEnvironment } from "./fixtures"
 import { loadV2Tool } from "./hosts"
 
@@ -53,6 +54,56 @@ describe("selectBackend", () => {
     )
     expect(described).toEqual(expected)
   })
+
+  // OpenCode 2.3.2's Code Mode catalog shows only the first line of a description and cuts a line longer than 500
+  // characters to its first 497 (DESCRIPTION_LIMIT - 3) plus "...". Each description is therefore one line whose first
+  // 497 characters carry the routing, skill, discovery, credential and critical rules of the tool.
+  const CODE_MODE_PREVIEW = 497
+  const credentialCue = { codex: "ChatGPT OAuth", "openai-api": "OpenAI Images API key", "nano-gpt": "NanoGPT API key" }
+  const codexUnverified =
+    "Model and quality are sent unchanged but unverified; the result separates requested from verified settings."
+  const openaiNoRepeat = "Do not repeat a rejected call unchanged."
+  const nanoNoRetry = "Never switch a requested model silently or repeat an unchanged call."
+  const criticalCue: Record<string, Record<string, string[]>> = {
+    codex: { imagegen: [codexUnverified], imageedit: [codexUnverified] },
+    "openai-api": {
+      imagegen: [openaiNoRepeat],
+      imageedit: ["GIF and SVG come only from imagegen.", openaiNoRepeat],
+      imagegen_models: [
+        "GET /v1/models",
+        "OC_MULTI_IMAGEGEN_OPENAI_API_KEY",
+        "openai-images",
+        "permission",
+        "not cached or retried.",
+      ],
+    },
+    "nano-gpt": { imagegen: [nanoNoRetry], imageedit: [nanoNoRetry] },
+  }
+  test.each(["codex", "openai-api", "nano-gpt"] as const)(
+    "each %s tool description is one line that leads with its critical rules",
+    (backend) => {
+      process.env.OC_MULTI_IMAGEGEN_BACKEND = backend
+      for (const tool of selectBackend(undefined).tools) {
+        expect(tool.description).not.toContain("\n")
+        const preview = tool.description.slice(0, CODE_MODE_PREVIEW)
+        const expected =
+          tool.kind === "image"
+            ? [
+                tool.name === "imagegen" ? "use imageedit" : "use imagegen",
+                SKILL_NAME,
+                credentialCue[backend],
+                "sent to",
+                ...(backend === "codex" ? [] : ["Call imagegen_models first"]),
+                ...(tool.name === "imageedit" ? ["pixel-exact edits need an image editor"] : []),
+                ...criticalCue[backend][tool.name],
+                "Use the returned out path for reads or edits.",
+              ]
+            : ["before choosing a model for imagegen or imageedit", ...(criticalCue[backend][tool.name] ?? [])]
+        for (const cue of expected)
+          expect({ tool: tool.name, preview }).toEqual({ tool: tool.name, preview: expect.stringContaining(cue) })
+      }
+    },
+  )
 
   test.each([
     ["", "is empty"],

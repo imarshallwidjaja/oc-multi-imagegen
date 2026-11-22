@@ -3,10 +3,8 @@ import { existsSync, readFileSync } from "node:fs"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { selectBackend } from "../../src/backend"
 import { loadPackagedSkill, SKILL_FILE, SKILL_NAME, SKILLS_DIRECTORY } from "../../src/skill"
 import { isolateEnvironment } from "./fixtures"
-import { selectBackendVariable } from "./hosts"
 
 isolateEnvironment()
 let dir: string
@@ -43,17 +41,6 @@ describe("packaged skill", () => {
 
     expect(Bun.YAML.parse(yaml)).toEqual({ name: skill.name, description: skill.description })
   })
-
-  test.each(["codex", "openai-api", "nano-gpt"] as const)(
-    "every generating or editing tool description points to the skill by name for %p",
-    (backend) => {
-      selectBackendVariable(backend)
-
-      const tools = selectBackend(undefined).tools.filter((tool) => tool.kind === "image")
-      expect(tools.length).toBeGreaterThan(0)
-      for (const tool of tools) expect(tool.description).toContain(SKILL_NAME)
-    },
-  )
 
   test.each([
     ["has no frontmatter", "# Body\n", "no frontmatter"],

@@ -54,7 +54,9 @@ Rules go in `permissions`, with the broad rule first and the narrower ones last:
 
 For the OpenAI Images API or NanoGPT, append an allow rule for `imagegen_models`. To restrict an image action to one backend, set its `resource` to that backend ID, such as `openai-api` or `nano-gpt`.
 
-All image tools are direct tools, so allowing them doesn't require allowing OpenCode 2's `execute` tool.
+On OpenCode 2 the plugin registers `imagegen`, `imageedit` and `imagegen_models` for Code Mode without a namespace. Inside `execute`, agents call them as `tools.imagegen`, `tools.imageedit` and `tools.imagegen_models`. The permission actions stay the bare tool names (`imagegen`, `imageedit`, `imagegen_models`) on the backend resource, so the rules above apply unchanged.
+
+An agent that uses Code Mode needs `execute` allowed alongside the image actions. On OpenCode 2.3.2 and later, an agent whose rules deny `execute` gets the allowed image tools as direct tools instead.
 
 ## Skills and model information
 

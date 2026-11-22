@@ -165,7 +165,9 @@ Local evidence is retained at `/tmp/opencode/nanogpt-both-live-20261102/live/rep
 | Host | Support floor | Recorded coverage |
 | --- | --- | --- |
 | OpenCode 1 | 1.18.29 | 1.19.3: real-agent Codex, OpenAI API and NanoGPT runs. Floor: plugin/skill load and OpenAI API sign-in registration only. |
-| OpenCode 2 | 2.0.32 | 2.0.32: real-agent Codex, OpenAI API and NanoGPT runs. |
+| OpenCode 2 | 2.3.2 | 2.0.32: real-agent Codex, OpenAI API and NanoGPT runs, with the image tools registered as direct tools. No live run has used 2.3.2 or Code Mode registration. |
+
+The OpenCode 2 floor is 2.3.2 because the plugin registers its tools for Code Mode, and that registration relies on two host behaviors. OpenCode exposes Code Mode tools as direct tools to an agent whose rules deny `execute` from 2.2.0 (see [permissions](permissions.md#opencode-2)), and shows 500-character description previews in the inline catalog from 2.3.1. Both behaviors were checked against the 2.3.2 source.
 
 The Codex container runs covered skill loading and image generation before backend selection existed. OpenAI API runs covered generation and a reference edit on each host, including environment-key precedence and, in an earlier run, saved keys. Intermediate or newer host versions aren't established by those runs. One recorded run, on OpenCode 1.19.3 and 2.0.32, exercised `imageedit` on Codex and the OpenAI Images API: the agent generated with `imagegen` and edited that result with `imageedit`, and every call completed. The earlier recorded reference edits on those backends predate `imageedit`: each was an `imagegen` call with `images`. The [container runbook](https://github.com/imarshallwidjaja/oc-multi-imagegen/blob/main/docs/container-testing.md) retains the recorded evidence and source identities.
 

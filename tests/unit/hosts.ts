@@ -311,7 +311,7 @@ export type RegisteredTool = {
     input: unknown,
     context: ReturnType<typeof v2ToolContext>,
   ) => Promise<{
-    output: { out: string; versioned: boolean }
+    output: { out: string; versioned: boolean; message: string }
     content: string
     metadata: { out: string; versioned: boolean }
   }>

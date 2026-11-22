@@ -1029,17 +1029,20 @@ describe("opencode-container.sh host configuration", () => {
       skill: { "*": "deny", "oc-multi-imagegen": "allow" },
       read: { "*": "deny", ...Object.fromEntries(SAVED_EXTENSIONS.map((ext) => [`*.${ext}`, "allow"])) },
     })
+    // On OpenCode 2 the default also permits execute, so the agent can reach the tools through Code Mode.
     expect(configOf(sandbox, "v2").permissions).toEqual([
       { action: "*", resource: "*", effect: "deny" },
       { action: "imagegen", resource: "*", effect: "allow" },
       { action: "imageedit", resource: "*", effect: "allow" },
       { action: "imagegen_models", resource: "*", effect: "allow" },
+      { action: "execute", resource: "*", effect: "allow" },
       { action: "skill", resource: "oc-multi-imagegen", effect: "allow" },
       ...SAVED_EXTENSIONS.map((ext) => ({ action: "read", resource: `*.${ext}`, effect: "allow" })),
     ])
   })
 
-  test("tool-only permits the plugin's tools and leaves the skill denied, and ask permits nothing without a prompt", async () => {
+  // Neither mode permits execute, so OpenCode 2 offers the image tools directly instead of through Code Mode.
+  test("tool-only permits the plugin's tools and leaves the skill and execute denied, and ask permits nothing without a prompt", async () => {
     const c = container()
     const sandbox = await c.ready()
 
@@ -1500,7 +1503,7 @@ describe("container-skill-probe.sh", () => {
 // what FAKE_REGISTERED and FAKE_PROVIDER_ENTRY say the host registered, with the openai-images methods in FAKE_METHODS.
 // Like OpenCode 2, it lists a connection for the plugin's variable when a registered env method names it and the
 // probe's own environment sets it. FAKE_PLUGIN picks OpenCode 2's plugin list entry for /pluginpkg, in the shape the
-// pinned host returns: active, failed, a failed entry without an id (unidentified), or missing (setup has not
+// pinned host returns (2.3.2 lists the configured directory, not the entry point): active, failed, a failed entry without an id (unidentified), or missing (setup has not
 // returned). FAKE_PLUGIN_UNLOADED leaves the plugin's skill out of OpenCode 2's skill list, and FAKE_TOOL_IDS picks
 // OpenCode 1's tool id reply: listed, empty (as before the location boots), html or down.
 const FAKE_BACKEND_WGET = `#!/bin/sh
@@ -1510,11 +1513,11 @@ registered() { [ -n "$FAKE_REGISTERED" ]; }
 case $last in
   */api/plugin)
     builtin='{"id":"opencode.tool.input.repair","source":{"type":"builtin"},"features":{"server":true},"state":{"status":"active"}}'
-    own='{"id":"oc-multi-imagegen","source":{"type":"local","path":"/pluginpkg/server.js"},"features":{"server":true}'
+    own='{"id":"oc-multi-imagegen","source":{"type":"local","path":"/pluginpkg"},"features":{"server":true}'
     case \${FAKE_PLUGIN:-active} in
       active) entries="$builtin,$own"',"state":{"status":"active"}}' ;;
       failed) entries="$builtin,$own"',"state":{"status":"failed","error":"Error: OC_MULTI_IMAGEGEN_BACKEND is empty"}}' ;;
-      unidentified) entries="$builtin"',{"source":{"type":"local","path":"/pluginpkg/server.js"},"features":{},"state":{"status":"failed","error":"Cannot find module"}}' ;;
+      unidentified) entries="$builtin"',{"source":{"type":"local","path":"/pluginpkg"},"features":{},"state":{"status":"failed","error":"Cannot find module"}}' ;;
       missing) entries="$builtin" ;;
     esac
     echo '{"location":{"directory":"/work"},"data":['"$entries"']}' ;;

@@ -1010,34 +1010,28 @@ describe("NanoGPT tool guidance", () => {
       expect(text).toContain("give a short reason")
       expect(text).toContain("Ask the operator only when required input is missing")
       expect(text).toContain("needs no approval of its own")
-      expect(text).toContain("do not repeat an unchanged call")
       expect(text).toContain("Do not retry authentication, balance or rate-limit errors")
-      expect(text).toContain("never switch a requested model silently")
-      expect(text).toContain("imagegen_models")
     },
   )
 
-  test("each tool names its counterpart and lists only the models of its operation", () => {
-    expect(description("imagegen")).toContain("use imageedit instead")
+  test("each tool lists only the models of its operation", () => {
     expect(description("imagegen")).toContain("nano-banana-pro (Nano Banana Pro)")
     expect(description("imagegen")).not.toContain("nano-banana-pro-edit")
-    expect(description("imageedit")).toContain("use imagegen")
     expect(description("imageedit")).toContain("nano-banana-pro-edit (Nano Banana Pro)")
   })
 
   test("names the credential and the recipient of the prompt", () => {
     expect(description("imagegen")).toContain("OC_MULTI_IMAGEGEN_NANOGPT_API_KEY")
     expect(description("imagegen")).toContain("nano-gpt-images")
-    expect(description("imagegen")).toContain("The prompt is sent to NanoGPT")
-    expect(description("imageedit")).toContain("The prompt and reference images are sent to NanoGPT")
+    expect(description("imagegen")).toContain("the prompt is sent to NanoGPT, which bills the account")
+    expect(description("imageedit")).toContain("the prompt and reference images are sent to NanoGPT")
   })
 
-  test("describes native output formats and tells callers to chain the returned path", () => {
+  test("describes native output formats", () => {
     for (const name of ["imagegen", "imageedit"]) {
       expect(description(name)).toContain(
         "Exactly one image is requested; native PNG, JPEG or WebP responses are saved.",
       )
-      expect(description(name)).toContain("use the returned out path for reads or subsequent edits")
     }
   })
 })

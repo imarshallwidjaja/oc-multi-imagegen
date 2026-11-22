@@ -7,6 +7,7 @@ import {
   describeGenerationTool,
   type EditToolSpec,
   type GenerationToolSpec,
+  RASTER_MEDIUM,
 } from "./imagegen"
 import { postImagesRequest } from "./images-request"
 import {
@@ -82,8 +83,8 @@ const shared: ArgsSpec = {
       "Requested width x height preset; choose it by aspect ratio. The tool asks for it in the prompt and does not resize the result; the result reports the actual pixel dimensions.",
     ),
   outputFormats: OUTPUT_FORMATS,
-  model: `Optional model name, sent to the Codex backend unchanged. Omit it to send ${CODEX_REQUEST_DEFAULTS.model}. Whether the backend applies it is unverified in recorded runs and can change, so the result text lists it as requested, not verified.`,
-  quality: `Optional quality value, sent to the Codex backend unchanged. Omit it to send ${CODEX_REQUEST_DEFAULTS.quality}. Whether the backend applies it is unverified in recorded runs and can change, so the result text lists it as requested, not verified.`,
+  model: `Optional model name, sent to the Codex backend unchanged; omitted, ${CODEX_REQUEST_DEFAULTS.model} is sent. Whether the backend applies it is unverified and can change, so the result text lists it as requested, not verified.`,
+  quality: `Optional quality value, sent to the Codex backend unchanged; omitted, ${CODEX_REQUEST_DEFAULTS.quality} is sent. Whether the backend applies it is unverified and can change, so the result text lists it as requested, not verified.`,
 }
 
 const generateSchema = strictArgs(IMAGEGEN_TOOL, generationShape(shared), GENERATION_MOVED_ARGUMENTS)
@@ -127,16 +128,21 @@ function resultNote(args: CodexArgs) {
 }
 
 const SUBJECT = "the ChatGPT Codex image backend"
-const REQUIRES = "Requires OpenCode ChatGPT OAuth authentication."
-const CONTROLS =
-  "Optional model and quality are sent unchanged, but whether this backend applies them is unverified and can change; when you set either, the result text separates what was requested from what is verified. There are no image-count or output-format controls."
+const requires = (sent: string) => `Needs the OpenCode ChatGPT OAuth sign-in; ${sent} sent to ChatGPT.`
+const UNVERIFIED =
+  "Model and quality are sent unchanged but unverified; the result separates requested from verified settings."
+const DETAILS = [
+  "Size is requested through the prompt, so check the returned pixel dimensions when they matter.",
+  "Each call makes one image; there are no image-count or output-format controls.",
+]
 
 export const codexImagegen = {
   operation: "generate",
   description: describeGenerationTool({
     subject: SUBJECT,
-    requires: `${REQUIRES} The prompt is sent to the provider.`,
-    controls: CONTROLS,
+    requires: requires("the prompt is"),
+    critical: UNVERIFIED,
+    details: [RASTER_MEDIUM, ...DETAILS],
   }),
   schema: generateSchema,
   credential: codexCredential,
@@ -149,9 +155,9 @@ export const codexImageedit = {
   operation: "edit",
   description: describeEditTool({
     subject: SUBJECT,
-    requires: `${REQUIRES} The prompt and reference images are sent to the provider.`,
-    references: `Required images: 1 to ${MAX_REFERENCE_IMAGES} local reference image paths.`,
-    controls: CONTROLS,
+    requires: requires("the prompt and images are"),
+    critical: UNVERIFIED,
+    details: DETAILS,
   }),
   schema: editSchema,
   credential: codexCredential,
