@@ -71,12 +71,12 @@ Configure the npm package's **Settings → Trusted Publisher → GitHub Actions*
 
 ### Publish a tagged version
 
-Update `package.json` and version-pinning examples, run the checks above, and commit the changes. The tag must equal `v` followed by the package version. For v1.0.0:
+Update `package.json` and version-pinning examples, run the checks above, and commit the changes. The tag must equal `v` followed by the package version. For v2.0.0:
 
 ```sh
-git tag v1.0.0
+git tag v2.0.0
 git push origin main
-git push origin v1.0.0
+git push origin v2.0.0
 ```
 
 Check the **Publish to npm** run in GitHub Actions, then verify the registry version and install it by name in a fresh directory. Later releases must use a new version and matching tag: npm versions are immutable and can't be republished. Verify a new trusted-publisher configuration with a successful publish within two days of creating it, or npm expires it.
@@ -95,7 +95,7 @@ Inspect the file list and test the generated tarball in a separate directory wit
 Publish the exact tarball you verified, using its actual filename:
 
 ```sh
-npm publish ./oc-multi-imagegen-1.0.0.tgz --access public --browser=false
+npm publish ./oc-multi-imagegen-2.0.0.tgz --access public --browser=false
 ```
 
 For later releases, update the package version and the tarball filename. npm versions are immutable: the same name and version can't be republished. Browser-based authentication or 2FA approval may still be required; `--browser=false` prints the URL rather than opening a browser on the publishing machine.
