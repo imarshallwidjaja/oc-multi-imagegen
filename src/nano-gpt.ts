@@ -1,5 +1,6 @@
 import type { z } from "zod"
 import type { CredentialSpec, KeyCredential } from "./credential"
+import { type BodyRefusal, readBoundedResponseBody, validateHttpsUrl } from "./http-download"
 import { defineImageTool, type EditToolSpec, type GenerationToolSpec } from "./imagegen"
 import {
   controlFields,
@@ -150,73 +151,41 @@ function readImagePayload(call: Call, body: unknown, key: string): ImagePayload 
   throw fail("data[0] has neither b64_json nor url.")
 }
 
-// The provider hands out HTTPS URLs to its storage. Anything else is refused before a request is made, including
-// credentials in the URL and hosts that are IP addresses or localhost, with or without the trailing dot of a fully
-// qualified name. Neither the URL nor its host is ever reported: a signed URL is a credential, and the provider chooses
-// the host name. Whether a public name resolves to a private address is not checked.
-function parseDownloadUrl(call: Call, raw: string): URL {
-  const refuse = (reason: string) =>
-    new Error(`${label(call)} returned an image URL that the plugin will not download: ${reason} ${NOTHING_SAVED}`)
-  let url: URL
-  try {
-    url = new URL(raw)
-  } catch {
-    throw refuse("it is not a valid URL.")
+function describeRefusal(refusal: BodyRefusal): string {
+  switch (refusal.kind) {
+    case "declared-too-large":
+      return `the image is ${refusal.declared} bytes and the limit is ${MAX_DOWNLOAD_BYTES}.`
+    case "too-large":
+      return `the image is larger than the limit of ${MAX_DOWNLOAD_BYTES} bytes.`
+    case "empty":
+      return "the response was empty."
+    case "length-mismatch":
+      return `${refusal.received} bytes arrived but the response declared ${refusal.declared}.`
   }
-  if (url.protocol !== "https:") throw refuse("it is not an https URL.")
-  if (url.username || url.password) throw refuse("it contains credentials.")
-  const host = url.hostname.replace(/\.+$/, "")
-  if (
-    host === "localhost" ||
-    host.endsWith(".localhost") ||
-    host.startsWith("[") ||
-    /^\d{1,3}(\.\d{1,3}){3}$/.test(host)
-  ) {
-    throw refuse("its host is an IP address or localhost.")
-  }
-  return url
 }
 
-// Downloads the image without credentials and without following redirects, up to MAX_DOWNLOAD_BYTES.
+// Downloads the image without credentials and without following redirects, up to MAX_DOWNLOAD_BYTES. The provider
+// hands out HTTPS URLs to its storage, and anything else is refused before a request is made. Neither the URL nor its
+// host is ever reported: a signed URL is a credential, and the provider chooses the host name.
 async function downloadImage(call: Call, raw: string, signal: AbortSignal): Promise<Uint8Array> {
-  const url = parseDownloadUrl(call, raw)
+  const checked = validateHttpsUrl(raw)
+  if (!checked.ok) {
+    throw new Error(
+      `${label(call)} returned an image URL that the plugin will not download: ${checked.reason} ${NOTHING_SAVED}`,
+    )
+  }
   const fail = (reason: string) => new Error(`${label(call)} image download failed: ${reason} ${NOTHING_SAVED}`)
   const res = await networkStep(call, signal, "downloading the image", () =>
-    fetch(url, { method: "GET", redirect: "manual", signal }),
+    fetch(checked.url, { method: "GET", redirect: "manual", signal }),
   )
   if (res.status >= 300 && res.status < 400)
     throw fail(`it answered with a redirect (HTTP ${res.status}), which is refused.`)
   if (!res.ok) throw fail(`HTTP ${res.status}.`)
-  const declared = res.headers.get("content-length")?.trim()
-  const length = declared && /^\d+$/.test(declared) ? Number(declared) : undefined
-  if (length !== undefined && length > MAX_DOWNLOAD_BYTES) {
-    throw fail(`the image is ${length} bytes and the limit is ${MAX_DOWNLOAD_BYTES}.`)
-  }
-  // A compressed representation declares its encoded length while the body read here is decoded, so only an
-  // uncompressed body can be held to it.
-  const encoding = res.headers.get("content-encoding")?.trim().toLowerCase()
-  const exactLength = !encoding || encoding === "identity" ? length : undefined
-  const chunks: Uint8Array[] = []
-  let received = 0
-  if (res.body) {
-    const reader = res.body.getReader()
-    for (;;) {
-      const { done, value } = await networkStep(call, signal, "reading the image download", () => reader.read())
-      if (done) break
-      received += value.length
-      if (received > MAX_DOWNLOAD_BYTES) {
-        // Releasing the body is best effort: a failure here must not replace the size refusal or reach the report.
-        await reader.cancel().catch(() => {})
-        throw fail(`the image is larger than the limit of ${MAX_DOWNLOAD_BYTES} bytes.`)
-      }
-      chunks.push(value)
-    }
-  }
-  if (received === 0) throw fail("the response was empty.")
-  if (exactLength !== undefined && received !== exactLength) {
-    throw fail(`${received} bytes arrived but the response declared ${exactLength}.`)
-  }
-  return Buffer.concat(chunks)
+  const body = await networkStep(call, signal, "reading the image download", () =>
+    readBoundedResponseBody(res, MAX_DOWNLOAD_BYTES),
+  )
+  if (!body.ok) throw fail(describeRefusal(body.refusal))
+  return body.bytes
 }
 
 // The arguments a request needs, as the generation schema validates them. Editing validates the same fields against
