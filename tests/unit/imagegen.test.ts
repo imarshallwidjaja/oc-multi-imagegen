@@ -83,7 +83,7 @@ describe.each(matrix)("%s with the %s backend calling %s", (_host, _backend, _to
     expect(await readFile(savedPath)).toEqual(PNG_BUFFER)
     // PNG_BASE64 is a 1x1 image. The message reports the size of the saved image, not the requested size.
     expect(result).toEqual({
-      message: `Generated image saved to ${savedPath}. The image is PNG, 1x1 pixels.`,
+      message: `Generated image saved to ${savedPath}. The image is PNG, 1x1 pixels, alpha not measured (truncated PNG chunk).`,
       out: savedPath,
       versioned: false,
     })
@@ -120,7 +120,7 @@ describe.each(matrix)("%s with the %s backend calling %s", (_host, _backend, _to
     expect(result.out).toBe(path.join(dir, `nested/image.${ext}`))
     expect(await readFile(path.join(dir, `nested/image.${ext}`))).toEqual(bytes)
     expect(result.versioned).toBe(false)
-    expect(result.message).toContain(`The image is ${format}, ${size} pixels.`)
+    expect(result.message).toContain(`The image is ${format}, ${size} pixels`)
     expect(result.message).toContain(`was adjusted to ${result.out} to match the ${format} bytes`)
     expect(result.message).not.toContain("already existed")
   })

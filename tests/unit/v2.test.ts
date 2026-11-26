@@ -219,7 +219,8 @@ describe("OpenCode 2 execution", () => {
     const result = await run(args)
 
     const savedPath = path.join(dir, "cat.png")
-    const message = `Generated image saved to ${savedPath}. The image is PNG, 1x1 pixels.`
+    const message = result.output.message
+    expect(message).toStartWith(`Generated image saved to ${savedPath}. The image is PNG, 1x1 pixels`)
     expect(await readFile(savedPath)).toEqual(PNG_BUFFER)
     expect(result).toEqual({
       output: { out: savedPath, versioned: false, message },

@@ -319,7 +319,10 @@ describe("OpenAI Images API backend arguments", () => {
     try {
       const saved = await runImagegen(key, generateArgs({ model: "gpt-image-3-preview", quality: "high" }), dir)
 
-      expect(saved.message).toBe(`Generated image saved to ${path.join(dir, "cat.png")}. The image is PNG, 1x1 pixels.`)
+      expect(saved.message).toStartWith(
+        `Generated image saved to ${path.join(dir, "cat.png")}. The image is PNG, 1x1 pixels`,
+      )
+      expect(saved.message).not.toContain("Requested")
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

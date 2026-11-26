@@ -177,7 +177,7 @@ describe("OpenCode 1 adapter", () => {
     const savedPath = path.join(dir, "cat.png")
     expect(await readFile(savedPath)).toEqual(PNG_BUFFER)
     expect(result).toEqual({
-      output: `Generated image saved to ${savedPath}. The image is PNG, 1x1 pixels.`,
+      output: expect.stringContaining(`Generated image saved to ${savedPath}. The image is PNG, 1x1 pixels`),
       metadata: { out: savedPath, versioned: false },
     })
   })

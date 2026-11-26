@@ -172,9 +172,11 @@ describe("Codex backend request", () => {
         await Bun.write(path.join(dir, "ref.png"), PNG_BUFFER)
         const message = async (overrides: Partial<CodexArgs>, out: string) =>
           (await runTool(name, { ...generateArgs({ ...overrides, out }), ...extra }, dir)).message
-        const saved = (out: string) => `Generated image saved to ${path.join(dir, out)}. The image is PNG, 1x1 pixels.`
+        const plain = await message({}, "a.png")
+        const saved = (out: string) => plain.replace(path.join(dir, "a.png"), path.join(dir, out))
 
-        expect(await message({}, "a.png")).toBe(saved("a.png"))
+        expect(plain).toStartWith(`Generated image saved to ${path.join(dir, "a.png")}. The image is PNG, 1x1 pixels`)
+        expect(plain).not.toContain("Requested")
         expect(await message({ model: null, quality: null }, "b.png")).toBe(saved("b.png"))
         expect(await message({ model: "m1" }, "c.png")).toBe(
           `${saved("c.png")} Requested model m1; the Codex response does not report which settings it applied, so they are unverified.`,

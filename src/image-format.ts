@@ -1,6 +1,7 @@
 import * as path from "node:path"
 import { fileTypeFromBuffer } from "file-type"
 import { imageSize } from "image-size"
+import { inspectPngAlpha, type PngAlpha } from "./png-alpha"
 import { inspectSvg } from "./svg"
 
 // The formats a tool can save. Each image tool declares the ones it saves; its `out` argument names the same list.
@@ -36,6 +37,44 @@ function startsLikeMarkup(bytes: Buffer): boolean {
 
 export type InspectedImage = { format: OutputFormat; description: string }
 
+// Describes the alpha flag of a WebP container whose header inspectImage has already validated: the VP8X alpha bit,
+// or the VP8L alpha_is_used bit. A lossy VP8 image without a VP8X chunk has no alpha channel. RFC 9649 section 3.4
+// defines alpha_is_used as a hint, and section 2.7.1 defines the VP8X alpha bit as a header declaration; neither
+// proves what the pixels hold without decoding them, and they are not decoded.
+function describeWebpAlpha(bytes: Buffer, chunk: string): string {
+  if (chunk === "VP8 ") return "no alpha channel"
+  // After the VP8L one-byte 0x2f signature: 14 bits of width - 1, 14 bits of height - 1, then alpha_is_used.
+  const flag = chunk === "VP8X" ? (bytes[20] & 0x10) !== 0 : ((bytes.readUInt32LE(21) >>> 28) & 1) === 1
+  return flag
+    ? "alpha flag set in the WebP header (pixels not measured)"
+    : "no alpha flag in the WebP header (pixels not measured)"
+}
+
+// A share of the total that reads 0% or 100% only when it is exactly none or all of the pixels.
+function percent(count: number, total: number): string {
+  if (count === 0) return "0%"
+  if (count === total) return "100%"
+  const share = (count / total) * 100
+  if (share < 1) return "<1%"
+  if (share > 99) return ">99%"
+  return `${Math.round(share)}%`
+}
+
+function describePngAlpha(alpha: PngAlpha): string {
+  switch (alpha.status) {
+    case "no-alpha":
+      return "no alpha channel"
+    case "unmeasured":
+      return `alpha not measured (${alpha.reason})`
+    case "measured": {
+      const { totalPixels, transparentPixels, semiTransparentPixels, opaquePixels } = alpha
+      if (opaquePixels === totalPixels) return "alpha channel present but 100% opaque (0 transparent pixels)"
+      const share = (count: number, label: string) => `${percent(count, totalPixels)} ${label}`
+      return `alpha: ${share(transparentPixels, "transparent")}, ${share(semiTransparentPixels, "semi-transparent")}, ${share(opaquePixels, "opaque")}`
+    }
+  }
+}
+
 // Detects the format among those accepted and reads its size. Header inspection is not a full corruption check. A GIF
 // header gives the logical screen size, not proof of animation, and an SVG's viewBox or width and height are vector
 // units, not pixels.
@@ -62,11 +101,12 @@ export async function inspectImage(image: Uint8Array, accepted: readonly OutputF
       `the backend returned an unsupported image type (${detected ?? "unknown"}); expected ${listFormatNames(accepted)}; nothing was saved`,
     )
   }
+  const chunk = format === "webp" ? bytes.toString("ascii", 12, 16) : ""
   let size: ReturnType<typeof imageSize>
   try {
     // image-size's VP8L bitwise reads treat missing dimension bytes as zeros.
     // The 20-byte container/chunk prefix needs 5 bytes for VP8L, or 10 for VP8/VP8X.
-    if (format === "webp" && bytes.length < (bytes.toString("ascii", 12, 16) === "VP8L" ? 25 : 30)) {
+    if (format === "webp" && bytes.length < (chunk === "VP8L" ? 25 : 30)) {
       throw new Error("incomplete dimension header")
     }
     size = imageSize(bytes)
@@ -78,13 +118,16 @@ export async function inspectImage(image: Uint8Array, accepted: readonly OutputF
     throw new Error(`the backend returned malformed ${detected} image headers or dimensions; nothing was saved`)
   }
   const pixels = `${size.width}x${size.height} pixels`
-  return {
-    format,
-    description:
-      format === "gif"
-        ? `GIF, ${pixels} (the header's logical screen size; frames and animation are not checked)`
-        : `${FORMATS[format].name}, ${pixels}`,
+  if (format === "gif") {
+    return {
+      format,
+      description: `GIF, ${pixels} (the header's logical screen size; frames and animation are not checked)`,
+    }
   }
+  const description = `${FORMATS[format].name}, ${pixels}`
+  if (format === "png") return { format, description: `${description}, ${describePngAlpha(inspectPngAlpha(bytes))}` }
+  if (format === "webp") return { format, description: `${description}, ${describeWebpAlpha(bytes, chunk)}` }
+  return { format, description }
 }
 
 // The path a file of `format` is saved to. A matching extension is kept, including case variants; only an extension of
