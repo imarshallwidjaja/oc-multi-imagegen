@@ -2,29 +2,63 @@
 
 [README](../README.md) · [Getting started](getting-started.md) · [Tool reference](tool-reference.md)
 
-One backend is active per plugin load. Every backend registers the same two image tools: `imagegen` creates a new image from text, and `imageedit` changes or combines existing images passed as references. The selected backend decides the credential, each tool's arguments, defaults and limits, and whether a model discovery tool exists.
+OpenCode 1 runs one backend per plugin load. OpenCode 2 runs one or more. Every backend registers the same two image tools: `imagegen` creates a new image from text, and `imageedit` changes or combines existing images passed as references. The backend decides the credential, each tool's arguments, defaults and limits, and whether a model discovery tool exists.
 
-| `OC_MULTI_IMAGEGEN_BACKEND` | Provider | Credential | Image tools | Model discovery |
+| Backend ID | Provider | Credential | Image tools | Model discovery |
 | --- | --- | --- | --- | --- |
-| Unset or `codex` | ChatGPT Codex image backend | OpenCode's ChatGPT sign-in for `openai` | `imagegen`, `imageedit` | None |
+| `codex` (default) | ChatGPT Codex image backend | OpenCode's ChatGPT sign-in for `openai` | `imagegen`, `imageedit` | None |
 | `openai-api` | Official OpenAI Images API | `OC_MULTI_IMAGEGEN_OPENAI_API_KEY`, otherwise saved `openai-images` key | `imagegen`, `imageedit` | `imagegen_models`, a live list of the key's models |
 | `nano-gpt` | NanoGPT normalized image API | `OC_MULTI_IMAGEGEN_NANOGPT_API_KEY`, otherwise saved `nano-gpt-images` key | `imagegen`, `imageedit` | `imagegen_models`, the plugin's curated model table |
+| `opencode` (OpenCode 2 only) | Image models of OpenCode 2's connected providers | The model's own provider connection in OpenCode | `imagegen`, `imageedit` | `imagegen_models`, the host's enabled image models |
 
-Changing the backend takes a server restart. A call can't select another backend, and a failure doesn't trigger a retry or fallback to another backend.
+A call can't select another backend, and a failure doesn't trigger a retry or fallback to another backend.
 
 ## Configuration
+
+The backend comes from one of two places:
+
+- **`OC_MULTI_IMAGEGEN_BACKEND`** in the environment of the OpenCode server. Both hosts read it. It selects one backend, and unset means `codex`. Changing it takes a server restart.
+- **Plugin options**, on OpenCode 2 only. They select one backend or several; see [OpenCode 2 plugin options](#opencode-2-plugin-options).
+
+Use one of the two. On OpenCode 2, setting the variable and selecting backends in plugin options fails the plugin load, so neither is silently ignored and a project's configuration can't override a backend pinned in the server environment.
 
 The plugin reads three environment variables:
 
 | Variable | Behavior |
 | --- | --- |
-| `OC_MULTI_IMAGEGEN_BACKEND` | Read once at plugin load. Empty or unknown values fail the load without registering image tools. |
+| `OC_MULTI_IMAGEGEN_BACKEND` | Read once at plugin load. Empty or unknown values fail the load without registering image tools, and the error doesn't repeat the value. OpenCode 1 refuses `opencode`. |
 | `OC_MULTI_IMAGEGEN_OPENAI_API_KEY` | Image key for `openai-api` only, resolved on each call. |
 | `OC_MULTI_IMAGEGEN_NANOGPT_API_KEY` | Image key for `nano-gpt` only, resolved on each call. |
 
-The plugin takes no options and reads no `.env` or other configuration file. Remove a `backend` option left by an older build; it now fails the load with a message naming the environment variable to use. Other plugin options also fail.
+API keys always come from these variables or from keys saved in OpenCode, never from plugin options. The plugin reads no `.env` or other configuration file.
 
 Set variables in the environment of the OpenCode **server**. Exporting one in a shell that only starts a client attached to a running server doesn't change that server's environment.
+
+### OpenCode 1 plugin entry
+
+OpenCode 1 takes no plugin options. A `backend` option left by an older build fails the load with a message naming the environment variable to use, and any other option fails too.
+
+### OpenCode 2 plugin options
+
+On OpenCode 2, write the plugin entry as an object with `options`. Select one backend with `backend`:
+
+```jsonc
+{
+  "plugins": [{ "package": "oc-multi-imagegen", "options": { "backend": "openai-api" } }]
+}
+```
+
+Or select several, in order, with `backends`:
+
+```jsonc
+{
+  "plugins": [{ "package": "oc-multi-imagegen", "options": { "backends": ["openai-api", "opencode"] } }]
+}
+```
+
+`backend` and `backends` are mutually exclusive. Each ID must be one of `codex`, `openai-api`, `nano-gpt` or `opencode`, and `backends` must be a nonempty list without duplicates. Any other option key fails the load. Errors name the option key or list position, never the value you wrote, so a key pasted into the wrong field doesn't reach a log.
+
+OpenCode 2 reads the options again whenever it reloads the plugin, so an edit to `opencode.jsonc` applies without restarting the server. With several backends, each backend's tools sit in their own Code Mode namespace; see [OpenCode 2 tool paths](tool-reference.md#opencode-2-tool-paths).
 
 ### systemd example
 
@@ -160,12 +194,25 @@ An additional `wan2.7-image-pro` generation with `resolution: auto` returned PNG
 
 Local evidence is retained at `/tmp/opencode/nanogpt-both-live-20261102/live/report.json`, with output files, input PNGs, safe request summaries and hashes, plus `visual-review.md` in its parent directory. A separate `preflight/report.json` retains the deliberately failed synthetic transport run. The live run used the source module directly, not either running host adapter or the generated bundle. Mocked backend tests check the exact request body for each of these IDs, and mocked tests of both adapters cover the shared request flow with other NanoGPT models; this sample does not establish live host parity. Actual charges were not measured. No output format was forced on these routes, and JPEG/WebP bytes were saved with matching extensions.
 
+## OpenCode connected models
+
+The `opencode` backend runs on OpenCode 2 only. It generates through the image models of the providers connected in OpenCode, using the host's `ctx.experimental.generate.image` and listing models with `ctx.model.list({ types: ["image"] })`. A host without both fails the plugin load with a message naming them. OpenCode 1 has neither and refuses `opencode` as a backend. The plugin holds no credential for this backend: OpenCode signs each request with the model's provider connection, and the prompt and references go to that provider.
+
+- **`imagegen_models`** asks for the `imagegen_models` permission on the `opencode` resource, then lists the enabled image models as `providerID/modelID` with their display name, their variants and `edit: yes` or `edit: no` for whether the model accepts input images. `query` filters by words that must all appear in the reference or name, ignoring case; `model` checks one exact `providerID/modelID`. Nothing is cached.
+- **`imagegen`** and **`imageedit`** require `model` as `providerID/modelID` or `providerID/modelID#variant`. The provider ID ends at the first `/`, so a model ID can hold further slashes, as in `openrouter/black-forest-labs/flux-2-pro#hd`. Before generating, the plugin checks the host's catalog: the model must be an enabled image model, a named variant must exist, and an `imageedit` model must accept input images.
+
+[OpenCode inputs](tool-reference.md#opencode-inputs) lists the arguments and reference limits, and [OpenCode aspect and resolution](tool-reference.md#opencode-aspect-and-resolution) covers sizing.
+
+OpenCode's own image generation applies the host's retry policy for one-shot requests, which retries eligible provider errors up to three times. This is the one exception to the plugin's no-retry rule: the host manages those retries, and the plugin itself sends one request. Cancellation is forwarded to the host as `{ signal }`; OpenCode 2.4 and later stop in-flight work with it, while OpenCode 2.3.2 ignores it. On every version the plugin checks for cancellation after the catalog lookup and before saving, so a cancelled call starts no generation after the lookup and writes no file.
+
 ## Compatibility and recorded coverage
 
 | Host | Support floor | Recorded coverage |
 | --- | --- | --- |
 | OpenCode 1 | 1.18.29 | 1.19.3: real-agent Codex, OpenAI API and NanoGPT runs. Floor: plugin/skill load and OpenAI API sign-in registration only. |
 | OpenCode 2 | 2.3.2 | 2.0.32: real-agent Codex, OpenAI API and NanoGPT runs, with the image tools registered as direct tools. No live run has used 2.3.2 or Code Mode registration. |
+
+No recorded live run covers the `opencode` backend, the `image` Code Mode namespace, OpenCode 2 plugin options, several backends in one load, HTTPS reference URLs, the OpenAI `mask` or inline `preview`. Mocked unit tests cover them against a fake host.
 
 The OpenCode 2 floor is 2.3.2 because the plugin registers its tools for Code Mode, and that registration relies on two host behaviors. OpenCode exposes Code Mode tools as direct tools to an agent whose rules deny `execute` from 2.2.0 (see [permissions](permissions.md#opencode-2)), and shows 500-character description previews in the inline catalog from 2.3.1. Both behaviors were checked against the 2.3.2 source.
 

@@ -9,12 +9,15 @@ The image tools follow reference pixels better than prose. Each call has three p
 
 Every backend has the same two image tools. Create a new image from text with `imagegen`. Change, restyle or combine existing images with `imageedit`, which takes them as reference images. Whenever an existing image should guide the result, including a correction, a sibling in a consistent set or a rendered layout, the call is an `imageedit` call. Where the backend offers `imagegen_models`, use it before choosing a model instead of guessing one; where it lists the account's models live, a listed model is available to the key, not proven to support a format or feature.
 
+When several backends are loaded, pick the backend the operator chose, or the one whose controls the image needs, and say which you used.
+
 ## Pick the medium
 
 Icons, logos, charts, diagrams, and anything that must scale, be recoloured or be edited later belong in SVG or code, or in an existing icon set. Where the backend generates SVG, use it for a simple icon or logo that must scale, and ask for flat shapes and few colours; charts, diagrams and exact layouts still belong in code. Generate rasters for photos, illustrations, textures and visual concepts. For a short animated GIF, describe the subject, the motion and how the loop returns to its first frame. When a layout needs exact positions, spacing or small text, render it in code and pass the render to `imageedit` as a reference.
 
 ## Write the call
 
+- A reference can be a local path or an `https://` URL. Pass a URL directly instead of downloading it yourself; each URL asks for the host's `webfetch` permission. Use a local path when the image is already on disk.
 - Label each reference by role in the prompt: "Image 1: approved style; copy its colours and shadows. Image 2: layout at true size; match positions." Say what to borrow and what to leave out.
 - Pass geometry as a picture (a rendered layout, a crop, a sketch). Dimensions written in words come out approximate.
 - Order the prompt: medium and framing, the role of each reference, content in reading order with every visible string in quotes, then hard constraints. For an app screen, state "flat screen capture, no device frame".
@@ -23,19 +26,21 @@ Icons, logos, charts, diagrams, and anything that must scale, be recoloured or b
 
 ## Chain results
 
-Each result reports the path it was actually saved to, which can differ from the requested one: the extension follows the returned format, and an existing file gets a `-vN` suffix. Read the file from that path, and when it is a PNG, JPEG or WebP, pass it as the next `imageedit` reference. A GIF or SVG result cannot be a reference; follow the GIF and SVG steps under "Correct" and "Keep related images consistent".
+Each result reports the path it was actually saved to, which can differ from the requested one: the extension follows the returned format, and an existing file gets a `-vN` suffix. Read the file from that path, and pass it as the next `imageedit` reference when it is a PNG, JPEG or WebP, or a GIF that the tool description accepts. An SVG result, or a GIF the tool refuses, cannot be a reference; follow the GIF and SVG steps under "Correct" and "Keep related images consistent".
 
 ## Correct
 
 For a PNG, JPEG or WebP result, pass it to `imageedit` as Image 1 and write: "Reproduce Image 1 faithfully: same layout, scale, colours and text. Apply only these corrections: 1. ... 2. ..." Name the region and the exact new values. Batch every fix for an image into one round, because each regeneration can change things you did not mention. Compare the result with the previous version, not only against the requested fix.
 
-A GIF or SVG result cannot be a reference image. Correct it with a new `imagegen` call in the format the operator asked for: reuse the previous prompt, describe what to keep from the result, and list each correction. Convert a result to another format only when the operator asks for that.
+When a GIF or SVG result cannot be a reference image, correct it with a new `imagegen` call in the format the operator asked for: reuse the previous prompt, describe what to keep from the result, and list each correction. Convert a result to another format only when the operator asks for that.
 
-A reference-guided edit regenerates the whole image. When a region must stay pixel-identical, or one region keeps failing, edit or composite locally and record that the image was patched.
+To confine a change to one region where `imageedit` takes a `mask`, pass a PNG the same pixel size as Image 1 whose fully transparent pixels cover the region to change and whose other pixels are opaque. Describe the whole intended result in the prompt, not only the masked area.
+
+A reference-guided edit regenerates the whole image, with or without a mask. When a region must stay pixel-identical, or one region keeps failing, edit or composite locally and record that the image was patched.
 
 ## Keep related images consistent
 
-Approve one anchor image first, then create each sibling with `imageedit`, passing the anchor as the style reference and labelling its role. When the anchor is a GIF or SVG, create each sibling with `imagegen` and repeat the anchor prompt's style description word for word instead. Separate generations drift in layout and detail, so frames that must match each other, such as a storyboard or a before-and-after pair, may be better generated as one numbered grid and cut afterwards.
+Approve one anchor image first, then create each sibling with `imageedit`, passing the anchor as the style reference and labelling its role. When the anchor cannot be a reference image, create each sibling with `imagegen` and repeat the anchor prompt's style description word for word instead. Separate generations drift in layout and detail, so frames that must match each other, such as a storyboard or a before-and-after pair, may be better generated as one numbered grid and cut afterwards.
 
 ## Exact text
 
@@ -45,9 +50,12 @@ Large headings usually render correctly; small text can pick up misspellings. Wh
 
 Where the tool has a `background` argument, set it to `transparent` for an isolated cut-out instead of asking for transparency in the prompt, and ask for one subject with clear margin on every side. The returned alpha can be soft at the edges and across the subject, so process it when a hard cut-out or fully opaque subject is needed. Recheck the alpha after every correction round; do not assume an edit kept it.
 
+Read the alpha line in each result. A warning that the PNG has no transparent pixels means the cut-out failed: retry or matte it, and report the outcome either way. A PNG whose alpha was not measured, and any WebP, gets no warning, so check those yourself.
+
 ## Check and record
 
 - Open every result at full size and crop dense regions. Read the pixel size the tool reports instead of assuming the requested size.
+- Use `preview: true` only on a single call you need to inspect immediately; leave it false for batches and read the saved files instead.
 - Check each quoted string, the colour roles, everything the prompt forbade, and anything that changed without being asked.
 - For transparency, check the image mode and alpha, and view the result on a light and a dark background.
 - For an SVG, render it and check its shapes, colours and text; its viewBox is in vector units, not pixels. For a GIF, check that the frames change and the loop closes; the reported size is one frame's.
