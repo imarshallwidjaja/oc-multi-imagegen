@@ -257,6 +257,7 @@ export const nanoGptImageedit = {
 
 export const nanoGptBackend = {
   id: "nano-gpt",
+  summary: "NanoGPT (curated models, resolution and aspect_ratio)",
   credential: nanoGptCredential,
   tools: [defineImageTool(nanoGptImagegen), defineImageTool(nanoGptImageedit), nanoModelsTool],
 } satisfies Backend

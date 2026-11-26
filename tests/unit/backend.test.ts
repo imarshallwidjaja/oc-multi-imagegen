@@ -1,12 +1,15 @@
 import { describe, expect, test } from "bun:test"
 import { z } from "zod"
-import { selectBackend } from "../../src/backend"
+import { selectBackend, selectBackends } from "../../src/backend"
 import plugin from "../../src/index"
 import { SKILL_NAME } from "../../src/skill"
 import { isolateEnvironment } from "./fixtures"
 import { loadV2Tool } from "./hosts"
 
 isolateEnvironment()
+
+// The tools of one backend, as OpenCode 2 selects it by option; opencode exists only there.
+const toolsOf = (backend: string) => selectBackends({ backend })[0].tools
 
 describe("selectBackend", () => {
   test.each([undefined, null, {}])("selects Codex when the variable is unset and the options are %p", (options) => {
@@ -22,16 +25,22 @@ describe("selectBackend", () => {
     expect(selectBackend(undefined).id).toBe("nano-gpt")
   })
 
+  test("fails on OpenCode 1 for the opencode backend, which needs OpenCode 2", () => {
+    process.env.OC_MULTI_IMAGEGEN_BACKEND = "opencode"
+
+    expect(() => selectBackend(undefined)).toThrow(
+      'The "opencode" backend requires OpenCode 2; OpenCode 1 cannot run it.',
+    )
+  })
+
   // The host tests check that each host registers exactly these tools by name.
   test("declares the tools of each backend", () => {
-    const names = (backend: string) => {
-      process.env.OC_MULTI_IMAGEGEN_BACKEND = backend
-      return selectBackend(undefined).tools.map((tool) => tool.name)
-    }
+    const names = (backend: string) => toolsOf(backend).map((tool) => tool.name)
 
     expect(names("codex")).toEqual(["imagegen", "imageedit"])
     expect(names("openai-api")).toEqual(["imagegen", "imageedit", "imagegen_models"])
     expect(names("nano-gpt")).toEqual(["imagegen", "imageedit", "imagegen_models"])
+    expect(names("opencode")).toEqual(["imagegen", "imageedit", "imagegen_models"])
   })
 
   // The out argument names the formats each tool saves; imagegen.test.ts checks through both hosts that saving accepts
@@ -40,9 +49,9 @@ describe("selectBackend", () => {
     ["codex", { imagegen: "PNG, JPEG or WebP", imageedit: "PNG, JPEG or WebP" }],
     ["openai-api", { imagegen: "PNG, JPEG, WebP, GIF or SVG", imageedit: "PNG, JPEG or WebP" }],
     ["nano-gpt", { imagegen: "PNG, JPEG or WebP", imageedit: "PNG, JPEG or WebP" }],
+    ["opencode", { imagegen: "PNG, JPEG or WebP", imageedit: "PNG, JPEG or WebP" }],
   ])("each %s image tool's out argument names the formats it saves", (backend, expected) => {
-    process.env.OC_MULTI_IMAGEGEN_BACKEND = backend
-    const images = selectBackend(undefined).tools.filter((tool) => tool.kind === "image")
+    const images = toolsOf(backend).filter((tool) => tool.kind === "image")
 
     const described = Object.fromEntries(
       images.map((tool) => {
@@ -59,7 +68,12 @@ describe("selectBackend", () => {
   // characters to its first 497 (DESCRIPTION_LIMIT - 3) plus "...". Each description is therefore one line whose first
   // 497 characters carry the routing, skill, discovery, credential and critical rules of the tool.
   const CODE_MODE_PREVIEW = 497
-  const credentialCue = { codex: "ChatGPT OAuth", "openai-api": "OpenAI Images API key", "nano-gpt": "NanoGPT API key" }
+  const credentialCue = {
+    codex: "ChatGPT OAuth",
+    "openai-api": "OpenAI Images API key",
+    "nano-gpt": "NanoGPT API key",
+    opencode: "OpenCode provider connection",
+  }
   const codexUnverified =
     "Model and quality are sent unchanged but unverified; the result separates requested from verified settings."
   const openaiNoRepeat = "Do not repeat a rejected call unchanged."
@@ -78,12 +92,16 @@ describe("selectBackend", () => {
       ],
     },
     "nano-gpt": { imagegen: [nanoNoRetry], imageedit: [nanoNoRetry] },
+    opencode: {
+      imagegen: [openaiNoRepeat],
+      imageedit: ["marks edit: yes", openaiNoRepeat],
+      imagegen_models: ["accepts input images (edit: yes)", "permission"],
+    },
   }
-  test.each(["codex", "openai-api", "nano-gpt"] as const)(
+  test.each(["codex", "openai-api", "nano-gpt", "opencode"] as const)(
     "each %s tool description is one line that leads with its critical rules",
     (backend) => {
-      process.env.OC_MULTI_IMAGEGEN_BACKEND = backend
-      for (const tool of selectBackend(undefined).tools) {
+      for (const tool of toolsOf(backend)) {
         expect(tool.description).not.toContain("\n")
         const preview = tool.description.slice(0, CODE_MODE_PREVIEW)
         const expected =
@@ -175,14 +193,85 @@ describe.each(hosts)("%s backend selection", (_host, load) => {
     [
       "an unknown backend variable",
       () => (process.env.OC_MULTI_IMAGEGEN_BACKEND = "dall-e"),
-      undefined,
       "OC_MULTI_IMAGEGEN_BACKEND",
     ],
-    ["an empty backend variable", () => (process.env.OC_MULTI_IMAGEGEN_BACKEND = ""), undefined, "is empty"],
-    ["the earlier backend option", () => {}, { backend: "openai-api" }, "no longer supported"],
-  ])("fails the load for %s, and the tool is not registered", async (_name, arrange, options, message) => {
+    ["an empty backend variable", () => (process.env.OC_MULTI_IMAGEGEN_BACKEND = ""), "is empty"],
+  ])("fails the load for %s, and the tool is not registered", async (_name, arrange, message) => {
     arrange()
 
-    await expect(load(options)).rejects.toThrow(message)
+    await expect(load()).rejects.toThrow(message)
+  })
+})
+
+describe("plugin options by host", () => {
+  test("OpenCode 1 still fails the load for a backend option", async () => {
+    await expect(plugin.server({} as never, { backend: "openai-api" })).rejects.toThrow("no longer supported")
+  })
+
+  test("OpenCode 2 loads the backend its option selects", async () => {
+    const { tool } = await loadV2Tool({ pluginOptions: { backend: "openai-api" } })
+
+    expect(tool.description).toContain("OpenAI Images API")
+  })
+})
+
+// OpenCode 2 selects one or more backends from its plugin options, or else from the variable.
+describe("selectBackends", () => {
+  const ids = (options: unknown) => selectBackends(options).map((backend) => backend.id)
+  // An operator can misplace a secret in the options, so no error may repeat an option's value.
+  const SECRET = "sk-misplaced-secret"
+  const failure = (options: unknown) => {
+    try {
+      selectBackends(options)
+    } catch (caught) {
+      return (caught as Error).message
+    }
+    throw new Error("selectBackends did not fail")
+  }
+
+  test.each([undefined, null, {}])("selects Codex for the options %p without the variable", (options) => {
+    expect(ids(options)).toEqual(["codex"])
+  })
+
+  test("selects the variable's backend, including opencode, when the options select none", () => {
+    process.env.OC_MULTI_IMAGEGEN_BACKEND = "opencode"
+
+    expect(ids({})).toEqual(["opencode"])
+  })
+
+  test("selects one backend by the backend option and several, in order, by the backends option", () => {
+    expect(ids({ backend: "nano-gpt" })).toEqual(["nano-gpt"])
+    expect(ids({ backends: ["opencode", "codex", "openai-api"] })).toEqual(["opencode", "codex", "openai-api"])
+  })
+
+  test.each([
+    ["a backend option", { backend: "codex" }, "openai-api"],
+    ["a backends option", { backends: ["codex"] }, "openai-api"],
+    ["any option while the variable is present but empty", { backend: "codex" }, ""],
+  ])("fails for %s while OC_MULTI_IMAGEGEN_BACKEND is set, instead of ignoring either", (_name, options, value) => {
+    process.env.OC_MULTI_IMAGEGEN_BACKEND = value
+
+    expect(failure(options)).toContain(
+      "OC_MULTI_IMAGEGEN_BACKEND is set and the plugin options select backends. Configure one or the other.",
+    )
+  })
+
+  test.each([
+    ["a string", SECRET, "plugin options must be an object"],
+    ["a list", [SECRET], "plugin options must be an object"],
+    ["an unknown option", { apiKey: SECRET }, "does not take the plugin option apiKey."],
+    ["both options", { backend: "codex", backends: ["codex"] }, 'takes "backend" or "backends", not both'],
+    ["an unknown backend", { backend: SECRET }, '"backend" option is not a known backend'],
+    ["an empty backend", { backend: "" }, '"backend" option is empty'],
+    ["a non-string backend", { backend: 3 }, '"backend" option is not a string'],
+    ["an empty backends list", { backends: [] }, '"backends" option must be a non-empty list'],
+    ["a backends string", { backends: SECRET }, '"backends" option must be a non-empty list'],
+    ["an unknown entry in backends", { backends: ["codex", SECRET] }, "backends[1] in the oc-multi-imagegen options"],
+    ["a repeated backend", { backends: ["codex", "codex"] }, '"backends" option lists codex more than once'],
+  ])("fails for %s without repeating any value", (_name, options, message) => {
+    const error = failure(options)
+
+    expect(error).toContain(message)
+    expect(error).not.toContain(SECRET)
   })
 })

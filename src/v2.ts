@@ -1,10 +1,16 @@
 import type { Plugin } from "@opencode/plugin"
-import { selectBackend } from "./backend"
-import { type CredentialSpec, emptyEnvironmentError, environmentOverride, type ImageCredential } from "./credential"
+import { selectBackends } from "./backend"
+import {
+  type CredentialSpec,
+  emptyEnvironmentError,
+  environmentOverride,
+  type HostCredential,
+  type ImageCredential,
+} from "./credential"
 import { invokeTool } from "./invocation"
 import { resultSchema } from "./schema"
-import { loadPackagedSkill } from "./skill"
-import type { ProviderAccess } from "./types"
+import { loadPackagedSkill, SKILL_NAME } from "./skill"
+import type { Backend, ProviderAccess } from "./types"
 
 // The OpenAI integration methods whose OAuth credential the Codex images endpoint accepts.
 const CHATGPT_METHOD_IDS = new Set(["chatgpt-browser", "chatgpt-headless"])
@@ -12,10 +18,12 @@ const TOKEN_SHARING_METHOD_ID = "chatgpt-token-sharing"
 const SIGN_IN_HINT = "Sign in to the OpenAI integration with the Codex browser or Codex device code method."
 
 type Integration = Plugin.Context["integration"]
+// The credentials the integration store holds; a host credential is the host itself.
+type StoredSpec = Exclude<CredentialSpec, { type: "host" }>
 
 // The credential is resolved on every call so a refreshed or switched account takes effect without reloading the
 // plugin. Resolution failures propagate unchanged, and no other credential source is consulted.
-async function resolveActiveCredential(integration: Integration, spec: CredentialSpec) {
+async function resolveActiveCredential(integration: Integration, spec: StoredSpec) {
   const name = spec.type === "oauth" ? "OpenAI" : spec.label
   const hint =
     spec.type === "oauth"
@@ -32,7 +40,7 @@ async function resolveActiveCredential(integration: Integration, spec: Credentia
   return credential
 }
 
-async function resolveChatGptAuth(integration: Integration, spec: CredentialSpec): Promise<ImageCredential> {
+async function resolveChatGptAuth(integration: Integration, spec: StoredSpec): Promise<ImageCredential> {
   const credential = await resolveActiveCredential(integration, spec)
   if (credential.type !== "oauth") {
     throw new Error(
@@ -57,7 +65,7 @@ async function resolveChatGptAuth(integration: Integration, spec: CredentialSpec
 // when the variable is set. A present variable is therefore resolved directly as an environment connection, which
 // makes the host read the value; the plugin only checks that the variable exists. Without it, the saved key applies.
 // A present but empty variable resolves to nothing and fails without consulting the saved key.
-async function resolveApiKey(integration: Integration, spec: CredentialSpec): Promise<ImageCredential> {
+async function resolveApiKey(integration: Integration, spec: StoredSpec): Promise<ImageCredential> {
   const name = environmentOverride(spec)
   let credential: Awaited<ReturnType<Integration["connection"]["resolve"]>>
   if (name === undefined) {
@@ -78,12 +86,44 @@ type SkillEditor = Parameters<Parameters<Plugin.Context["skill"]["transform"]>[0
 type ToolEditor = Parameters<Parameters<Plugin.Context["tool"]["transform"]>[0]>[0]
 type ToolCallContext = Parameters<Parameters<ToolEditor["add"]>[0]["execute"]>[1]
 
-// OpenCode 2 entry point. Each tool is registered for Code Mode without a namespace: the host defers its schema behind
-// the execute tool as tools.imagegen, tools.imageedit or tools.imagegen_models, and the permission action stays the
-// bare tool name. When an agent's permissions deny execute, OpenCode 2.3.2 and later expose the tools directly instead.
+const NAMESPACE = "image"
+
+// The Code Mode namespace of a backend's tools: "image" when it is the only backend, otherwise "image.<backend>" with
+// the id as a path segment ("openai-api" becomes tools.image.openai_api).
+const namespaceOf = (backend: Backend, backends: readonly Backend[]) =>
+  backends.length === 1 ? NAMESPACE : `${NAMESPACE}.${backend.id.replaceAll("-", "_")}`
+
+function describeNamespace(backends: readonly Backend[]): string {
+  const via =
+    backends.length === 1
+      ? `via ${backends[0].summary}`
+      : `with one namespace per backend: ${backends.map((backend) => `${namespaceOf(backend, backends)} (${backend.summary})`).join("; ")}`
+  return [
+    `Generate and edit images ${via}.`,
+    "Each call makes one image and saves it to a local file before returning, never overwriting (an existing name gets a -vN suffix), and reports its format, dimensions and alpha; run independent calls in parallel.",
+    `Load the ${SKILL_NAME} skill first if available and permitted.`,
+  ].join(" ")
+}
+
+// A backend with a host credential generates through the host's image generation and model catalog.
+function assertHostImageApi(ctx: Plugin.Context, id: string): void {
+  const partial = ctx as { experimental?: { generate?: { image?: unknown } }; model?: { list?: unknown } }
+  if (typeof partial.experimental?.generate?.image !== "function" || typeof partial.model?.list !== "function") {
+    throw new Error(
+      `The "${id}" backend requires an OpenCode 2 host with ctx.experimental.generate.image and ctx.model.list.`,
+    )
+  }
+}
+
+// OpenCode 2 entry point. The backends come from the plugin options or OC_MULTI_IMAGEGEN_BACKEND (see selectBackends),
+// read again whenever the host reloads the plugin. Tools are registered for Code Mode in a described namespace: one
+// backend uses "image" (tools.image.imagegen), several use "image.<backend>" (tools.image.openai_api.imagegen). The
+// permission action stays the bare tool name, so existing rules keep applying; the resource is the backend id. When an
+// agent's permissions deny execute, OpenCode 2.3.2 and later expose the tools directly instead.
 export const setup: Plugin.Plugin["setup"] = async (ctx) => {
-  const backend = selectBackend(ctx.options)
-  const { credential: spec } = backend
+  const backends = selectBackends(ctx.options)
+  const hostBackend = backends.find((backend) => backend.credential.type === "host")
+  if (hostBackend) assertHostImageApi(ctx, hostBackend.id)
   const skill = await loadPackagedSkill()
   // The host replays this callback on every skill reload, so it must not add a second copy, and an existing
   // skill with the same id is left alone.
@@ -101,7 +141,8 @@ export const setup: Plugin.Plugin["setup"] = async (ctx) => {
   })
   // A key credential is an integration owned by this plugin, with a key method for saving one and an env method
   // for the variable that overrides it. The OpenAI integration is the host's.
-  if (spec.type === "key") {
+  for (const { credential: spec } of backends) {
+    if (spec.type !== "key") continue
     await ctx.integration.transform((editor) => {
       editor.update(spec.provider, (integration) => {
         integration.name = spec.label
@@ -110,7 +151,23 @@ export const setup: Plugin.Plugin["setup"] = async (ctx) => {
       editor.method.update({ integrationID: spec.provider, method: { type: "env", names: [spec.environmentVariable] } })
     })
   }
-  const providerAccess = (context: ToolCallContext): ProviderAccess => ({
+  // The host signs the request with the model's provider connection and lists the models of its own catalog.
+  const hostCredential: HostCredential = {
+    type: "host",
+    generateImage: (input, signal) => ctx.experimental.generate.image(input, { signal }),
+    listImageModels: async (signal) => (await ctx.model.list({ types: ["image"] }, { signal })).data,
+  }
+  const resolveCredential = async (spec: CredentialSpec): Promise<ImageCredential> => {
+    switch (spec.type) {
+      case "oauth":
+        return resolveChatGptAuth(ctx.integration, spec)
+      case "key":
+        return resolveApiKey(ctx.integration, spec)
+      case "host":
+        return hostCredential
+    }
+  }
+  const providerAccess = (backend: Backend, context: ToolCallContext): ProviderAccess => ({
     signal: context.signal,
     // The action is the tool's name and the resource is the backend id, so a grant saved for one backend does not
     // cover another.
@@ -124,28 +181,34 @@ export const setup: Plugin.Plugin["setup"] = async (ctx) => {
         metadata: args,
         source: { type: "tool", messageID: context.messageID, id: context.id },
       }),
-    resolveCredential: () =>
-      spec.type === "oauth" ? resolveChatGptAuth(ctx.integration, spec) : resolveApiKey(ctx.integration, spec),
+    resolveCredential: () => resolveCredential(backend.credential),
   })
   await ctx.tool.transform((editor) => {
-    for (const tool of backend.tools) {
-      editor.add({
-        name: tool.name,
-        description: tool.description,
-        input: tool.schema,
-        ...(tool.kind === "image" ? { output: resultSchema } : {}),
-        options: { codemode: true },
-        async execute(input, context) {
-          const result = await invokeTool(tool, input, {
-            providerAccess: () => providerAccess(context),
-            // A session can run in a different directory than the one that loaded the plugin.
-            resolveDirectory: async () => (await ctx.session.get({ sessionID: context.sessionID })).location.directory,
-          })
-          return result.image
-            ? { output: { ...result.image, message: result.text }, content: result.text, metadata: result.image }
-            : { content: result.text }
-        },
-      })
+    editor.namespace({ name: NAMESPACE, description: describeNamespace(backends) })
+    for (const backend of backends) {
+      const namespace = namespaceOf(backend, backends)
+      if (backends.length > 1) editor.namespace({ name: namespace, description: backend.summary })
+      for (const tool of backend.tools) {
+        editor.add({
+          name: tool.name,
+          description: tool.description,
+          input: tool.schema,
+          ...(tool.kind === "image" ? { output: resultSchema } : {}),
+          options: { namespace, permission: tool.name, codemode: true },
+          async execute(input, context) {
+            const result = await invokeTool(tool, input, {
+              providerAccess: () => providerAccess(backend, context),
+              // A session can run in a different directory than the one that loaded the plugin.
+              resolveDirectory: async () =>
+                (await ctx.session.get({ sessionID: context.sessionID }, { signal: context.signal })).location
+                  .directory,
+            })
+            return result.image
+              ? { output: { ...result.image, message: result.text }, content: result.text, metadata: result.image }
+              : { content: result.text }
+          },
+        })
+      }
     }
   })
 }

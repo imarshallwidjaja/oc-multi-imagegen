@@ -324,6 +324,7 @@ export const openaiApiModels = defineLookupTool({
 
 export const openaiApiBackend = {
   id: "openai-api",
+  summary: "OpenAI Images API (pixel sizes, transparency, GIF/SVG, live models)",
   credential: openaiApiCredential,
   tools: [defineImageTool(openaiApiImagegen), defineImageTool(openaiApiImageedit), openaiApiModels],
 } satisfies Backend

@@ -3,10 +3,18 @@ import { mkdtemp, readFile, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { z } from "zod"
-import { selectBackend } from "../../src/backend"
+import { selectBackends } from "../../src/backend"
 import { loadPackagedSkill, SKILL_FILE } from "../../src/skill"
 import { isolateEnvironment, PNG_BASE64, PNG_BUFFER } from "./fixtures"
-import { CHATGPT_BROWSER_CREDENTIAL, ENVIRONMENT_KEY, FLAVOURS, type Flavour, loadV2Tool, SHARED_SIZE } from "./hosts"
+import {
+  CHATGPT_BROWSER_CREDENTIAL,
+  ENVIRONMENT_KEY,
+  FLAVOURS,
+  type Flavour,
+  loadV2Tool,
+  SHARED_SIZE,
+  v2ToolContext,
+} from "./hosts"
 
 isolateEnvironment()
 const originalFetch = globalThis.fetch
@@ -105,18 +113,86 @@ describe("OpenCode 2 tool registration", () => {
 
 describe("OpenCode 2 backend selection", () => {
   test.each(FLAVOURS)("registers exactly the tools the $backend backend declares", async (flavour) => {
-    const { registered } = await loadV2Tool({ directory: dir, backend: flavour.backend })
+    const declared = selectBackends({ backend: flavour.backend })[0].tools
 
-    const declared = selectBackend(undefined).tools
+    const { registered } = await loadV2Tool({ directory: dir, backend: flavour.backend })
     expect(registered.map((tool) => tool.name)).toEqual(declared.map((tool) => tool.name))
     for (const [index, tool] of registered.entries()) {
       expect(tool.description).toBe(declared[index].description)
       expect(tool.input).toBe(declared[index].schema)
-      // Code Mode without a namespace keeps the bare tool name as the call path and the permission action; a
-      // namespace or permission override would rename both.
-      expect(tool.options).toEqual({ codemode: true })
+      // The namespace makes the Code Mode path tools.image.<name>; the permission override keeps the bare tool name as
+      // the permission action, so existing rules for imagegen and imageedit still apply.
+      expect(tool.options).toEqual({ namespace: "image", permission: tool.name, codemode: true })
       expect("output" in tool).toBe(declared[index].kind === "image")
     }
+  })
+
+  test("describes the image namespace with the active backend, saving behavior and the skill", async () => {
+    const { namespaces } = await loadV2Tool({ directory: dir, backend: "openai-api" })
+
+    expect(namespaces).toEqual([{ name: "image", description: expect.any(String) }])
+    const [{ description }] = namespaces
+    for (const cue of [
+      "OpenAI Images API (pixel sizes, transparency, GIF/SVG, live models)",
+      "-vN suffix",
+      "format, dimensions and alpha",
+      "in parallel",
+      "oc-multi-imagegen skill",
+    ]) {
+      expect(description).toContain(cue)
+    }
+  })
+
+  test("registers each of several backends in its own described namespace, in the order the options give", async () => {
+    const { namespaces, registered } = await loadV2Tool({
+      directory: dir,
+      pluginOptions: { backends: ["openai-api", "codex"] },
+    })
+
+    expect(namespaces.map((namespace) => namespace.name)).toEqual(["image", "image.openai_api", "image.codex"])
+    expect(namespaces[0].description).toContain("image.openai_api (OpenAI Images API")
+    expect(namespaces[0].description).toContain("image.codex (Codex (ChatGPT sign-in, 7 size presets))")
+    expect(namespaces[2].description).toBe("Codex (ChatGPT sign-in, 7 size presets)")
+    expect(registered.map((tool) => [tool.options.namespace, tool.name, tool.options.permission])).toEqual([
+      ["image.openai_api", "imagegen", "imagegen"],
+      ["image.openai_api", "imageedit", "imageedit"],
+      ["image.openai_api", "imagegen_models", "imagegen_models"],
+      ["image.codex", "imagegen", "imagegen"],
+      ["image.codex", "imageedit", "imageedit"],
+    ])
+  })
+
+  test("registers the integration of every selected key backend", async () => {
+    const { integrations } = await loadV2Tool({
+      directory: dir,
+      pluginOptions: { backends: ["codex", "openai-api", "nano-gpt"] },
+    })
+
+    expect([...integrations.keys()]).toEqual(["openai-images", "nano-gpt-images"])
+  })
+
+  test("each of several backends asks for permission on its own resource and uses its own credential", async () => {
+    const fetchMock = stubFetch()
+    const { calls, toolNamed } = await loadV2Tool({
+      directory: dir,
+      pluginOptions: { backends: ["codex", "openai-api"] },
+    })
+    const context = v2ToolContext(new AbortController().signal)
+
+    await toolNamed("imagegen", "image.openai_api").execute(args, context)
+    await toolNamed("imagegen", "image.codex").execute(args, context)
+
+    expect(calls.assert.map((request) => [request.action, request.resources])).toEqual([
+      ["imagegen", ["openai-api"]],
+      ["imagegen", ["codex"]],
+    ])
+    expect(calls.active).toEqual(["openai-images", "openai"])
+    expect(
+      fetchMock.mock.calls.map(([url, init]) => [url, (init.headers as Record<string, string>).Authorization]),
+    ).toEqual([
+      ["https://api.openai.com/v1/images/generations", "Bearer sk-images"],
+      ["https://chatgpt.com/backend-api/codex/images/generations", "Bearer tok"],
+    ])
   })
 
   test("serves the NanoGPT model enums, required images and strict arguments the model sees", async () => {

@@ -56,12 +56,14 @@ export type InfoTool = {
 
 export type BackendTool = ImageTool | LookupTool | InfoTool
 
-// One image backend. The active backend is chosen by the OC_MULTI_IMAGEGEN_BACKEND variable when the plugin loads.
-// A backend owns everything specific to its provider: the tools it registers (each with its own input schema,
-// description and operation), the requests, the limits and the credential. Both host adapters register exactly
-// these tools.
+// One image backend. OpenCode 1 runs the one OC_MULTI_IMAGEGEN_BACKEND selects; OpenCode 2 can run several, chosen
+// by its plugin options or that variable when the plugin loads. A backend owns everything specific to its provider:
+// the tools it registers (each with its own input schema, description and operation), the requests, the limits and
+// the credential. Both host adapters register exactly these tools.
 export type Backend = {
   id: string
+  // One clause naming the provider and what sets it apart, for OpenCode 2's Code Mode namespace descriptions.
+  summary: string
   credential: CredentialSpec
   tools: readonly BackendTool[]
 }

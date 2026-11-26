@@ -1,9 +1,11 @@
 import type { Plugin } from "@opencode/plugin"
 import type { ToolContext } from "@opencode-ai/plugin"
+import type { HostGenerateImageInput, HostGenerateImageResult, HostImageModel } from "../../src/credential"
 import plugin from "../../src/index"
 import { CONTROL_NAMES } from "../../src/nano-gpt-models"
 import type { resultSchema } from "../../src/schema"
 import type { ToolSchema } from "../../src/types"
+import { PNG_BASE64 } from "./fixtures"
 
 // Test doubles for the two host contracts. They stand in for OpenCode 1's ToolContext and
 // OpenCode 2's plugin Context; the adapters under test never import either SDK at runtime.
@@ -272,7 +274,7 @@ export const FLAVOURS: Flavour[] = [
 
 // Selects the backend the way a deployment does, through the environment of the process that loads the plugin.
 // Codex is the default, so it is the variable's absence.
-export function selectBackendVariable(backend: Backend | undefined): void {
+export function selectBackendVariable(backend: Backend | "opencode" | undefined): void {
   if (backend === undefined || backend === "codex") delete process.env.OC_MULTI_IMAGEGEN_BACKEND
   else process.env.OC_MULTI_IMAGEGEN_BACKEND = backend
 }
@@ -327,9 +329,16 @@ export type V2Options = {
   directory?: string
   sessionDirectories?: Record<string, string>
   // The backend variable of the process; none selects Codex.
-  backend?: Backend
-  // Plugin options as the host passes them. The plugin takes none.
-  pluginOptions?: Record<string, unknown>
+  backend?: Backend | "opencode"
+  // Plugin options as the host passes them: backend or backends.
+  pluginOptions?: unknown
+  // The image models ctx.model.list reports, or how it answers, and how ctx.experimental.generate.image answers. False
+  // models a host without either.
+  imageModels?: HostImageModel[] | (() => Promise<HostImageModel[]>)
+  // True models OpenCode 2.3.2, whose ctx.model.list ignores the request's signal.
+  modelListIgnoresSignal?: true
+  generateImage?: (input: HostGenerateImageInput) => Promise<HostGenerateImageResult>
+  hostImageApi?: false
   // The OpenAI integration's connection and credential. Another integration is only present when `integrations`
   // names it.
   connection?: unknown
@@ -352,12 +361,36 @@ export const CHATGPT_BROWSER_CREDENTIAL = {
   expires: Number.MAX_SAFE_INTEGER,
 }
 
+type RequestOptions = { signal?: AbortSignal }
+
+// Like the host's API methods, a call with an aborted signal rejects before it starts, and an abort during the call
+// rejects it with the signal's reason.
+function hostRequest<T>(signal: AbortSignal | undefined, run: () => Promise<T>): Promise<T> {
+  if (!signal) return run()
+  if (signal.aborted) return Promise.reject(signal.reason)
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason)
+    signal.addEventListener("abort", onAbort, { once: true })
+    run()
+      .then(resolve, reject)
+      .finally(() => signal.removeEventListener("abort", onAbort))
+  })
+}
+
 export function createV2Context(options: V2Options = {}) {
   const calls = {
     assert: [] as Array<Record<string, unknown>>,
     sessionGet: [] as Array<{ sessionID: string }>,
     active: [] as string[],
     resolve: [] as unknown[],
+    modelList: [] as unknown[],
+    generateImage: [] as HostGenerateImageInput[],
+    // The request options of each call to the methods above that take them, in call order.
+    requestOptions: {
+      sessionGet: [] as Array<RequestOptions | undefined>,
+      modelList: [] as Array<RequestOptions | undefined>,
+      generateImage: [] as Array<RequestOptions | undefined>,
+    },
   }
   // Like the host, each integration has its own connection and credential; an unknown integration has none.
   const store: Record<string, { connection?: unknown; credential?: unknown }> = {
@@ -378,6 +411,7 @@ export function createV2Context(options: V2Options = {}) {
   const integrations = new Map<string, { name: string }>()
   const integrationMethods: Array<{ integrationID: string; method: { type: string; names?: string[] } }> = []
   const registered: RegisteredTool[] = []
+  const namespaces: Array<{ name: string; description: string }> = []
   const skills = new Map<string, Record<string, unknown>>(Object.entries(options.existingSkills ?? {}) as never)
   const skillCallbacks: Array<(editor: SkillEditor) => void> = []
   // Like the host, adding an id that is already held is an error.
@@ -392,10 +426,15 @@ export function createV2Context(options: V2Options = {}) {
   const context = {
     // A directory the adapter must not use: sessions carry their own location.
     location: { directory: "/plugin-load-directory" },
-    options: options.pluginOptions ?? {},
+    options: "pluginOptions" in options ? options.pluginOptions : {},
     tool: {
-      transform: async (callback: (editor: { add: (tool: RegisteredTool) => void }) => void) => {
-        callback({ add: (tool) => registered.push(tool) })
+      transform: async (
+        callback: (editor: {
+          add: (tool: RegisteredTool) => void
+          namespace: (namespace: { name: string; description: string }) => void
+        }) => void,
+      ) => {
+        callback({ add: (tool) => registered.push(tool), namespace: (namespace) => namespaces.push(namespace) })
         return { dispose: async () => {} }
       },
     },
@@ -406,6 +445,34 @@ export function createV2Context(options: V2Options = {}) {
         return { dispose: async () => {} }
       },
     },
+    ...(options.hostImageApi === false
+      ? {}
+      : {
+          experimental: {
+            generate: {
+              image: (input: HostGenerateImageInput, requestOptions?: RequestOptions) => {
+                calls.generateImage.push(input)
+                calls.requestOptions.generateImage.push(requestOptions)
+                return hostRequest(requestOptions?.signal, async () =>
+                  options.generateImage
+                    ? options.generateImage(input)
+                    : { images: [{ type: "image", data: PNG_BASE64, mime: "image/png" }] },
+                )
+              },
+            },
+          },
+          model: {
+            list: (input: unknown, requestOptions?: RequestOptions) => {
+              calls.modelList.push(input)
+              calls.requestOptions.modelList.push(requestOptions)
+              const { imageModels = [] } = options
+              return hostRequest(options.modelListIgnoresSignal ? undefined : requestOptions?.signal, async () => ({
+                location: {},
+                data: typeof imageModels === "function" ? await imageModels() : imageModels,
+              }))
+            },
+          },
+        }),
     permission: {
       assert: async (input: Record<string, unknown>) => {
         calls.assert.push(input)
@@ -413,9 +480,12 @@ export function createV2Context(options: V2Options = {}) {
       },
     },
     session: {
-      get: async (input: { sessionID: string }) => {
+      get: (input: { sessionID: string }, requestOptions?: RequestOptions) => {
         calls.sessionGet.push(input)
-        return { location: { directory: options.sessionDirectories?.[input.sessionID] ?? options.directory } }
+        calls.requestOptions.sessionGet.push(requestOptions)
+        return hostRequest(requestOptions?.signal, async () => ({
+          location: { directory: options.sessionDirectories?.[input.sessionID] ?? options.directory },
+        }))
       },
     },
     integration: {
@@ -464,6 +534,7 @@ export function createV2Context(options: V2Options = {}) {
     context: context as unknown as Plugin.Context,
     calls,
     registered,
+    namespaces,
     integrations,
     integrationMethods,
     skills,
@@ -485,8 +556,11 @@ export async function loadV2Tool(options: V2Options = {}) {
   if (options.backend) selectBackendVariable(options.backend)
   const fake = createV2Context(options)
   await plugin.setup(fake.context)
-  const toolNamed = (name: string) => {
-    const found = fake.registered.find((candidate) => candidate.name === name)
+  // With several backends a name repeats, so the namespace tells them apart.
+  const toolNamed = (name: string, namespace?: string) => {
+    const found = fake.registered.find(
+      (candidate) => candidate.name === name && (namespace === undefined || candidate.options.namespace === namespace),
+    )
     if (!found) throw new Error(`${name} is not registered`)
     return found
   }

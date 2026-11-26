@@ -174,6 +174,7 @@ export const codexImageedit = {
 
 export const codexBackend = {
   id: "codex",
+  summary: "Codex (ChatGPT sign-in, 7 size presets)",
   credential: codexCredential,
   tools: [defineImageTool(codexImagegen), defineImageTool(codexImageedit)],
 } satisfies Backend

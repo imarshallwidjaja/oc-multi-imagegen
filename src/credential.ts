@@ -1,17 +1,33 @@
 // The credential rules every host shares. Reading a credential is each host's own work (auth.ts on OpenCode 1, the
 // host's integration store on OpenCode 2); this module reads no file and no variable's value.
 
+import type { Plugin } from "@opencode/plugin"
+
 export type OAuthCredential = { type: "oauth"; access: string; accountId?: string }
 export type KeyCredential = { type: "key"; key: string }
-export type ImageCredential = OAuthCredential | KeyCredential
+// OpenCode 2's image generation and model catalog, which the "opencode" backend uses.
+type GenerateImage = Plugin.Context["experimental"]["generate"]["image"]
+export type HostGenerateImageInput = Parameters<GenerateImage>[0]
+export type HostGenerateImageResult = Awaited<ReturnType<GenerateImage>>
+export type HostImageModel = Awaited<ReturnType<Plugin.Context["model"]["list"]>>["data"][number]
+// The host's own connected providers stand in for a credential: the host signs the request itself. The signal is
+// passed to the host, which stops the request when it aborts.
+export type HostCredential = {
+  type: "host"
+  generateImage: (input: HostGenerateImageInput, signal: AbortSignal) => Promise<HostGenerateImageResult>
+  listImageModels: (signal: AbortSignal) => Promise<readonly HostImageModel[]>
+}
+export type ImageCredential = OAuthCredential | KeyCredential | HostCredential
 
 // Which OpenCode credential a backend consumes. `provider` is the id OpenCode stores it under, and `label` names it
 // in messages. A key credential belongs to this plugin: each host adapter registers its sign-in method under
 // `provider`, and `environmentVariable` names the variable of the OpenCode process that supplies the key ahead of the
-// saved one. An oauth credential belongs to the host's own sign-in for that provider and has no variable.
+// saved one. An oauth credential belongs to the host's own sign-in for that provider and has no variable. A host
+// credential is OpenCode 2's model catalog and generation API, which use the host's provider connections.
 export type CredentialSpec =
   | { type: "oauth"; provider: string; label: string }
   | { type: "key"; provider: string; label: string; environmentVariable: string }
+  | { type: "host"; provider: string; label: string }
 
 // The credential a backend's requests receive for its spec.
 export type CredentialFor<C extends CredentialSpec> = Extract<ImageCredential, { type: C["type"] }>
