@@ -29,6 +29,7 @@ function runTool(name: string, args: Record<string, unknown>, directory: string,
   return tool.run(args, {
     signal,
     authorize: async () => {},
+    authorizeFetch: async () => {},
     resolveDirectory: async () => directory,
     resolveCredential: async () => credential,
   })

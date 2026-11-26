@@ -27,6 +27,8 @@ export type Operation = {
   // What the request body holds, and which fields it must not hold, when the optional arguments are null.
   nullBody: Record<string, unknown>
   absentWhenNull: string[]
+  // Valid arguments that ask for a transparent background.
+  transparentArgs: Record<string, unknown>
   // The provider failure message for an HTTP 500 answering "upstream boom".
   failure: string
   // The message for a provider answer that holds no usable image.
@@ -99,7 +101,7 @@ const editInvalid = (maxImages: number): Operation["invalid"] => [
   ],
 ]
 
-const NULLS: Record<string, null> = { background: null, model: null, quality: null }
+const NULLS: Record<string, null> = { background: null, model: null, quality: null, preview: null }
 
 function imagesApiOperation(
   tool: string,
@@ -115,7 +117,8 @@ function imagesApiOperation(
     invalid,
     nulls: NULLS,
     nullBody: { background: "opaque" },
-    absentWhenNull: [],
+    absentWhenNull: ["preview"],
+    transparentArgs: { ...args, background: "transparent" },
     failure: `${label} images request failed: 500 upstream boom`,
     unusableResponse: `no image returned by ${label} images endpoint`,
     savesGifAndSvg: false,
@@ -149,7 +152,7 @@ const openaiGeneration: Operation = {
   ]),
   nulls: { ...OPENAI_NULLS, frame_count: null, frame_duration_ms: null, svg_model: null },
   nullBody: { background: "opaque", output_format: "png" },
-  absentWhenNull: ["frame_count", "frame_duration_ms", "svg"],
+  absentWhenNull: ["frame_count", "frame_duration_ms", "svg", "preview"],
   savesGifAndSvg: true,
 }
 
@@ -169,14 +172,14 @@ const openaiEdit: Operation = {
     ["svg_model", { ...EDIT_ARGS, svg_model: "author" }, `Unsupported argument: svg_model. ${GENERATION_ONLY}`],
     ["a transparent JPEG", { ...EDIT_ARGS, output_format: "jpeg", background: "transparent" }, "at background"],
   ]),
-  nulls: OPENAI_NULLS,
+  nulls: { ...OPENAI_NULLS, mask: null },
   nullBody: { background: "opaque", output_format: "png" },
-  absentWhenNull: ["frame_count", "frame_duration_ms", "svg"],
+  absentWhenNull: ["frame_count", "frame_duration_ms", "svg", "preview", "mask"],
 }
 
 const NANO_URL = "https://api.nano-gpt.com/api/v1/images"
-const NANO_ABSENT = [...CONTROL_NAMES]
-const NANO_NULLS = Object.fromEntries(CONTROL_NAMES.map((name) => [name, null]))
+const NANO_ABSENT = [...CONTROL_NAMES, "preview"]
+const NANO_NULLS = Object.fromEntries(NANO_ABSENT.map((name) => [name, null]))
 const NANO_UNUSABLE = "returned a response this plugin cannot use"
 const nanoReferences = (body: Record<string, unknown>) => (body.input_references as string[] | undefined) ?? []
 
@@ -243,6 +246,11 @@ export const FLAVOURS: Flavour[] = [
         nulls: NANO_NULLS,
         nullBody: { model: "nano-banana-pro", n: 1 },
         absentWhenNull: NANO_ABSENT,
+        transparentArgs: {
+          ...NANO_GENERATE_ARGS,
+          model: "openai/gpt-image-2.5/flare/text-to-image",
+          background: "transparent",
+        },
         failure: "NanoGPT imagegen (nano-banana-pro) request failed: HTTP 500: upstream boom.",
         unusableResponse: NANO_UNUSABLE,
         savesGifAndSvg: false,
@@ -262,6 +270,7 @@ export const FLAVOURS: Flavour[] = [
         nulls: NANO_NULLS,
         nullBody: { model: "nano-banana-pro-edit", n: 1 },
         absentWhenNull: NANO_ABSENT,
+        transparentArgs: { ...NANO_EDIT_ARGS, model: "openai/gpt-image-2.5/flare/edit", background: "transparent" },
         failure: "NanoGPT imageedit (nano-banana-pro-edit) request failed: HTTP 500: upstream boom.",
         unusableResponse: NANO_UNUSABLE,
         savesGifAndSvg: false,
@@ -292,11 +301,19 @@ export const STORED_CREDENTIALS = {
 // An information tool saves nothing, so `out` and `versioned` are absent for it.
 export type NormalizedResult = { message: string; out?: string; versioned?: boolean }
 
+// The file parts an OpenCode 2 result attaches next to its text.
+export type FilePart = { type: "file"; uri: string; mime: string; name?: string }
+export type V2Content = string | Array<{ type: "text"; text: string } | FilePart>
+
 export type ToolHarness = {
-  // Every permission request the adapter made, in the host's own request shape.
+  // Every permission request the adapter made, in the host's own request shape, web fetches included.
   permissionRequests: unknown[]
+  // The URLs of the webfetch permission requests, in order.
+  webfetchUrls: () => string[]
   // Makes the next permission requests fail as a host denial would.
   denyPermission: (error: Error) => void
+  // Makes the next webfetch permission requests fail, leaving the tool's own permission allowed.
+  denyWebfetch: (error: Error) => void
   execute: (rawArgs: unknown, signal?: AbortSignal) => Promise<NormalizedResult>
 }
 
@@ -314,7 +331,7 @@ export type RegisteredTool = {
     context: ReturnType<typeof v2ToolContext>,
   ) => Promise<{
     output: { out: string; versioned: boolean; message: string }
-    content: string
+    content: V2Content
     metadata: { out: string; versioned: boolean }
   }>
 }
@@ -423,6 +440,7 @@ export function createV2Context(options: V2Options = {}) {
     },
   }
   let denial: Error | undefined
+  let webfetchDenial: Error | undefined
   const context = {
     // A directory the adapter must not use: sessions carry their own location.
     location: { directory: "/plugin-load-directory" },
@@ -476,6 +494,7 @@ export function createV2Context(options: V2Options = {}) {
     permission: {
       assert: async (input: Record<string, unknown>) => {
         calls.assert.push(input)
+        if (input.action === "webfetch" && webfetchDenial) throw webfetchDenial
         if (denial) throw denial
       },
     },
@@ -545,7 +564,18 @@ export function createV2Context(options: V2Options = {}) {
     denyPermission: (error: Error) => {
       denial = error
     },
+    denyWebfetch: (error: Error) => {
+      webfetchDenial = error
+    },
   }
+}
+
+// The text of an OpenCode 2 result: the content itself, or its text part when a file is attached.
+export function v2Text(content: V2Content): string {
+  if (typeof content === "string") return content
+  const text = content.find((part) => part.type === "text")
+  if (!text) throw new Error("the result has no text part")
+  return text.text
 }
 
 export function v2ToolContext(signal: AbortSignal, sessionID = SESSION_ID) {
@@ -583,16 +613,23 @@ export async function v1Harness(directory: string, flavour?: Flavour, toolName =
   const hooks = await plugin.server({} as never)
   const tool = hooks.tool?.[toolName]
   if (!tool) throw new Error(`${toolName} is not registered`)
-  const permissionRequests: unknown[] = []
+  const permissionRequests: Array<Parameters<ToolContext["ask"]>[0]> = []
   let denial: Error | undefined
+  let webfetchDenial: Error | undefined
   const ask: ToolContext["ask"] = async (input) => {
     permissionRequests.push(input)
+    if (input.permission === "webfetch" && webfetchDenial) throw webfetchDenial
     if (denial) throw denial
   }
   return {
     permissionRequests,
+    webfetchUrls: () =>
+      permissionRequests.filter((request) => request.permission === "webfetch").flatMap((request) => request.patterns),
     denyPermission: (error) => {
       denial = error
+    },
+    denyWebfetch: (error) => {
+      webfetchDenial = error
     },
     async execute(rawArgs, signal = new AbortController().signal) {
       const result = (await tool.execute(rawArgs as never, v1ToolContext(directory, signal, ask))) as {
@@ -608,10 +645,15 @@ export async function v2Harness(directory: string, flavour?: Flavour, toolName =
   const loaded = await loadV2Tool({ directory, backend: flavour?.backend })
   return {
     permissionRequests: loaded.calls.assert,
+    webfetchUrls: () =>
+      loaded.calls.assert
+        .filter((request) => request.action === "webfetch")
+        .flatMap((request) => request.resources as string[]),
     denyPermission: loaded.denyPermission,
+    denyWebfetch: loaded.denyWebfetch,
     async execute(rawArgs, signal) {
       const result = await loaded.run(rawArgs, signal, undefined, toolName)
-      return { message: result.content, out: result.output?.out, versioned: result.output?.versioned }
+      return { message: v2Text(result.content), out: result.output?.out, versioned: result.output?.versioned }
     },
   }
 }

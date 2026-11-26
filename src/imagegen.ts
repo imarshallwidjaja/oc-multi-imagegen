@@ -1,7 +1,7 @@
 import type { z } from "zod"
 import { acceptCredential, type CredentialFor, type CredentialSpec } from "./credential"
 import type { OutputFormat } from "./image-format"
-import { readReferenceImages } from "./input-image"
+import { type MaskEntry, readReferenceImages } from "./input-image"
 import { saveGeneratedImage } from "./output-image"
 import { IMAGEEDIT_TOOL, IMAGEGEN_TOOL, parseArgs, TOOL_OF } from "./schema"
 import { SKILL_NAME } from "./skill"
@@ -58,7 +58,7 @@ export function describeGenerationTool({
 
 export function describeEditTool({ subject, discovery, requires, critical, details }: ToolDescription): string {
   return assemble([
-    `Edit or combine local images into one new raster image via ${subject}; for text only, use ${IMAGEGEN_TOOL}.`,
+    `Edit or combine images into one new raster image via ${subject}; for text only, use ${IMAGEGEN_TOOL}.`,
     SKILL_SENTENCE,
     discovery,
     requires,
@@ -69,7 +69,8 @@ export function describeEditTool({ subject, discovery, requires, critical, detai
   ])
 }
 
-type GenerationSchema = ToolSchema & z.ZodType<{ out: string }>
+// `preview` and `background` are read by the shared flow when a tool defines them.
+type GenerationSchema = ToolSchema & z.ZodType<{ out: string; preview?: boolean | null; background?: string | null }>
 type EditSchema = ToolSchema & z.ZodType<{ out: string; images: string[] }>
 
 // What a backend declares for one image tool. `schema` validates the complete input and `out` is the destination. The
@@ -99,12 +100,16 @@ export type EditToolSpec<S extends EditSchema, C extends CredentialSpec> = Image
   operation: "edit"
   // What each reference of this call must satisfy, checked when the files are read.
   referenceRules: (args: z.output<S>) => ReferenceRules
-  // Sends one request with the references and returns the image bytes.
+  // For a tool with an inpainting mask: the call's mask entry, if any, and what the file must satisfy. The flow loads
+  // it like a reference and checks it is a PNG with alpha and the pixel size of the first image.
+  mask?: (args: z.output<S>) => MaskEntry | undefined
+  // Sends one request with the references, and the mask data URL when the call has one, and returns the image bytes.
   request: (
     credential: CredentialFor<C>,
     args: z.output<S>,
     references: string[],
     signal: AbortSignal,
+    mask?: string,
   ) => Promise<Uint8Array>
 }
 
@@ -131,22 +136,29 @@ export function defineImageTool(
       await host.authorize(name, { ...args })
       const directory = await host.resolveDirectory()
       const credential = acceptCredential(spec.credential, await host.resolveCredential())
-      const image =
-        spec.operation === "edit"
-          ? await spec.request(
-              credential,
-              args,
-              await readReferenceImages(args.images, directory, spec.referenceRules(args)),
-              host.signal,
-            )
-          : await spec.request(credential, args, host.signal)
+      let image: Uint8Array
+      if (spec.operation === "edit") {
+        const source = { directory, authorizeFetch: host.authorizeFetch, signal: host.signal }
+        const { references, mask } = await readReferenceImages(
+          args.images,
+          source,
+          spec.referenceRules(args),
+          spec.mask?.(args),
+        )
+        image = await spec.request(credential, args, references, host.signal, mask)
+      } else {
+        image = await spec.request(credential, args, host.signal)
+      }
       host.signal.throwIfAborted()
-      const saved = await saveGeneratedImage(args.out, directory, image, spec.outputFormats).catch((error: unknown) => {
-        if (spec.saveFailureNote && error instanceof Error) {
-          throw new Error(`${error.message} ${spec.saveFailureNote}`, { cause: error })
-        }
-        throw error
-      })
+      const options = { preview: args.preview === true, expectTransparent: args.background === "transparent" }
+      const saved = await saveGeneratedImage(args.out, directory, image, spec.outputFormats, options).catch(
+        (error: unknown) => {
+          if (spec.saveFailureNote && error instanceof Error) {
+            throw new Error(`${error.message} ${spec.saveFailureNote}`, { cause: error })
+          }
+          throw error
+        },
+      )
       const note = spec.resultNote?.(args)
       return note ? { ...saved, message: `${saved.message} ${note}` } : saved
     },

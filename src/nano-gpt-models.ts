@@ -1,6 +1,7 @@
 import { z } from "zod"
 import { listFormatNames, RASTER_FORMATS } from "./image-format"
 import { defineInfoTool, describeEditTool, describeGenerationTool, RASTER_MEDIUM } from "./imagegen"
+import { MAX_URL_BYTES } from "./input-image"
 import {
   GENERATION_MOVED_ARGUMENTS,
   IMAGEEDIT_TOOL,
@@ -10,6 +11,8 @@ import {
   type Operation,
   outField,
   PROMPT_DESCRIPTION,
+  previewField,
+  REFERENCE_ENTRIES,
   strictArgs,
   TOOL_OF,
 } from "./schema"
@@ -456,7 +459,7 @@ function commonShape(operation: Operation) {
       `Optional quality tier, only for models that list it in ${MODELS_TOOL} (${modelsWith("quality")}). Omit it to use the provider default.`,
     ),
     background: optionalControl(
-      `Optional background (${valuesOf("background")}), only for models that list it in ${MODELS_TOOL} (${modelsWith("background")}). With those models use transparent for a cut-out instead of asking in the prompt; with other models request transparency in the prompt. The returned alpha can be soft and the tool does not check it: a filename, RGBA channel or painted checkerboard does not prove transparency.`,
+      `Optional background (${valuesOf("background")}), only for models that list it in ${MODELS_TOOL} (${modelsWith("background")}). With those models use transparent for a cut-out instead of asking in the prompt; with other models request transparency in the prompt. The returned alpha can be soft; the tool reports measured PNG alpha (or WebP header flags) without modifying pixels. A filename, RGBA channel or painted checkerboard does not prove transparency.`,
     ),
     seed: z
       .number()
@@ -465,6 +468,7 @@ function commonShape(operation: Operation) {
       .describe(
         `Optional integer seed, only for models that list it in ${MODELS_TOOL}. It may help reproducibility but does not guarantee identical output.`,
       ),
+    preview: previewField(),
   }
 }
 
@@ -485,7 +489,7 @@ export const editSchema = strictArgs(IMAGEEDIT_TOOL, {
     .min(1, NO_REFERENCES)
     .max(MAX_EDIT_REFERENCES)
     .describe(
-      "Required local paths of the images to edit or combine, relative to the project directory unless absolute; they are sent in order, so call them Image 1, Image 2 in the prompt. Each file must be PNG, JPEG or WebP. The count limit depends on the model. Their contents are uploaded to NanoGPT.",
+      `Required images to edit or combine: ${REFERENCE_ENTRIES}. They are sent in order, so call them Image 1, Image 2 in the prompt. Each must be PNG, JPEG or WebP. The count limit depends on the model. Their contents are uploaded to NanoGPT.`,
     ),
 }).superRefine(checkAgainstModel("edit"))
 
@@ -499,6 +503,7 @@ function requestSchema(model: NanoModel) {
       ...(model.maxPromptCodePoints ? { maxLength: model.maxPromptCodePoints } : {}),
     },
     out: { type: "string" },
+    preview: { type: "boolean" },
   }
   for (const control of controlsOf(model)) {
     properties[control.name] = control.values ? { type: "string", enum: control.values } : { type: "integer" }
@@ -520,6 +525,12 @@ function requestSchema(model: NanoModel) {
   }
 }
 
+// A URL download has its own cap, so a larger model limit applies to local files only.
+const describeReferenceSize = (maxBytes: number) =>
+  maxBytes > MAX_URL_BYTES
+    ? `each at most ${maxBytes} bytes locally (${MAX_URL_BYTES} bytes by https URL)`
+    : `each at most ${maxBytes} bytes`
+
 function describeDetail(model: NanoModel, includeSchema = true): string {
   const same = counterpart(model)
   const lines = [
@@ -538,7 +549,7 @@ function describeDetail(model: NanoModel, includeSchema = true): string {
     ...(model.maxPromptCodePoints ? [`Prompt: at most ${model.maxPromptCodePoints} characters.`] : []),
     ...(model.operation === "edit"
       ? [
-          `References: 1 to ${model.maxReferences} local PNG, JPEG or WebP files, each at most ${referenceRules(model).maxBytes} bytes.`,
+          `References: 1 to ${model.maxReferences} PNG, JPEG or WebP files (local paths or https URLs), ${describeReferenceSize(referenceRules(model).maxBytes)}.`,
         ]
       : ["References: none. Use the edit model to change existing images."]),
     ...(model.notes ? [model.notes] : []),

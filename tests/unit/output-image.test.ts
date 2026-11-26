@@ -4,9 +4,9 @@ import { chmod, lstat, mkdir, mkdtemp, open, readdir, readFile, rm, symlink, wri
 import os from "node:os"
 import path from "node:path"
 import { RASTER_FORMATS } from "../../src/image-format"
-import { saveGeneratedImage } from "../../src/output-image"
+import { MAX_PREVIEW_BYTES, saveGeneratedImage } from "../../src/output-image"
 import { inspectSvg } from "../../src/svg"
-import { PNG_BUFFER, SVG_BUFFER } from "./fixtures"
+import { ANIMATED_GIF_BUFFER, JPEG_BUFFER, PNG_BUFFER, pngChunk, SVG_BUFFER, solidPng, WEBP_BUFFER } from "./fixtures"
 
 let dir: string
 
@@ -147,6 +147,85 @@ describe("saveGeneratedImage", () => {
     expect((error.errors.at(-1) as NodeJS.ErrnoException).code).toBe("EACCES")
     await chmod(dir, 0o700)
     expect(await readFile(savedPath)).toEqual(PNG_BUFFER.subarray(0, 8))
+  })
+})
+
+// Whether a saved image can be attached inline. How each host returns it is covered in v1.test.ts and v2.test.ts.
+// The warning for a requested transparent background that is missing is covered through both hosts in
+// imagegen.test.ts. These cases own the PNGs whose alpha the plugin cannot measure, which must not be reported opaque.
+describe("saveGeneratedImage transparency warning", () => {
+  // The 8-byte signature and the 25-byte IHDR chunk come first in every PNG solidPng builds.
+  const IHDR_END = 33
+  const rgbWithTrns = (() => {
+    const png = solidPng(2, 2)
+    return Buffer.concat([png.subarray(0, IHDR_END), pngChunk("tRNS", new Uint8Array(6)), png.subarray(IHDR_END)])
+  })()
+  const interlacedRgba = (() => {
+    const png = solidPng(2, 2, 255)
+    const header = Buffer.from(png.subarray(16, 29))
+    header[12] = 1
+    return Buffer.concat([png.subarray(0, 8), pngChunk("IHDR", header), png.subarray(IHDR_END)])
+  })()
+
+  test.each([
+    ["an RGB PNG with a tRNS chunk", rgbWithTrns, "tRNS transparency is not measured"],
+    ["an interlaced RGBA PNG", interlacedRgba, "interlaced PNG"],
+  ])("does not warn for %s, whose alpha is not measured", async (_name, bytes, reason) => {
+    const saved = await saveGeneratedImage("out.png", dir, bytes, RASTER_FORMATS, { expectTransparent: true })
+
+    expect(saved.message).toContain(`alpha not measured (${reason})`)
+    expect(saved.message).not.toContain("Warning:")
+  })
+})
+
+describe("saveGeneratedImage inline preview", () => {
+  const ALL_FORMATS = [...RASTER_FORMATS, "gif", "svg"] as const
+  const savePreview = (out: string, bytes: Uint8Array, preview = true) =>
+    saveGeneratedImage(out, dir, bytes, ALL_FORMATS, { preview })
+
+  test("attaches nothing and adds no note unless the call asks for a preview", async () => {
+    const saved = await savePreview("cat.png", PNG_BUFFER, false)
+
+    expect(saved.preview).toBeUndefined()
+    expect(saved.message).not.toContain("preview")
+  })
+
+  test.each([
+    ["PNG", PNG_BUFFER, "image/png"],
+    ["JPEG", JPEG_BUFFER, "image/jpeg"],
+    ["WebP", WEBP_BUFFER, "image/webp"],
+  ] as const)("attaches the saved %s bytes with their MIME type", async (_name, bytes, mime) => {
+    const saved = await savePreview("cat", bytes)
+
+    expect(saved.preview).toEqual({ mime, bytes })
+    expect(await readFile(saved.savedPath)).toEqual(bytes)
+    expect(saved.message).not.toContain("preview")
+  })
+
+  test.each([
+    ["GIF", ANIMATED_GIF_BUFFER, "cat.gif"],
+    ["SVG", SVG_BUFFER, "cat.svg"],
+  ] as const)("omits a %s with a note naming the saved file", async (name, bytes, file) => {
+    const saved = await savePreview("cat", bytes)
+
+    expect(saved.preview).toBeUndefined()
+    expect(saved.message).toEndWith(
+      ` Inline preview omitted: ${name} cannot be attached inline; inspect the saved file at ${path.join(dir, file)}.`,
+    )
+  })
+
+  test("attaches an image of exactly 3.5 MiB and omits one byte more with a note", async () => {
+    const padded = (length: number) => Buffer.concat([PNG_BUFFER, Buffer.alloc(length - PNG_BUFFER.length)])
+
+    const atLimit = await savePreview("limit.png", padded(MAX_PREVIEW_BYTES))
+    const over = await savePreview("over.png", padded(MAX_PREVIEW_BYTES + 1))
+
+    expect(MAX_PREVIEW_BYTES).toBe(3.5 * 1024 * 1024)
+    expect(atLimit.preview?.bytes.length).toBe(MAX_PREVIEW_BYTES)
+    expect(over.preview).toBeUndefined()
+    expect(over.message).toEndWith(
+      ` Inline preview omitted: the image is 3670017 bytes (limit 3670016 bytes); use read on ${over.savedPath}.`,
+    )
   })
 })
 

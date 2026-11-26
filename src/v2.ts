@@ -1,3 +1,4 @@
+import * as path from "node:path"
 import type { Plugin } from "@opencode/plugin"
 import { selectBackends } from "./backend"
 import {
@@ -182,6 +183,21 @@ export const setup: Plugin.Plugin["setup"] = async (ctx) => {
         source: { type: "tool", messageID: context.messageID, id: context.id },
       }),
     resolveCredential: () => resolveCredential(backend.credential),
+    // A reference URL is fetched under the host's webfetch permission; a saved grant covers the URL's origin. An
+    // origin containing "*" would save a wildcard rule covering other hosts, so it saves nothing, as OpenCode's own
+    // webfetch does.
+    authorizeFetch: (url) => {
+      const origin = new URL(url).origin
+      return ctx.permission.assert({
+        sessionID: context.sessionID,
+        agent: context.agent,
+        action: "webfetch",
+        resources: [url],
+        save: origin.includes("*") ? [] : [origin, `${origin}/*`],
+        metadata: { url },
+        source: { type: "tool", messageID: context.messageID, id: context.id },
+      })
+    },
   })
   await ctx.tool.transform((editor) => {
     editor.namespace({ name: NAMESPACE, description: describeNamespace(backends) })
@@ -203,9 +219,23 @@ export const setup: Plugin.Plugin["setup"] = async (ctx) => {
                 (await ctx.session.get({ sessionID: context.sessionID }, { signal: context.signal })).location
                   .directory,
             })
-            return result.image
-              ? { output: { ...result.image, message: result.text }, content: result.text, metadata: result.image }
-              : { content: result.text }
+            if (!result.image) return { content: result.text }
+            const output = { ...result.image, message: result.text }
+            if (!result.preview) return { output, content: result.text, metadata: result.image }
+            const { mime, bytes } = result.preview
+            return {
+              output,
+              content: [
+                { type: "text" as const, text: result.text },
+                {
+                  type: "file" as const,
+                  uri: `data:${mime};base64,${Buffer.from(bytes).toString("base64")}`,
+                  mime,
+                  name: path.basename(result.image.out),
+                },
+              ],
+              metadata: result.image,
+            }
           },
         })
       }

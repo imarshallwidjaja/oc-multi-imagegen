@@ -18,6 +18,8 @@ import {
   NO_REFERENCES,
   outField,
   PROMPT_DESCRIPTION,
+  previewField,
+  REFERENCE_ENTRIES,
   strictArgs,
 } from "./schema"
 import type { Backend } from "./types"
@@ -117,6 +119,7 @@ const generateSchema = strictArgs(
     out: outField(OUTPUT_FORMATS),
     model: modelField("generate"),
     ...controlFields,
+    preview: previewField(),
   },
   { ...GENERATION_MOVED_ARGUMENTS, size: SIZE_MOVED },
 )
@@ -134,9 +137,10 @@ const editSchema = strictArgs(
       .min(1, NO_REFERENCES)
       .max(MAX_REFERENCE_IMAGES, `${IMAGEEDIT_TOOL} takes at most ${MAX_REFERENCE_IMAGES} reference images.`)
       .describe(
-        `Required local reference image paths, 1 to ${MAX_REFERENCE_IMAGES}, relative to the project directory unless absolute; they are sent in order, so call them Image 1, Image 2 in the prompt. Each file must be PNG, JPEG, WebP or GIF and at most 20 MiB. Their contents are uploaded to the model's provider.`,
+        `Required reference images, 1 to ${MAX_REFERENCE_IMAGES}: ${REFERENCE_ENTRIES}. They are sent in order, so call them Image 1, Image 2 in the prompt. Each must be PNG, JPEG, WebP or GIF and at most 20 MiB. Their contents are uploaded to the model's provider.`,
       ),
     ...controlFields,
+    preview: previewField(),
   },
   { size: SIZE_MOVED },
 )

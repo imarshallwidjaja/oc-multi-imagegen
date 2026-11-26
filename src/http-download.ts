@@ -39,15 +39,18 @@ export type BodyRefusal =
 
 export type BoundedBody = { ok: true; bytes: Uint8Array } | { ok: false; refusal: BodyRefusal }
 
-// Reads a response body of at most maxBytes. A declared length above the limit is refused before reading, a body that
+// Reads a response body of at most maxBytes. A declared length above the limit is refused and its body cancelled
+// unread, a body that
 // grows past it is cancelled, and an uncompressed body must match its declared length. A refusal is returned; a
 // failure of the read itself, including cancellation through the request's signal, is thrown as the runtime raised it,
 // so the caller decides what of it to report.
 export async function readBoundedResponseBody(res: Response, maxBytes: number): Promise<BoundedBody> {
   const declaredText = res.headers.get("content-length")?.trim()
   const declared = declaredText && /^\d+$/.test(declaredText) ? Number(declaredText) : undefined
-  if (declared !== undefined && declared > maxBytes)
+  if (declared !== undefined && declared > maxBytes) {
+    await res.body?.cancel().catch(() => {})
     return { ok: false, refusal: { kind: "declared-too-large", declared } }
+  }
   // A compressed representation declares its encoded length while the body read here is decoded, so only an
   // uncompressed body can be held to it.
   const encoding = res.headers.get("content-encoding")?.trim().toLowerCase()

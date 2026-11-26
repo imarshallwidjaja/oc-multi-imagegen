@@ -108,9 +108,19 @@ describe("OpenCode 1 skill registration", () => {
   })
 })
 
-const GENERATE_ARGUMENTS = ["prompt", "out", "size", "background", "model", "quality"]
-const EDIT_ARGUMENTS = ["prompt", "out", "size", "images", "background", "model", "quality"]
-const NANO_ARGUMENTS = ["model", "prompt", "out", "resolution", "aspect_ratio", "quality", "background", "seed"]
+const GENERATE_ARGUMENTS = ["prompt", "out", "size", "background", "model", "quality", "preview"]
+const EDIT_ARGUMENTS = ["prompt", "out", "size", "images", "background", "model", "quality", "preview"]
+const NANO_ARGUMENTS = [
+  "model",
+  "prompt",
+  "out",
+  "resolution",
+  "aspect_ratio",
+  "quality",
+  "background",
+  "seed",
+  "preview",
+]
 const keyFlavours = FLAVOURS.filter((flavour) => flavour.key)
 const operationRows = FLAVOURS.flatMap((flavour) =>
   flavour.operations.map((operation) => [flavour.backend, operation.tool, flavour, operation] as const),
@@ -134,7 +144,7 @@ describe("OpenCode 1 adapter", () => {
       "frame_duration_ms",
       "svg_model",
     ])
-    expect(Object.keys(hooks.tool?.imageedit.args ?? {})).toEqual([...EDIT_ARGUMENTS, "output_format"])
+    expect(Object.keys(hooks.tool?.imageedit.args ?? {})).toEqual([...EDIT_ARGUMENTS, "output_format", "mask"])
     expect(Object.keys(hooks.tool?.imagegen_models.args ?? {})).toEqual(["query", "model"])
   })
 
@@ -197,6 +207,35 @@ describe("OpenCode 1 adapter", () => {
       ])
     },
   )
+
+  test("asks the host's webfetch permission for a reference URL, after the tool's own permission", async () => {
+    const fetchMock = stubFetch()
+    fetchMock.mockImplementationOnce(async () => new Response(PNG_BUFFER))
+    const tool = await loadTool({}, "codex", "imageedit")
+    const { asks, ask } = recordAsks()
+    const url = "https://cdn.example.com/ref.png?sig=token"
+
+    await tool.execute({ ...args, images: [url] }, v1ToolContext(dir, new AbortController().signal, ask))
+
+    expect(asks.map((request) => request.permission)).toEqual(["imageedit", "webfetch"])
+    expect(asks[1]).toEqual({ permission: "webfetch", patterns: [url], always: ["*"], metadata: { url } })
+  })
+
+  test("reports a requested inline preview as unsupported and attaches nothing", async () => {
+    stubFetch()
+    const tool = await loadTool()
+    const { ask } = recordAsks()
+
+    const result = await tool.execute({ ...args, preview: true }, v1ToolContext(dir, new AbortController().signal, ask))
+
+    const savedPath = path.join(dir, "cat.png")
+    expect(result).toEqual({
+      output: expect.stringMatching(
+        /^Generated image saved to .*\. Inline preview is only supported on OpenCode 2; inspect the saved file directly\.$/,
+      ),
+      metadata: { out: savedPath, versioned: false },
+    })
+  })
 
   test("sends the account from OpenCode's auth data as the ChatGPT account header", async () => {
     const fetchMock = stubFetch()

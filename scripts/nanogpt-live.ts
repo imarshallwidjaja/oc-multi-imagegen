@@ -225,6 +225,10 @@ async function runLive(directory: string, preflight: boolean) {
           active.permission = "authorized explicit runner"
           await reached("permission-granted")
         },
+        // The live cases use local references only.
+        authorizeFetch: async () => {
+          throw new Error("The live runner does not fetch reference URLs")
+        },
         resolveDirectory: async () => directory,
         resolveCredential: async () => {
           if (!authorized) throw new Error("Permission must precede credential resolution")

@@ -13,6 +13,8 @@ function providerAccess(backend: Backend, ctx: ToolContext): ProviderAccess {
     // resource is the backend id, so a grant saved for one backend does not cover another.
     authorize: (action, args) =>
       ctx.ask({ permission: action, patterns: [backend.id], always: [backend.id], metadata: args }),
+    // A reference URL is fetched under the host's own webfetch permission, the one its webfetch tool asks for.
+    authorizeFetch: (url) => ctx.ask({ permission: "webfetch", patterns: [url], always: ["*"], metadata: { url } }),
     resolveCredential: async () => {
       const loaded = await loadCredential(credential)
       if (!loaded) {
@@ -39,7 +41,12 @@ function createTool(backend: Backend, tool: BackendTool) {
         providerAccess: () => providerAccess(backend, ctx),
         resolveDirectory: async () => ctx.directory,
       })
-      return result.image ? { output: result.text, metadata: result.image } : { output: result.text }
+      if (!result.image) return { output: result.text }
+      // OpenCode 1 tool results carry text only, so a requested preview is reported instead of attached.
+      const output = result.preview
+        ? `${result.text} Inline preview is only supported on OpenCode 2; inspect the saved file directly.`
+        : result.text
+      return { output, metadata: result.image }
     },
   }
 }

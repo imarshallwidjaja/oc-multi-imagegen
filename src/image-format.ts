@@ -22,6 +22,10 @@ export function formatName(format: OutputFormat): string {
   return FORMATS[format].name
 }
 
+export function formatMime(format: OutputFormat): string {
+  return FORMATS[format].mime
+}
+
 // "PNG, JPEG or WebP"
 export function listFormatNames(formats: readonly OutputFormat[]): string {
   const names = formats.map(formatName)
@@ -35,13 +39,16 @@ function startsLikeMarkup(bytes: Buffer): boolean {
   return bytes[index] === 0x3c
 }
 
-export type InspectedImage = { format: OutputFormat; description: string }
+// `opaquePng` is true only for a PNG confirmed to have no transparent or semi-transparent pixel: no alpha channel, or
+// an alpha channel measured fully opaque.
+export type InspectedImage = { format: OutputFormat; description: string; opaquePng?: boolean }
 
 // Describes the alpha flag of a WebP container whose header inspectImage has already validated: the VP8X alpha bit,
 // or the VP8L alpha_is_used bit. A lossy VP8 image without a VP8X chunk has no alpha channel. RFC 9649 section 3.4
 // defines alpha_is_used as a hint, and section 2.7.1 defines the VP8X alpha bit as a header declaration; neither
 // proves what the pixels hold without decoding them, and they are not decoded.
-function describeWebpAlpha(bytes: Buffer, chunk: string): string {
+function describeWebpAlpha(bytes: Buffer): string {
+  const chunk = bytes.toString("ascii", 12, 16)
   if (chunk === "VP8 ") return "no alpha channel"
   // After the VP8L one-byte 0x2f signature: 14 bits of width - 1, 14 bits of height - 1, then alpha_is_used.
   const flag = chunk === "VP8X" ? (bytes[20] & 0x10) !== 0 : ((bytes.readUInt32LE(21) >>> 28) & 1) === 1
@@ -75,6 +82,28 @@ function describePngAlpha(alpha: PngAlpha): string {
   }
 }
 
+// The pixel size a raster header declares, and its EXIF orientation when the format carries one. Width and height are
+// as coded, before orientation.
+export type ImageDimensions = { width: number; height: number; orientation?: number }
+
+// Reads finite positive header dimensions, or throws with a reason that quotes none of the bytes. Header inspection is
+// not a full corruption check.
+export function readImageDimensions(image: Uint8Array): ImageDimensions {
+  const bytes = Buffer.from(image.buffer, image.byteOffset, image.byteLength)
+  if (bytes.toString("ascii", 0, 4) === "RIFF" && bytes.toString("ascii", 8, 12) === "WEBP") {
+    // image-size's VP8L bitwise reads treat missing dimension bytes as zeros.
+    // The 20-byte container/chunk prefix needs 5 bytes for VP8L, or 10 for VP8/VP8X.
+    if (bytes.length < (bytes.toString("ascii", 12, 16) === "VP8L" ? 25 : 30)) {
+      throw new Error("incomplete dimension header")
+    }
+  }
+  const { width, height, orientation } = imageSize(bytes)
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    throw new Error("invalid dimensions")
+  }
+  return { width, height, orientation }
+}
+
 // Detects the format among those accepted and reads its size. Header inspection is not a full corruption check. A GIF
 // header gives the logical screen size, not proof of animation, and an SVG's viewBox or width and height are vector
 // units, not pixels.
@@ -101,18 +130,9 @@ export async function inspectImage(image: Uint8Array, accepted: readonly OutputF
       `the backend returned an unsupported image type (${detected ?? "unknown"}); expected ${listFormatNames(accepted)}; nothing was saved`,
     )
   }
-  const chunk = format === "webp" ? bytes.toString("ascii", 12, 16) : ""
-  let size: ReturnType<typeof imageSize>
+  let size: ImageDimensions
   try {
-    // image-size's VP8L bitwise reads treat missing dimension bytes as zeros.
-    // The 20-byte container/chunk prefix needs 5 bytes for VP8L, or 10 for VP8/VP8X.
-    if (format === "webp" && bytes.length < (chunk === "VP8L" ? 25 : 30)) {
-      throw new Error("incomplete dimension header")
-    }
-    size = imageSize(bytes)
-    if (!Number.isFinite(size.width) || !Number.isFinite(size.height) || size.width <= 0 || size.height <= 0) {
-      throw new Error("invalid dimensions")
-    }
+    size = readImageDimensions(bytes)
   } catch {
     // Parser errors can include provider-controlled text; report only the detected MIME type.
     throw new Error(`the backend returned malformed ${detected} image headers or dimensions; nothing was saved`)
@@ -125,8 +145,14 @@ export async function inspectImage(image: Uint8Array, accepted: readonly OutputF
     }
   }
   const description = `${FORMATS[format].name}, ${pixels}`
-  if (format === "png") return { format, description: `${description}, ${describePngAlpha(inspectPngAlpha(bytes))}` }
-  if (format === "webp") return { format, description: `${description}, ${describeWebpAlpha(bytes, chunk)}` }
+  if (format === "png") {
+    const alpha = inspectPngAlpha(bytes)
+    const opaquePng =
+      alpha.status === "no-alpha" ||
+      (alpha.status === "measured" && alpha.transparentPixels === 0 && alpha.semiTransparentPixels === 0)
+    return { format, description: `${description}, ${describePngAlpha(alpha)}`, opaquePng }
+  }
+  if (format === "webp") return { format, description: `${description}, ${describeWebpAlpha(bytes)}` }
   return { format, description }
 }
 

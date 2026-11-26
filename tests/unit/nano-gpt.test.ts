@@ -16,7 +16,7 @@ import {
 } from "../../src/nano-gpt-models"
 import type { ImageTool, ImageToolHost } from "../../src/types"
 import { isolateEnvironment, JPEG_BUFFER, PNG_BASE64, PNG_BUFFER, WEBP_BUFFER } from "./fixtures"
-import { loadV2Tool, STORED_CREDENTIALS, selectBackendVariable, v1ToolContext } from "./hosts"
+import { loadV2Tool, STORED_CREDENTIALS, selectBackendVariable, v1ToolContext, v2Text } from "./hosts"
 
 // NanoGPT-specific behavior: the model registry and the schemas derived from it, the request each tool sends, how the
 // response is read, and the local information tool. Behavior shared with the other backends (permission order,
@@ -66,6 +66,7 @@ function run(name: string, args: unknown, credential: ImageCredential = key, sig
   const host: ImageToolHost = {
     signal,
     authorize: async () => {},
+    authorizeFetch: async () => {},
     resolveDirectory: async () => dir,
     resolveCredential: async () => credential,
   }
@@ -914,7 +915,7 @@ describe.each([
     const loaded = await loadV2Tool({ directory: dir, backend: "nano-gpt" })
     const result = await loaded.run(args, undefined, undefined, "imagegen_models")
     const { assert, active, resolve, sessionGet } = loaded.calls
-    return { text: result.content, touched: [...assert, ...active, ...resolve, ...sessionGet] }
+    return { text: v2Text(result.content), touched: [...assert, ...active, ...resolve, ...sessionGet] }
   }
 
   test("answers from the registry without a permission, credential, session, file or network access", async () => {
@@ -957,7 +958,7 @@ describe.each([
     expect(schema.additionalProperties).toBe(false)
     expect(schema.properties.resolution.enum).toEqual(model.resolutions)
     expect(schema.properties.images.maxItems).toBe(10)
-    expect(Object.keys(schema.properties)).toEqual(["model", "prompt", "out", "resolution", "images"])
+    expect(Object.keys(schema.properties)).toEqual(["model", "prompt", "out", "preview", "resolution", "images"])
     expect(schema.properties.images.items).toEqual({ type: "string", minLength: 1 })
   })
 
@@ -968,6 +969,13 @@ describe.each([
     expect(edit).toContain("256 pixels on each side")
     expect(generate).not.toContain("256 pixels")
     expect(generate).toContain("References: none.")
+  })
+
+  test.each([
+    ["black-forest-labs/flux-3/edit", "each at most 31457280 bytes locally (20971520 bytes by https URL)."],
+    ["qwen-image-3-pro", "each at most 10485760 bytes."],
+  ])("states the reference size limit of %s for local files and URLs", async (id, limit) => {
+    expect((await ask({ model: id })).text).toContain(limit)
   })
 
   test.each(DUAL_IDS)("describes both operation schemas for %s", async (id) => {

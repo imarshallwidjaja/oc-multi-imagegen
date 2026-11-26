@@ -12,6 +12,7 @@ import {
   PNG_BASE64,
   PNG_BUFFER,
   SVG_BUFFER,
+  solidPng,
   WEBP_BUFFER,
 } from "./fixtures"
 import {
@@ -247,6 +248,36 @@ describe.each(matrix)("%s with the %s backend calling %s", (_host, _backend, _to
     expect(body).toMatchObject(operation.nullBody)
     for (const field of operation.absentWhenNull) expect(body).not.toHaveProperty(field)
   })
+
+  test("an inline preview request changes the result only, never the provider request", async () => {
+    const fetchMock = stubFetch()
+    const harness = await createHarness(dir)
+
+    await harness.execute(args)
+    await harness.execute({ ...args, preview: true, out: "previewed.png" })
+
+    const [plain, previewed] = fetchMock.mock.calls.map(([, init]) => JSON.parse(init.body as string))
+    expect(previewed).toEqual(plain)
+  })
+
+  const TRANSPARENCY_WARNING =
+    'Warning: background "transparent" was requested, but the saved PNG has no transparent pixels.'
+  test.each([
+    ["a fully opaque RGBA PNG", true, solidPng(2, 2, 255), true],
+    ["an RGB PNG without alpha", true, solidPng(2, 2), true],
+    ["a fully transparent PNG", true, solidPng(2, 2, 0), false],
+    ["an opaque PNG without a transparent request", false, solidPng(2, 2, 255), false],
+  ] as const)(
+    "reports whether a requested transparent background is missing for %s",
+    async (_name, transparent, bytes, warns) => {
+      stubFetch(() => imagesResponse(bytes.toString("base64")))
+      const harness = await createHarness(dir)
+
+      const result = await harness.execute(transparent ? operation.transparentArgs : args)
+
+      expect(result.message.includes(TRANSPARENCY_WARNING)).toBe(warns)
+    },
+  )
 
   test.each(operation.invalid)(
     "rejects %s before asking permission or calling the backend",
@@ -520,6 +551,39 @@ describe.each(flavourRows)("reference images through %s with the %s backend", (_
       `data:image/png;base64,${PNG_BASE64}`,
       `data:image/png;base64,${second.toString("base64")}`,
     ])
+  })
+
+  const REFERENCE_URL = "https://cdn.example.com/ref.png?sig=token"
+  // The download answers the reference URL; every other request is the provider's.
+  const stubDownload = () =>
+    stubFetch((url) =>
+      String(url).startsWith("https://cdn.example.com/") ? new Response(PNG_BUFFER) : imagesResponse(PNG_BASE64),
+    )
+
+  test("downloads an https reference after the tool permission and a webfetch permission, and sends it like a file", async () => {
+    const edit = flavour.operations[1]
+    const harness = await create(dir, flavour, edit.tool)
+    const fetchMock = stubDownload()
+
+    await harness.execute({ ...edit.args, images: [REFERENCE_URL] })
+
+    expect(harness.permissionRequests).toHaveLength(2)
+    expect(harness.webfetchUrls()).toEqual([REFERENCE_URL])
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([REFERENCE_URL, edit.url])
+    const body = JSON.parse(fetchMock.mock.calls[1][1].body as string)
+    expect(flavour.editReferences(body)).toEqual([`data:image/png;base64,${PNG_BASE64}`])
+  })
+
+  test("a denied webfetch permission stops before the download or the provider", async () => {
+    const edit = flavour.operations[1]
+    const harness = await create(dir, flavour, edit.tool)
+    const fetchMock = stubDownload()
+    harness.denyWebfetch(new Error("webfetch denied"))
+
+    await expect(harness.execute({ ...edit.args, images: [REFERENCE_URL] })).rejects.toThrow("webfetch denied")
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(await listed()).toEqual([])
   })
 })
 

@@ -4,6 +4,7 @@ import os from "node:os"
 import path from "node:path"
 import { z } from "zod"
 import { selectBackends } from "../../src/backend"
+import { MAX_PREVIEW_BYTES } from "../../src/output-image"
 import { loadPackagedSkill, SKILL_FILE } from "../../src/skill"
 import { isolateEnvironment, PNG_BASE64, PNG_BUFFER } from "./fixtures"
 import {
@@ -53,7 +54,15 @@ describe("OpenCode 2 tool registration", () => {
       properties: Record<string, { enum?: string[]; description?: string }>
     }
 
-    expect(Object.keys(schema.properties)).toEqual(["prompt", "out", "size", "background", "model", "quality"])
+    expect(Object.keys(schema.properties)).toEqual([
+      "prompt",
+      "out",
+      "size",
+      "background",
+      "model",
+      "quality",
+      "preview",
+    ])
     for (const property of Object.values(schema.properties)) {
       expect(property.description).toEqual(expect.stringMatching(/\S/))
     }
@@ -304,6 +313,61 @@ describe("OpenCode 2 execution", () => {
       metadata: { out: savedPath, versioned: false },
     })
     expect(tool.output.safeParse(result.output).success).toBe(true)
+  })
+
+  test("attaches the saved image as a file part when the call asks for a preview, keeping output and metadata", async () => {
+    stubFetch()
+    const { run, tool } = await loadV2Tool({ directory: dir })
+
+    const result = await run({ ...args, preview: true })
+
+    const savedPath = path.join(dir, "cat.png")
+    const message = result.output.message
+    expect(result).toEqual({
+      output: { out: savedPath, versioned: false, message },
+      content: [
+        { type: "text", text: message },
+        { type: "file", uri: `data:image/png;base64,${PNG_BASE64}`, mime: "image/png", name: "cat.png" },
+      ],
+      metadata: { out: savedPath, versioned: false },
+    })
+    expect(tool.output.safeParse(result.output).success).toBe(true)
+  })
+
+  test("returns the report as text alone when the image is too large to attach", async () => {
+    const large = Buffer.concat([PNG_BUFFER, Buffer.alloc(MAX_PREVIEW_BYTES)])
+    globalThis.fetch = mock(
+      async () => new Response(JSON.stringify({ data: [{ b64_json: large.toString("base64") }] })),
+    ) as unknown as typeof fetch
+    const { run } = await loadV2Tool({ directory: dir })
+
+    const result = await run({ ...args, preview: true })
+
+    expect(result.content).toBe(result.output.message)
+    expect(result.output.message).toContain("Inline preview omitted: the image is")
+  })
+
+  // A host containing "*" would save a wildcard rule that covers other hosts, so it saves no grant.
+  test.each([
+    ["https://cdn.example.com/ref.png?sig=token", ["https://cdn.example.com", "https://cdn.example.com/*"]],
+    ["https://*.example.com/ref.png", []],
+  ])("asks the webfetch permission for the reference URL %s on the URL, saving %p", async (url, save) => {
+    const fetchMock = stubFetch()
+    fetchMock.mockImplementationOnce(async () => new Response(PNG_BUFFER))
+    const { calls, run } = await loadV2Tool({ directory: dir })
+
+    await run({ ...args, images: [url] }, undefined, undefined, "imageedit")
+
+    expect(calls.assert.map((request) => request.action)).toEqual(["imageedit", "webfetch"])
+    expect(calls.assert[1]).toEqual({
+      sessionID: "ses_test",
+      agent: "build",
+      action: "webfetch",
+      resources: [url],
+      save,
+      metadata: { url },
+      source: { type: "tool", messageID: "msg_test", id: "call_test" },
+    })
   })
 
   test("carries the Codex requested-settings disclosure in the structured output", async () => {

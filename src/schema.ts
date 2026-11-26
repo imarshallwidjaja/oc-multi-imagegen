@@ -25,6 +25,19 @@ export const GENERATION_MOVED_ARGUMENTS: Readonly<Record<string, string>> = {
   images: `${IMAGEGEN_TOOL} creates a new image from text; use ${IMAGEEDIT_TOOL} to change or combine existing images.`,
 }
 
+// Where reference images can come from, for the `images` description of every edit tool.
+export const REFERENCE_ENTRIES =
+  "local paths (relative to the project directory unless absolute) or https URLs, each fetched after a webfetch permission and at most 20 MiB"
+
+// The opt-in inline preview every image tool takes. It changes only how the result is returned, never the request.
+export const previewField = () =>
+  z
+    .boolean()
+    .nullish()
+    .describe(
+      "Optional inline image preview on OpenCode 2; defaults to false. When true, attaches the saved PNG, JPEG or WebP (up to 3.5 MiB) directly to the tool response. Leave false for batches.",
+    )
+
 // The destination argument of an image tool, naming the formats it saves: pass the same list as the tool's
 // `outputFormats`.
 export function outField(outputFormats: readonly OutputFormat[]) {
@@ -77,10 +90,11 @@ function controlFields(spec: ArgsSpec) {
       .nullish()
       .describe(
         spec.background ??
-          "Optional background; defaults to opaque. Use transparent for a cut-out instead of asking for one in the prompt. The returned alpha can be soft, and the tool does not check or clean it up.",
+          "Optional background; defaults to opaque. Use transparent for a cut-out instead of asking for one in the prompt. The returned alpha can be soft; the tool reports measured PNG alpha (or WebP header flags) without modifying pixels.",
       ),
     model: z.string().min(1).nullish().describe(spec.model),
     quality: z.string().min(1).nullish().describe(spec.quality),
+    preview: previewField(),
   }
 }
 
@@ -110,7 +124,7 @@ export function editShape(spec: EditArgsSpec) {
       .max(spec.maxImages, `${IMAGEEDIT_TOOL} takes at most ${spec.maxImages} reference images.`)
       .describe(
         [
-          `Required local reference image paths, 1 to ${spec.maxImages}, relative to the project directory unless absolute; they are sent in order, so call them Image 1, Image 2 in the prompt.`,
+          `Required reference images, 1 to ${spec.maxImages}: ${REFERENCE_ENTRIES}. They are sent in order, so call them Image 1, Image 2 in the prompt.`,
           spec.imagesNote,
           "Their contents are uploaded to the provider.",
         ]

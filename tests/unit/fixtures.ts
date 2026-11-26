@@ -1,4 +1,5 @@
 import { afterEach, beforeEach } from "bun:test"
+import { crc32, deflateSync } from "node:zlib"
 
 // A 1x1 transparent PNG, recognized by file-type from its header bytes.
 export const PNG_BASE64 =
@@ -36,6 +37,32 @@ export const ANIMATED_GIF_BUFFER = Buffer.from(
 export const SVG_BUFFER = Buffer.from(
   '<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 12" width="240" height="120"><defs><linearGradient id="sky"><stop offset="0" stop-color="#2060a0"/></linearGradient></defs><style>.sun{fill:#f0c020}</style><rect width="24" height="12" fill="url(#sky)"/><circle class="sun" cx="6" cy="6" r="3"/></svg>\n',
 )
+
+export function pngChunk(type: string, data: Uint8Array = new Uint8Array()): Buffer {
+  const length = Buffer.alloc(4)
+  length.writeUInt32BE(data.length)
+  const body = Buffer.concat([Buffer.from(type, "ascii"), data])
+  const crc = Buffer.alloc(4)
+  crc.writeUInt32BE(crc32(body))
+  return Buffer.concat([length, body, crc])
+}
+
+// A complete 8-bit PNG of one colour: RGB without an alpha channel, or RGBA with every pixel at the given alpha.
+export function solidPng(width: number, height: number, alpha?: number) {
+  const pixel = alpha === undefined ? [32, 96, 160] : [32, 96, 160, alpha]
+  const header = Buffer.alloc(13)
+  header.writeUInt32BE(width, 0)
+  header.writeUInt32BE(height, 4)
+  header.set([8, alpha === undefined ? 2 : 6, 0, 0, 0], 8)
+  const row = [0, ...Array.from({ length: width }, () => pixel).flat()]
+  const raw = Buffer.from(Array.from({ length: height }, () => row).flat())
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk("IHDR", header),
+    pngChunk("IDAT", deflateSync(raw)),
+    pngChunk("IEND"),
+  ])
+}
 
 export function pngDataUrl(buf: Buffer): string {
   return `data:image/png;base64,${buf.toString("base64")}`

@@ -41,11 +41,25 @@ describe("readBoundedResponseBody", () => {
     expect(result).toEqual({ ok: true, bytes: new Uint8Array([1, 2, 3]) })
   })
 
-  test("refuses a declared length above the limit without reading the body", async () => {
-    const res = new Response(new Uint8Array(11), { headers: { "content-length": "11" } })
+  test("refuses a declared length above the limit and cancels the body without reading it", async () => {
+    let pulled = false
+    let cancelled = false
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull() {
+          pulled = true
+        },
+        cancel() {
+          cancelled = true
+        },
+      },
+      { highWaterMark: 0 },
+    )
+    const res = new Response(body, { headers: { "content-length": "11" } })
     const result = await readBoundedResponseBody(res, 10)
     expect(result).toEqual({ ok: false, refusal: { kind: "declared-too-large", declared: 11 } })
-    expect(res.bodyUsed).toBe(false)
+    expect(pulled).toBe(false)
+    expect(cancelled).toBe(true)
   })
 
   test("cancels a body that grows past the limit", async () => {

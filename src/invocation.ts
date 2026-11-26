@@ -1,4 +1,4 @@
-import type { BackendTool, ProviderAccess } from "./types"
+import type { BackendTool, ImagePreview, ProviderAccess } from "./types"
 
 // What a host adapter can supply for one call. Each is asked for only when the tool needs it: an information tool
 // uses neither, and a lookup needs no session directory.
@@ -7,8 +7,9 @@ export type HostCapabilities = {
   resolveDirectory: () => Promise<string>
 }
 
-// The result a host reports: the text for the agent and, for a tool that saved an image, its public metadata.
-export type InvocationResult = { text: string; image?: { out: string; versioned: boolean } }
+// The result a host reports: the text for the agent and, for a tool that saved an image, its public metadata and the
+// inline preview the call asked for, when the image can be attached.
+export type InvocationResult = { text: string; image?: { out: string; versioned: boolean }; preview?: ImagePreview }
 
 // Runs one call of any tool kind the same way on every host; each host shapes the result for its own API.
 export async function invokeTool(
@@ -23,7 +24,11 @@ export async function invokeTool(
       return { text: await tool.run(rawArgs, host.providerAccess()) }
     case "image": {
       const saved = await tool.run(rawArgs, { ...host.providerAccess(), resolveDirectory: host.resolveDirectory })
-      return { text: saved.message, image: { out: saved.savedPath, versioned: saved.versioned } }
+      return {
+        text: saved.message,
+        image: { out: saved.savedPath, versioned: saved.versioned },
+        ...(saved.preview ? { preview: saved.preview } : {}),
+      }
     }
   }
 }

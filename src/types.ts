@@ -17,13 +17,19 @@ export type ProviderAccess = {
   authorize: (action: string, args: Record<string, unknown>) => Promise<void>
   // Returns the credential the active backend declares. The shared flows check it before using it.
   resolveCredential: () => Promise<ImageCredential>
+  // Asks the host to allow fetching one reference image URL, as its web fetch permission. Rejects when denied.
+  authorizeFetch: (url: string) => Promise<void>
 }
 
 // What a host adapter supplies for one image call: provider access and the session directory that relative paths
 // resolve against.
 export type ImageToolHost = ProviderAccess & { resolveDirectory: () => Promise<string> }
 
-export type SavedImage = { savedPath: string; versioned: boolean; message: string }
+// Image bytes to attach inline to a tool result, for a host that can show them.
+export type ImagePreview = { mime: string; bytes: Uint8Array }
+
+// `preview` is present only when the call asked for one and the saved image can be attached.
+export type SavedImage = { savedPath: string; versioned: boolean; message: string; preview?: ImagePreview }
 
 // A tool that calls the provider and saves one native image file in one of the formats it declares. `run` parses the
 // raw arguments with `schema` itself, because hosts can call execute without validating them first.

@@ -102,7 +102,7 @@ const generationArgs: ArgsSpec = {
   size: sizeField(" For gif it is the size of each frame."),
   outputFormats: OUTPUT_FORMATS,
   background:
-    "Optional background. For png, jpeg and webp it defaults to opaque, and transparent needs output_format png or webp; use it for a cut-out instead of asking for one in the prompt. For gif and svg it is sent only when set, and only opaque is accepted. The returned alpha can be soft, and the tool does not check or clean it up.",
+    "Optional background. For png, jpeg and webp it defaults to opaque, and transparent needs output_format png or webp; use it for a cut-out instead of asking for one in the prompt. For gif and svg it is sent only when set, and only opaque is accepted. The returned alpha can be soft; the tool reports measured PNG alpha (or WebP header flags) without modifying pixels.",
   model: MODEL,
   quality: `${QUALITY} For svg it controls the generated reference image.`,
 }
@@ -111,7 +111,7 @@ const editArgs: ArgsSpec = {
   size: sizeField(),
   outputFormats: EDIT_OUTPUT_FORMATS,
   background:
-    "Optional background; defaults to opaque, and transparent needs output_format png or webp. Use it for a cut-out instead of asking for one in the prompt. The returned alpha can be soft, and the tool does not check or clean it up.",
+    "Optional background; defaults to opaque, and transparent needs output_format png or webp. Use it for a cut-out instead of asking for one in the prompt. The returned alpha can be soft; the tool reports measured PNG alpha (or WebP header flags) without modifying pixels.",
   model: MODEL,
   quality: QUALITY,
 }
@@ -164,7 +164,7 @@ const generateSchema = strictArgs(
         `Optional model that authors the SVG, sent as svg.model; only with output_format svg. Accounts with SVG author selection need it and others must omit it. Set it only when the operator names one or the API asks for it; never guess one. ${MODELS_TOOL} with query lists candidate IDs, which are not proof of SVG support.`,
       ),
   },
-  GENERATION_MOVED_ARGUMENTS,
+  { ...GENERATION_MOVED_ARGUMENTS, mask: `A mask applies to an existing image; use ${IMAGEEDIT_TOOL}.` },
 ).superRefine((args, ctx) => {
   const format = args.output_format ?? DEFAULT_OUTPUT_FORMAT
   const issue = issuer(ctx)
@@ -203,6 +203,13 @@ const editSchema = strictArgs(
       })
       .nullish()
       .describe(`Optional output format: ${outputFormatValues(EDIT_OUTPUT_FORMATS)}. The bytes are saved as returned.`),
+    mask: z
+      .string()
+      .min(1)
+      .nullish()
+      .describe(
+        "Optional PNG mask for images[0], a local path or https URL like images: fully transparent pixels (alpha 0) mark the area to edit. It must be a PNG with an alpha channel and the same pixel dimensions as images[0], checked before the request. GPT Image masking is prompt-guided, not pixel-locked: other areas can still change.",
+      ),
   },
   EDIT_MOVED_ARGUMENTS,
 ).superRefine((args, ctx) => checkBackground(args, args.output_format ?? DEFAULT_OUTPUT_FORMAT, issuer(ctx)))
@@ -300,11 +307,19 @@ export const openaiApiImageedit = {
   credential: openaiApiCredential,
   outputFormats: EDIT_OUTPUT_FORMATS,
   referenceRules: () => ({ mimeTypes: REFERENCE_MIME_TYPES, maxDataUrlLength: MAX_DATA_URL_LENGTH }),
-  request: (credential, args, references, signal) =>
+  mask: (args) =>
+    args.mask
+      ? { entry: args.mask, rules: { mimeTypes: ["image/png"], maxDataUrlLength: MAX_DATA_URL_LENGTH } }
+      : undefined,
+  request: (credential, args, references, signal, mask?) =>
     post(
       EDITS_ENDPOINT,
       credential,
-      { ...sharedBody(args), images: references.map((dataUrl) => ({ image_url: dataUrl })) },
+      {
+        ...sharedBody(args),
+        images: references.map((dataUrl) => ({ image_url: dataUrl })),
+        ...(mask ? { mask: { image_url: mask } } : {}),
+      },
       signal,
     ),
 } satisfies EditToolSpec<typeof editSchema, typeof openaiApiCredential>

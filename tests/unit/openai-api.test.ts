@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -7,7 +7,7 @@ import type { ImageCredential, KeyCredential } from "../../src/credential"
 import { readReferenceImages } from "../../src/input-image"
 import { openaiApiBackend, openaiApiImageedit, openaiApiImagegen, openaiApiModels } from "../../src/openai-api"
 import { lookUpOpenAiModels } from "../../src/openai-models"
-import { PNG_BASE64, PNG_BUFFER } from "./fixtures"
+import { JPEG_BUFFER, PNG_BASE64, PNG_BUFFER, solidPng } from "./fixtures"
 
 type GenerateArgs = z.output<typeof openaiApiImagegen.schema>
 type EditArgs = z.output<typeof openaiApiImageedit.schema>
@@ -42,6 +42,7 @@ function runImagegen(credential: ImageCredential, args = generateArgs(), directo
   return tool.run(args, {
     signal,
     authorize: async () => {},
+    authorizeFetch: async () => {},
     resolveDirectory: async () => directory,
     resolveCredential: async () => credential,
   })
@@ -472,6 +473,7 @@ describe("OpenAI model lookup", () => {
     const host = {
       signal,
       authorize: async () => {},
+      authorizeFetch: async () => {},
       resolveCredential: async () => ({ type: "key" as const, key: "sk bad" }),
     }
 
@@ -499,6 +501,15 @@ describe("OpenAI Images API reference images", () => {
     return dir
   }
 
+  const load = async (entries: string[], directory: string) =>
+    (
+      await readReferenceImages(
+        entries,
+        { directory, signal, authorizeFetch: async () => {} },
+        openaiApiImageedit.referenceRules(),
+      )
+    ).references
+
   test.each([
     ["PNG", "image/png", PNG_BUFFER],
     ["JPEG", "image/jpeg", Buffer.from([0xff, 0xd8, 0xff, 0xe0])],
@@ -506,15 +517,13 @@ describe("OpenAI Images API reference images", () => {
   ])("accepts %s", async (_name, mime, bytes) => {
     const where = await reference("ref", bytes)
 
-    expect(await readReferenceImages(["ref"], where, openaiApiImageedit.referenceRules())).toEqual([
-      `data:${mime};base64,${bytes.toString("base64")}`,
-    ])
+    expect(await load(["ref"], where)).toEqual([`data:${mime};base64,${bytes.toString("base64")}`])
   })
 
   test("rejects a GIF, which the API does not take", async () => {
     const where = await reference("ref.gif", Buffer.from("GIF89a"))
 
-    await expect(readReferenceImages(["ref.gif"], where, openaiApiImageedit.referenceRules())).rejects.toThrow(
+    await expect(load(["ref.gif"], where)).rejects.toThrow(
       `unsupported reference image type image/gif: ${path.join(where, "ref.gif")}. Use image/png, image/jpeg, image/webp.`,
     )
   })
@@ -523,17 +532,165 @@ describe("OpenAI Images API reference images", () => {
     // 15,728,640 bytes encode to 20,971,520 base64 characters; the data URL prefix pushes it over the limit.
     const where = await reference("big.png", Buffer.concat([PNG_BUFFER, Buffer.alloc(15_728_640 - PNG_BUFFER.length)]))
 
-    await expect(readReferenceImages(["big.png"], where, openaiApiImageedit.referenceRules())).rejects.toThrow(
-      "reference image is too large",
-    )
+    await expect(load(["big.png"], where)).rejects.toThrow("reference image is too large")
   })
 
   test("accepts a reference whose data URL is just under the documented length", async () => {
     const where = await reference("max.png", Buffer.concat([PNG_BUFFER, Buffer.alloc(15_728_610 - PNG_BUFFER.length)]))
 
-    const [dataUrl] = await readReferenceImages(["max.png"], where, openaiApiImageedit.referenceRules())
+    const [dataUrl] = await load(["max.png"], where)
 
     expect(dataUrl.length).toBeLessThanOrEqual(20_971_520)
     expect(dataUrl.length).toBeGreaterThan(20_971_480)
+  })
+
+  test("stops downloading a URL reference at the largest size whose data URL can fit", async () => {
+    // 15,728,640 bytes is the most that base64-encodes within 20,971,520 characters.
+    const chunk = new Uint8Array(512 * 1024)
+    let pulled = 0
+    globalThis.fetch = mock(
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>(
+            {
+              pull(controller) {
+                if (pulled >= 16 * 1024 * 1024) return controller.close()
+                pulled += chunk.length
+                controller.enqueue(chunk)
+              },
+            },
+            { highWaterMark: 0 },
+          ),
+        ),
+    ) as unknown as typeof fetch
+
+    await expect(load(["https://cdn.example.com/big.png"], "/nonexistent")).rejects.toThrow(
+      "could not download reference image https://cdn.example.com/big.png: it is larger than the limit of 15728640 bytes.",
+    )
+    expect(pulled).toBeLessThan(16 * 1024 * 1024)
+  })
+})
+
+// A baseline JPEG header whose EXIF orientation is `orientation` and whose frame is coded `width` x `height`: enough for
+// type detection and header dimensions, without image data.
+function orientedJpeg(width: number, height: number, orientation: number): Buffer {
+  const segment = (marker: number, data: Buffer) => {
+    const header = Buffer.from([0xff, marker, 0, 0])
+    header.writeUInt16BE(data.length + 2, 2)
+    return Buffer.concat([header, data])
+  }
+  // A big-endian TIFF header and one IFD entry: tag 0x0112 (orientation), type SHORT, one value.
+  const exif = Buffer.from([
+    ...Buffer.from("Exif\0\0", "ascii"),
+    ...[0x4d, 0x4d, 0x00, 0x2a, 0x00, 0x00, 0x00, 0x08],
+    ...[0x00, 0x01],
+    ...[0x01, 0x12, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01, 0x00, orientation, 0x00, 0x00],
+    ...[0x00, 0x00, 0x00, 0x00],
+  ])
+  const frame = Buffer.from([8, height >> 8, height & 0xff, width >> 8, width & 0xff, 1, 1, 0x11, 0])
+  return Buffer.concat([
+    Buffer.from([0xff, 0xd8]),
+    segment(0xe1, exif),
+    segment(0xc0, frame),
+    Buffer.from([0xff, 0xd9]),
+  ])
+}
+
+describe("OpenAI Images API inpainting mask", () => {
+  let dir: string
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(os.tmpdir(), "api-mask-"))
+    await writeFile(path.join(dir, "photo.png"), solidPng(4, 2, 255))
+    await writeFile(path.join(dir, "mask.png"), solidPng(4, 2, 0))
+  })
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  // Runs a tool through the shared flow, recording the URLs the host is asked to allow fetching.
+  function run(name: string, args: Record<string, unknown>, fetched: string[] = []) {
+    const tool = openaiApiBackend.tools.find((candidate) => candidate.name === name)
+    if (tool?.kind !== "image") throw new Error(`${name} is not an image tool`)
+    return tool.run(
+      { prompt: "remove the sign", out: "out.png", size: "1024x1024", ...args },
+      {
+        signal,
+        authorize: async () => {},
+        authorizeFetch: async (url) => void fetched.push(url),
+        resolveDirectory: async () => dir,
+        resolveCredential: async () => key,
+      },
+    )
+  }
+
+  test("sends a PNG mask with alpha and the first image's size as mask.image_url", async () => {
+    const fetchMock = stubImage()
+
+    await run("imageedit", { images: ["photo.png"], mask: "mask.png" })
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
+    expect(body.mask).toEqual({ image_url: `data:image/png;base64,${solidPng(4, 2, 0).toString("base64")}` })
+    expect(body.images).toEqual([{ image_url: `data:image/png;base64,${solidPng(4, 2, 255).toString("base64")}` }])
+  })
+
+  test("loads a mask from an https URL after the host allows fetching it", async () => {
+    const fetchMock = stubImage()
+    fetchMock.mockImplementationOnce(async () => new Response(solidPng(4, 2, 0)))
+    const fetched: string[] = []
+
+    await run("imageedit", { images: ["photo.png"], mask: "https://cdn.example.com/mask.png" }, fetched)
+
+    expect(fetched).toEqual(["https://cdn.example.com/mask.png"])
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body as string).mask).toEqual({
+      image_url: `data:image/png;base64,${solidPng(4, 2, 0).toString("base64")}`,
+    })
+  })
+
+  test.each([
+    ["a JPEG mask", JPEG_BUFFER, "unsupported reference image type image/jpeg"],
+    ["a PNG without an alpha channel", solidPng(4, 2), "mask image must be a PNG with an alpha channel"],
+    ["a mask of another size", solidPng(2, 2, 0), "mask is 2x2 pixels but the first image is 4x2"],
+  ])("refuses %s before any request", async (_name, bytes, message) => {
+    const fetchMock = stubImage()
+    await writeFile(path.join(dir, "bad-mask"), bytes)
+
+    await expect(run("imageedit", { images: ["photo.png"], mask: "bad-mask" })).rejects.toThrow(message)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  test("refuses a mask for a first image whose WebP header is cut short before its dimensions", async () => {
+    const fetchMock = stubImage()
+    // RIFF and WEBP, then a VP8L chunk header with no signature or dimension bytes: 20 bytes in all.
+    const truncated = Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("WEBPVP8L"), Buffer.alloc(4)])
+    await writeFile(path.join(dir, "cut.webp"), truncated)
+    await writeFile(path.join(dir, "mask-1x1.png"), solidPng(1, 1, 0))
+
+    await expect(run("imageedit", { images: ["cut.webp"], mask: "mask-1x1.png" })).rejects.toThrow(
+      "could not read the pixel dimensions of the mask or the first image.",
+    )
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  test("compares the mask with a JPEG's size after its EXIF orientation", async () => {
+    const fetchMock = stubImage()
+    // Coded 4x2 and rotated by orientation 6, so the image displays as 2x4.
+    await writeFile(path.join(dir, "rotated.jpg"), orientedJpeg(4, 2, 6))
+    await writeFile(path.join(dir, "mask-2x4.png"), solidPng(2, 4, 0))
+
+    await run("imageedit", { images: ["rotated.jpg"], mask: "mask-2x4.png" })
+    await expect(run("imageedit", { images: ["rotated.jpg"], mask: "mask.png" })).rejects.toThrow(
+      "mask is 4x2 pixels but the first image is 2x4; they must match.",
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  test("imagegen refuses a mask and points to imageedit", async () => {
+    const fetchMock = stubImage()
+
+    await expect(run("imagegen", { mask: "mask.png" })).rejects.toThrow(
+      "Unsupported argument: mask. A mask applies to an existing image; use imageedit.",
+    )
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })

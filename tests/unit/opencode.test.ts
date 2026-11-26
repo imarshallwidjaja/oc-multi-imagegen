@@ -4,7 +4,7 @@ import os from "node:os"
 import path from "node:path"
 import type { HostGenerateImageResult, HostImageModel } from "../../src/credential"
 import { isolateEnvironment, PNG_BASE64, PNG_BUFFER } from "./fixtures"
-import { loadV2Tool, type V2Options } from "./hosts"
+import { loadV2Tool, type V2Options, v2Text } from "./hosts"
 
 isolateEnvironment()
 const originalFetch = globalThis.fetch
@@ -326,7 +326,7 @@ describe("opencode imagegen_models", () => {
   const lookup = async (args: Record<string, unknown>, options: V2Options = {}, signal?: AbortSignal) => {
     const loaded = await load(options)
     const result = (await loaded.run(args, signal, undefined, "imagegen_models")) as unknown as { content: string }
-    return { ...loaded, text: result.content }
+    return { ...loaded, text: v2Text(result.content) }
   }
 
   test("lists the enabled image models with their variants and edit capability, after asking for permission", async () => {

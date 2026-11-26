@@ -1,10 +1,16 @@
 import type { FileHandle } from "node:fs/promises"
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
-import { formatName, inspectImage, type OutputFormat, pathForFormat } from "./image-format"
+import { formatMime, formatName, inspectImage, type OutputFormat, pathForFormat, RASTER_FORMATS } from "./image-format"
 import type { SavedImage } from "./types"
 
 const MAX_OUTPUT_VERSION_SUFFIX = 999
+// The largest image attached inline: its base64 form stays below 4.9 MB, under the 5 MB image limit of chat models.
+export const MAX_PREVIEW_BYTES = 3_670_016
+const PREVIEW_FORMATS: readonly OutputFormat[] = RASTER_FORMATS
+
+// What a call asked for beyond saving: an inline preview, and a transparent background whose result is checked.
+export type SaveOptions = { preview?: boolean; expectTransparent?: boolean }
 
 // Creates the first free name among `target` and its -v2 to -v999 variants. Each name is created exclusively, so an
 // existing file, a file another writer creates first, or a symbolic link (followed or dangling) is never opened; only
@@ -48,15 +54,17 @@ async function writeClaimed(claimed: string, handle: FileHandle, bytes: Uint8Arr
 
 // Resolves the output path (relative to ctxDir unless absolute), checks the bytes are one of the accepted formats with
 // readable dimensions before creating anything, and saves them under the extension of the detected format without
-// overwriting an existing file. Returns the user-facing message alongside the saved path.
+// overwriting an existing file. Returns the user-facing message alongside the saved path, and the preview bytes when
+// one was asked for and the format and size allow it; otherwise the message says why it was omitted.
 export async function saveGeneratedImage(
   out: string,
   ctxDir: string,
   bytes: Uint8Array,
   accepted: readonly OutputFormat[],
+  options: SaveOptions = {},
 ): Promise<SavedImage> {
   const requestedPath = path.isAbsolute(out) ? out : path.resolve(ctxDir, out)
-  const { format, description } = await inspectImage(bytes, accepted)
+  const { format, description, opaquePng } = await inspectImage(bytes, accepted)
   const targetPath = pathForFormat(requestedPath, format, accepted)
   await fs.mkdir(path.dirname(targetPath), { recursive: true })
   const { claimed: savedPath, handle } = await claimPath(targetPath)
@@ -69,9 +77,25 @@ export async function saveGeneratedImage(
   const versionNote = versioned
     ? ` The target path ${targetPath} already existed; the new image was versioned to avoid overwriting it.`
     : ""
+  const transparencyNote =
+    options.expectTransparent && opaquePng
+      ? ' Warning: background "transparent" was requested, but the saved PNG has no transparent pixels.'
+      : ""
+  let previewNote = ""
+  let preview: SavedImage["preview"]
+  if (options.preview) {
+    if (!PREVIEW_FORMATS.includes(format)) {
+      previewNote = ` Inline preview omitted: ${formatName(format)} cannot be attached inline; inspect the saved file at ${savedPath}.`
+    } else if (bytes.length > MAX_PREVIEW_BYTES) {
+      previewNote = ` Inline preview omitted: the image is ${bytes.length} bytes (limit ${MAX_PREVIEW_BYTES} bytes); use read on ${savedPath}.`
+    } else {
+      preview = { mime: formatMime(format), bytes }
+    }
+  }
   return {
     savedPath,
     versioned,
-    message: `Generated image saved to ${savedPath}. The image is ${description}.${extensionNote}${versionNote}`,
+    message: `Generated image saved to ${savedPath}. The image is ${description}.${extensionNote}${versionNote}${transparencyNote}${previewNote}`,
+    ...(preview ? { preview } : {}),
   }
 }
